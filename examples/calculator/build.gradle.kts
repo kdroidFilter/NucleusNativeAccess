@@ -53,7 +53,10 @@ val hostTarget = when {
     System.getProperty("os.name") == "Mac OS X" -> "macosArm64"
     else -> "mingwX64"
 }
-val nativeLibPaths = "$nativeBuildDir/bin/$hostTarget/calculatorReleaseShared:$nativeBuildDir/bin/$hostTarget/calculatorDebugShared"
+val nativeLibPaths = listOf(
+    "$nativeBuildDir/bin/$hostTarget/calculatorReleaseShared",
+    "$nativeBuildDir/bin/$hostTarget/calculatorDebugShared",
+).joinToString(File.pathSeparator)
 
 nucleus.application {
     mainClass = "com.example.calculator.MainKt"
@@ -126,11 +129,13 @@ afterEvaluate {
         val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
         dependsOn("linkCalculatorReleaseShared$cap")
         doLast {
-            val src = file("build/bin/$hostTarget/calculatorReleaseShared/libcalculator.so")
-            val dst = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator/lib/libcalculator.so")
+            val libFileName = System.mapLibraryName("calculator")
+            val src = file("build/bin/$hostTarget/calculatorReleaseShared/$libFileName")
+            val graalvmOutputDir = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator")
+            val dst = graalvmOutputDir.resolve(libFileName)
             if (src.exists()) {
                 src.copyTo(dst, overwrite = true)
-                println("kne: Copied libcalculator.so to GraalVM output")
+                println("kne: Copied $libFileName to GraalVM output")
             }
         }
     }

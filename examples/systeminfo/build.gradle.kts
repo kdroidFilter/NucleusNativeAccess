@@ -59,7 +59,10 @@ kotlinNativeExport {
 }
 
 val nativeBuildDir = "${project.projectDir}/build"
-val nativeLibPaths = "$nativeBuildDir/bin/$hostTarget/systeminfoReleaseShared:$nativeBuildDir/bin/$hostTarget/systeminfoDebugShared"
+val nativeLibPaths = listOf(
+    "$nativeBuildDir/bin/$hostTarget/systeminfoReleaseShared",
+    "$nativeBuildDir/bin/$hostTarget/systeminfoDebugShared",
+).joinToString(File.pathSeparator)
 
 nucleus.application {
     mainClass = "com.example.systeminfo.MainKt"
