@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)
 
 package com.example.systeminfo
 
@@ -6,17 +6,11 @@ import kotlinx.cinterop.*
 import libnotify.*
 import platform.posix.*
 
-/**
- * Direct access to Linux-native APIs — things you cannot do from the JVM:
- *  - libnotify: real desktop notifications via D-Bus
- *  - /proc filesystem: kernel-level system information
- *  - POSIX: gethostname, sysinfo, etc.
- */
-class LinuxDesktop {
+actual class SystemDesktop {
 
     private var notifyInitialized = false
 
-    fun sendNotification(title: String, body: String, icon: String): Boolean {
+    actual fun sendNotification(title: String, body: String, icon: String): Boolean {
         if (!notifyInitialized) {
             notify_init("KotlinNativeExport")
             notifyInitialized = true
@@ -26,13 +20,13 @@ class LinuxDesktop {
         return result != 0
     }
 
-    fun getHostname(): String = memScoped {
+    actual fun getHostname(): String = memScoped {
         val buf = allocArray<ByteVar>(256)
         gethostname(buf, 256u)
         buf.toKString()
     }
 
-    fun getUptime(): Double = memScoped {
+    actual fun getUptime(): Double = memScoped {
         val fp = fopen("/proc/uptime", "r") ?: return -1.0
         val buf = allocArray<ByteVar>(64)
         fgets(buf, 64, fp)
@@ -40,11 +34,11 @@ class LinuxDesktop {
         buf.toKString().split(" ").firstOrNull()?.toDoubleOrNull() ?: -1.0
     }
 
-    fun getTotalMemoryMB(): Long = readProcValue("/proc/meminfo", "MemTotal") / 1024
+    actual fun getTotalMemoryMB(): Long = readProcValue("/proc/meminfo", "MemTotal") / 1024
 
-    fun getAvailableMemoryMB(): Long = readProcValue("/proc/meminfo", "MemAvailable") / 1024
+    actual fun getAvailableMemoryMB(): Long = readProcValue("/proc/meminfo", "MemAvailable") / 1024
 
-    fun getCpuModel(): String = memScoped {
+    actual fun getCpuModel(): String = memScoped {
         val fp = fopen("/proc/cpuinfo", "r") ?: return "Unknown"
         val buf = allocArray<ByteVar>(512)
         try {
@@ -60,7 +54,7 @@ class LinuxDesktop {
         }
     }
 
-    fun getCpuCoreCount(): Int = memScoped {
+    actual fun getCpuCoreCount(): Int = memScoped {
         val fp = fopen("/proc/cpuinfo", "r") ?: return 0
         val buf = allocArray<ByteVar>(256)
         var count = 0
@@ -71,7 +65,7 @@ class LinuxDesktop {
         count
     }
 
-    fun getKernelVersion(): String = memScoped {
+    actual fun getKernelVersion(): String = memScoped {
         val fp = fopen("/proc/version", "r") ?: return "Unknown"
         val buf = allocArray<ByteVar>(512)
         fgets(buf, 512, fp)

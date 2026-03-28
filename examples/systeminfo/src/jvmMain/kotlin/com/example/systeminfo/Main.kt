@@ -39,7 +39,7 @@ import androidx.compose.ui.window.rememberWindowState
 fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
-        title = "Linux Native System Info (via FFM)",
+        title = "Native System Info (via FFM)",
         state = rememberWindowState(width = 500.dp, height = 620.dp),
     ) {
         MaterialTheme(colors = darkColors()) {
@@ -53,8 +53,7 @@ fun main() = application {
 @Composable
 @Preview
 fun SystemInfoScreen() {
-    // LinuxDesktop uses libnotify + /proc + POSIX — all native Linux APIs
-    val desktop = remember { LinuxDesktop() }
+    val desktop = remember { SystemDesktop() }
     var hostname by remember { mutableStateOf("...") }
     var cpuModel by remember { mutableStateOf("...") }
     var cpuCores by remember { mutableStateOf(0) }
@@ -79,12 +78,12 @@ fun SystemInfoScreen() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Native Linux APIs via Kotlin/Native + FFM",
+            "Native OS APIs via Kotlin/Native + FFM",
             fontSize = 11.sp, color = Color(0xFF81C784),
             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
         )
         Text(
-            "All data below is read from /proc, POSIX, and libnotify.\nImpossible from pure JVM without JNI.",
+            "All data below is read from native OS APIs.\nImpossible from pure JVM without JNI.",
             fontSize = 12.sp, color = Color.Gray,
         )
         Spacer(Modifier.height(4.dp))
@@ -100,9 +99,9 @@ fun SystemInfoScreen() {
         Divider(color = Color.DarkGray)
         Spacer(Modifier.height(8.dp))
 
-        Text("Native Notification (libnotify -> D-Bus)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text("Native Notification", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Text(
-            "Real desktop notification via libnotify.so, not a JVM workaround.",
+            "Desktop notification via native API, not a JVM workaround.",
             fontSize = 12.sp, color = Color.Gray,
         )
 
@@ -110,7 +109,7 @@ fun SystemInfoScreen() {
             onClick = {
                 desktop.sendNotification(
                     "Kotlin/Native + FFM",
-                    "Sent from JVM -> FFM -> Kotlin/Native -> libnotify -> D-Bus",
+                    "Sent from JVM -> FFM -> Kotlin/Native -> native OS API",
                     "dialog-information",
                 )
                 notifSent = true

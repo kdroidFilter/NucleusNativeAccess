@@ -17,6 +17,15 @@ val hostTarget = when {
 kotlin {
     jvmToolchain(25)
 
+    // Suppress expect/actual classes beta warning
+    targets.all {
+        compilations.all {
+            compileTaskProvider.configure {
+                compilerOptions.freeCompilerArgs.add("-Xexpect-actual-classes")
+            }
+        }
+    }
+
     val nativeTarget = when (hostTarget) {
         "linuxX64" -> linuxX64()
         "macosArm64" -> macosArm64()
@@ -75,7 +84,7 @@ nucleus.application {
         appName = "Native System Info"
         packageName = "com.example.systeminfo"
         packageVersion = "1.0.0"
-        description = "Linux system info & notifications via Kotlin/Native + libnotify + FFM"
+        description = "System info & notifications via Kotlin/Native + FFM"
 
         linux { debMaintainer = "dev@example.com" }
         macOS { bundleID = "com.example.systeminfo"; dockName = "SystemInfo" }

@@ -22,12 +22,12 @@ class KotlinSourceParser {
 
         // Matches class declarations (excludes private/internal/protected)
         private val CLASS_RE = Regex(
-            """^(?:(?:public|open|data|abstract|sealed)\s+)*class\s+(\w+)"""
+            """^(?:(?:public|open|data|abstract|sealed|expect|actual)\s+)*class\s+(\w+)"""
         )
 
         // Matches fun declarations
         private val FUN_RE = Regex(
-            """^(?:(?:public|open|override|operator|inline)\s+)*fun\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*([\w.<>?,\s]+?))?(?:\s*[{=]|$)"""
+            """^(?:(?:public|open|override|operator|inline|actual)\s+)*fun\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*([\w.<>?,\s]+?))?(?:\s*[{=]|$)"""
         )
 
         // Matches property declarations inside a class
@@ -88,6 +88,7 @@ class KotlinSourceParser {
             if (line.isEmpty() || line.startsWith("@") || line.startsWith("import ")) continue
 
             val isPrivate = SKIP_MODIFIERS.any { line.startsWith("$it ") }
+            val isExpect = line.startsWith("expect ") || line.contains(" expect ")
 
             // Package
             PACKAGE_RE.find(line)?.let { packageName = it.groupValues[1] }
@@ -96,8 +97,8 @@ class KotlinSourceParser {
             val openCount = line.count { it == '{' }
             val closeCount = line.count { it == '}' }
 
-            // Class declaration
-            if (!isPrivate) {
+            // Class declaration (skip expect classes — only actual implementations generate bridges)
+            if (!isPrivate && !isExpect) {
                 CLASS_RE.find(line)?.let { match ->
                     val name = match.groupValues[1]
                     // Only top-level classes (braceDepth == 0)
