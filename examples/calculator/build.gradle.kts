@@ -141,11 +141,19 @@ afterEvaluate {
                 src.copyTo(appBundleMacOS.resolve(libFileName), overwrite = true)
                 println("kne: Copied $libFileName to $appBundleMacOS")
             }
-            // Also copy next to the bare native-image executable (for non-bundled runs)
+            // Copy next to the native-image compiler working dir (for compilation)
             val nativeCompileDir = file("build/compose/tmp/main/graalvm/nativeCompile")
             if (nativeCompileDir.exists()) {
                 src.copyTo(nativeCompileDir.resolve(libFileName), overwrite = true)
                 println("kne: Copied $libFileName to $nativeCompileDir")
+            }
+            // Copy next to the final native-image executable (for runtime)
+            val outputDir = file("build/compose/tmp/main/graalvm/output")
+            if (outputDir.exists()) {
+                outputDir.listFiles()?.filter { it.isDirectory }?.forEach { appDir ->
+                    src.copyTo(appDir.resolve(libFileName), overwrite = true)
+                    println("kne: Copied $libFileName to $appDir")
+                }
             }
         }
     }
