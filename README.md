@@ -129,6 +129,8 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `String` | `ADDRESS` | output-buffer pattern for returns |
 | `Unit` | void | `FunctionDescriptor.ofVoid(...)` |
 | Classes | `JAVA_LONG` | opaque handle via `StableRef` |
+| Enums | `JAVA_INT` | ordinal mapping |
+| Class references | `JAVA_LONG` | pass/return handles between classes |
 
 ## Configuration reference
 
@@ -267,22 +269,109 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 ## Phase 2 roadmap
 
-The current implementation (Phase 1) covers the core use case. Phase 2 will add:
+The current implementation (Phase 1) covers the core use case: classes, methods, properties, top-level functions with primitive types + String + Unit. Phase 2 extends the type system, improves analysis, and adds deployment features.
 
-### Planned
+Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
 
-- **Inheritance & interfaces** &mdash; generate JVM interfaces for Kotlin interfaces, proxy dispatch for open classes
-- **Constructor overloads** &mdash; detect default parameter values and generate no-arg / partial overloads on JVM
-- **Generics** &mdash; type-erased proxy generation for generic classes
-- **Nullable types** &mdash; proper `null` handling across FFM boundary (currently treated as non-null)
-- **Enums & sealed classes** &mdash; map to JVM enum/sealed hierarchy
-- **Lambdas & callbacks** &mdash; FFM upcall handles for passing JVM lambdas to native
-- **Exceptions** &mdash; catch on native side, propagate error code + message to JVM
-- **Kotlin Analysis API** &mdash; replace regex source parser with proper K2 analysis (like swift-export-standalone) for full type resolution
-- **GraalVM reachability-metadata generation** &mdash; auto-generate `reachability-metadata.json` with FFM downcall descriptors for native-image support (currently must be written manually)
-- **Automatic native lib bundling** &mdash; embed `.so`/`.dylib` in the JAR and extract at runtime, including GraalVM native-image output dir
-- **Multi-target support** &mdash; fat JARs with platform-specific native libs
-- **Companion objects** &mdash; expose as static methods on the JVM proxy
+### Phase 2a &mdash; Foundation (unblocks everything else)
+
+- [ ] **Kotlin Analysis API (K2)** &mdash; replace regex `KotlinSourceParser` with proper K2 symbol extraction
+  - [ ] Add `kotlin-analysis-api` dependency, set up `analyze {}` session lifecycle
+  - [ ] Create a `KneSession` facade (inspired by SIR's `SirSession`) aggregating providers: `DeclarationProvider`, `TypeProvider`, `ParentProvider`
+  - [ ] Dispatch `KaDeclarationSymbol` kinds &rarr; `KneClass`, `KneFunction`, `KneProperty` (like `SirDeclarationFromKtSymbolProvider`)
+  - [ ] Extract full type information: nullability, generics bounds, modality, annotations
+  - [ ] Detect `@Throws` annotation for exception propagation
+  - [ ] Extract companion object members via `combinedDeclaredMemberScope`
+  - [ ] Keep regex parser as fallback (flag `useAnalysisApi = true|false` in extension DSL)
+
+- [ ] **Extend the IR model (`KneIR.kt`)** &mdash; add missing concepts to represent Phase 2 features
+  - [ ] `KneType.NULLABLE(inner: KneType)` &mdash; wrapper type for nullable values
+  - [ ] `KneType.ENUM(fqName)`, `KneType.SEALED(fqName, subclasses)` &mdash; algebraic types
+  - [ ] `KneType.FUNCTION(params, returnType)` &mdash; function/lambda types
+  - [ ] `KneInterface` &mdash; Kotlin interface declaration (protocols in SIR)
+  - [ ] `KneClass.superClass`, `KneClass.interfaces`, `KneClass.modality` (OPEN / FINAL / ABSTRACT / SEALED)
+  - [ ] `KneClass.companionMembers: List<KneFunction | KneProperty>` &mdash; flattened static members
+  - [ ] `KneConstructor.overloads` &mdash; list of parameter combinations (from default params)
+  - [ ] `KneFunction.errorType` &mdash; nullable, present when `@Throws` detected
+  - [ ] `KneEnum` with `cases: List<KneEnumCase>` (name, ordinal, associated values)
+
+### Phase 2b &mdash; Type system extensions
+
+- [ ] **Nullable types** &mdash; proper `null` handling across FFM boundary
+  - [ ] Native bridge: nullable primitives boxed as `Long` (0 = null, otherwise value + 1), nullable objects as 0L handle = null
+  - [ ] FFM proxy: check for null before downcall, return `null` on 0L handle
+  - [ ] String params/returns: null pointer convention (`MemorySegment.NULL`)
+
+- [x] **Enums** &mdash; map Kotlin `enum class` to JVM enum
+  - [x] Native bridge: `@CName` function returning ordinal `Int` + name `String` (output-buffer)
+  - [x] FFM proxy: generate JVM `enum class` with `values()` / `valueOf()`, backed by ordinal downcall
+  - [x] Support enum as parameter type (pass ordinal, reconstruct on native side)
+
+- [ ] **Sealed classes** &mdash; map to JVM sealed interface + data classes (inspired by swift-java's sealed interface + records pattern)
+  - [ ] Native bridge: discriminator function returning subclass tag `Int`
+  - [ ] FFM proxy: `sealed interface` with per-subclass `data class` implementing it
+  - [ ] Pattern: `getDiscriminator()` downcall &rarr; `when(tag)` dispatch on JVM side
+
+### Phase 2c &mdash; OOP features
+
+- [ ] **Inheritance & open classes** &mdash; preserve class hierarchy on JVM
+  - [ ] IR: track `superClass` reference and `modality`
+  - [ ] Native bridge: virtual dispatch via `StableRef` (actual object type preserved)
+  - [ ] FFM proxy: generate `open class` with `override` methods where applicable
+  - [ ] Upcast support: child handle usable where parent type expected
+
+- [ ] **Interfaces** &mdash; generate JVM interfaces for Kotlin interfaces
+  - [ ] IR: `KneInterface` with method signatures (no body)
+  - [ ] FFM proxy: generate `interface` + ensure implementing classes declare `override`
+  - [ ] No native bridge needed for interface declarations themselves (only implementing classes)
+
+- [x] **Companion objects** &mdash; expose as static methods/properties on JVM proxy
+  - [x] Extract companion members (via K2 `combinedDeclaredMemberScope` or regex `companion object` block)
+  - [x] Native bridge: `@CName` functions without handle parameter (like top-level)
+  - [x] FFM proxy: `companion object` with MethodHandles (no instance needed)
+
+- [ ] **Constructor overloads** &mdash; generate overloads from default parameter values
+  - [ ] K2: detect `hasDefaultValue` on `KaValueParameterSymbol`
+  - [ ] Generate N overloads: full params, drop last default, drop last 2, etc.
+  - [ ] Native bridge: one `@CName` per overload, each calling `ClassName(...)` with appropriate args
+  - [ ] FFM proxy: multiple `operator fun invoke(...)` overloads in companion
+
+### Phase 2d &mdash; Advanced type features
+
+- [ ] **Exceptions** &mdash; catch on native side, propagate to JVM
+  - [ ] Native bridge: wrap body in `try/catch`, write error code + message to out-params (inspired by swift-java's `throwAsException` / swift-export's `errorType` out-parameter)
+  - [ ] FFM proxy: check error code after downcall, throw `KotlinNativeException(message)` on JVM
+  - [ ] Only generate for functions annotated with `@Throws`
+
+- [ ] **Lambdas & callbacks** &mdash; FFM upcall handles for JVM &rarr; native callbacks
+  - [ ] IR: `KneType.FUNCTION` with param/return types
+  - [ ] FFM proxy: accept `@FunctionalInterface` parameter, create upcall stub via `Linker.nativeLinker().upcallStub()` (swift-java pattern)
+  - [ ] Native bridge: receive `CPointer<CFunction<...>>`, invoke as C function pointer
+  - [ ] Lifetime: upcall stub tied to `Arena.ofConfined()`, freed after native call returns
+
+- [ ] **Generics** &mdash; type-erased proxy generation
+  - [ ] IR: `KneClass.typeParameters` with optional upper bound
+  - [ ] Single upper bound &rarr; use bound type; no bound &rarr; `Any` (like SIR)
+  - [ ] Native bridge: erased to upper bound at bridge level (same `StableRef<Any>`)
+  - [ ] FFM proxy: generate generic class with unchecked casts on return values
+  - [ ] Multiple bounds &rarr; unsupported (warn and skip, like swift-export)
+
+### Phase 2e &mdash; Packaging & deployment
+
+- [ ] **Automatic native lib bundling** &mdash; single-JAR deployment
+  - [ ] Embed `.so`/`.dylib`/`.dll` in JAR under `META-INF/native/{os}-{arch}/`
+  - [ ] `KneRuntime.loadLibrary()`: extract to temp dir at startup, load via `System.load()`
+  - [ ] Detect GraalVM native-image: skip extraction, use `SymbolLookup.loaderLookup()` (swift-java pattern)
+
+- [ ] **GraalVM reachability-metadata generation** &mdash; auto-generate for native-image
+  - [ ] Generate `reachability-metadata.json` listing all FFM downcall descriptors
+  - [ ] Output to `META-INF/native-image/{groupId}/{artifactId}/` in JAR
+  - [ ] Register generated proxy classes for reflection if needed
+
+- [ ] **Multi-target support** &mdash; fat JARs with per-platform native libs
+  - [ ] Detect all configured `KotlinNativeTarget`s in the project
+  - [ ] Bundle each platform's shared lib under `META-INF/native/{os}-{arch}/`
+  - [ ] `KneRuntime`: detect current OS/arch at startup, load correct variant
 
 ### Won't do (out of scope)
 

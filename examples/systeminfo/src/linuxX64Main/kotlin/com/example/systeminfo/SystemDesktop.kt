@@ -5,6 +5,7 @@ package com.example.systeminfo
 import kotlinx.cinterop.*
 import libnotify.*
 import platform.posix.*
+import systray.*
 
 actual class SystemDesktop {
 
@@ -73,9 +74,30 @@ actual class SystemDesktop {
         buf.toKString().trim().substringBefore("(").trim()
     }
 
-    actual fun showSystemTray(): Boolean = false // No native tray support on Linux without GTK
+    actual fun showSystemTray(): Boolean = memScoped {
+        val labels = listOf(
+            "Hostname: ${getHostname()}",
+            "CPU: ${getCpuModel()}",
+            "Cores: ${getCpuCoreCount()}",
+            "Memory: ${getAvailableMemoryMB()} MB / ${getTotalMemoryMB()} MB",
+            "Uptime: ${formatUptime(getUptime())}",
+            "Kernel: ${getKernelVersion()}"
+        )
+        val cLabels = allocArray<CPointerVar<ByteVar>>(labels.size)
+        labels.forEachIndexed { i, label -> cLabels[i] = label.cstr.ptr }
+        systray_show_dbus("System Info", cLabels, labels.size) != 0
+    }
 
-    actual fun hideSystemTray(): Boolean = false
+    actual fun hideSystemTray(): Boolean {
+        return systray_hide_dbus() != 0
+    }
+
+    private fun formatUptime(seconds: Double): String {
+        if (seconds < 0) return "N/A"
+        val h = (seconds / 3600).toInt()
+        val m = ((seconds % 3600) / 60).toInt()
+        return "${h}h ${m}m"
+    }
 
     private fun readProcValue(path: String, key: String): Long = memScoped {
         val fp = fopen(path, "r") ?: return 0

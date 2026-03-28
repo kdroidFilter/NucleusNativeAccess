@@ -1,8 +1,10 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin.codegen
 
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneProperty
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
 
@@ -38,6 +40,11 @@ class FfmProxyGenerator {
         // One file per class
         module.classes.forEach { cls ->
             files["${cls.simpleName}.kt"] = generateClassProxy(cls, module, jvmPackage)
+        }
+
+        // One file per enum
+        module.enums.forEach { enum ->
+            files["${enum.simpleName}.kt"] = generateEnumProxy(enum, module, jvmPackage)
         }
 
         // Top-level functions → one object per module
@@ -168,6 +175,31 @@ class FfmProxyGenerator {
             }
         }
 
+        // Companion method/property handles
+        cls.companionMethods.forEach { method ->
+            val handleName = "COMPANION_${method.name.uppercase()}_HANDLE"
+            val descriptor = buildTopLevelDescriptor(method)
+            appendLine("        private val $handleName: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_${n}_companion_${method.name}\",")
+            appendLine("                $descriptor)")
+            appendLine("        }")
+        }
+        cls.companionProperties.forEach { prop ->
+            val getHandleName = "COMPANION_GET_${prop.name.uppercase()}_HANDLE"
+            val getDescriptor = buildCompanionGetterDescriptor(prop)
+            appendLine("        private val $getHandleName: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_${n}_companion_get_${prop.name}\",")
+            appendLine("                $getDescriptor)")
+            appendLine("        }")
+            if (prop.mutable) {
+                val setHandleName = "COMPANION_SET_${prop.name.uppercase()}_HANDLE"
+                appendLine("        private val $setHandleName: MethodHandle by lazy {")
+                appendLine("            KneRuntime.handle(\"${p}_${n}_companion_set_${prop.name}\",")
+                appendLine("                FunctionDescriptor.ofVoid(${prop.type.ffmLayout}))")
+                appendLine("        }")
+            }
+        }
+
         // Factory function (operator invoke = transparent construction)
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
@@ -181,18 +213,33 @@ class FfmProxyGenerator {
             appendStringInvokeArgsAlloc("                ", cls.constructor.params)
             val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
             appendLine("                val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
-            appendLine("                val obj = $n(h)")
-            appendLine("                CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
-            appendLine("                return obj")
+            appendLine("                return fromNativeHandle(h)")
             appendLine("            }")
         } else {
             val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
             appendLine("            val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
-            appendLine("            val obj = $n(h)")
-            appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
-            appendLine("            return obj")
+            appendLine("            return fromNativeHandle(h)")
         }
         appendLine("        }")
+        appendLine()
+
+        // fromNativeHandle factory for wrapping handles returned by other methods
+        appendLine("        internal fun fromNativeHandle(h: Long): $n {")
+        appendLine("            val obj = $n(h)")
+        appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
+        appendLine("            return obj")
+        appendLine("        }")
+
+        // Companion methods
+        cls.companionMethods.forEach { method ->
+            appendCompanionMethodProxy(method)
+        }
+
+        // Companion properties
+        cls.companionProperties.forEach { prop ->
+            appendCompanionPropertyProxy(prop)
+        }
+
         appendLine("    }")
         appendLine()
 
@@ -254,19 +301,80 @@ class FfmProxyGenerator {
         if (prop.mutable) {
             val setHandleName = "SET_${prop.name.uppercase()}_HANDLE"
             appendLine("        set(value) {")
-            when (prop.type) {
-                KneType.STRING -> {
-                    appendLine("            Arena.ofConfined().use { arena ->")
-                    appendLine("                val valueSeg = arena.allocateFrom(value)")
-                    appendLine("                $setHandleName.invoke(handle, valueSeg)")
-                    appendLine("            }")
-                }
-                KneType.BOOLEAN -> appendLine("            $setHandleName.invoke(handle, if (value) 1 else 0)")
-                else -> appendLine("            $setHandleName.invoke(handle, value)")
-            }
+            appendSetterInvoke("            ", setHandleName, prop.type, "handle")
             appendLine("        }")
         }
         appendLine()
+    }
+
+    // ── Companion method/property proxies ─────────────────────────────────────
+
+    private fun StringBuilder.appendCompanionMethodProxy(fn: KneFunction) {
+        val handleName = "COMPANION_${fn.name.uppercase()}_HANDLE"
+        val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+
+        appendLine()
+        appendLine("        fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
+
+        val needsArena = fn.params.any { it.type == KneType.STRING } || fn.returnType == KneType.STRING
+        if (needsArena) {
+            appendLine("            Arena.ofConfined().use { arena ->")
+            appendStringInvokeArgsAlloc("                ", fn.params)
+            val invokeArgs = buildTopLevelInvokeArgs(fn)
+            appendCallAndReturn("                ", fn.returnType, handleName, invokeArgs)
+            appendLine("            }")
+        } else {
+            val invokeArgs = fn.params.joinToString(", ") { p -> buildJvmInvokeArg(p.name, p.type) }
+            appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
+        }
+
+        appendLine("        }")
+    }
+
+    private fun StringBuilder.appendCompanionPropertyProxy(prop: KneProperty) {
+        val getHandleName = "COMPANION_GET_${prop.name.uppercase()}_HANDLE"
+        appendLine()
+        if (prop.mutable) {
+            appendLine("        var ${prop.name}: ${prop.type.jvmTypeName}")
+        } else {
+            appendLine("        val ${prop.name}: ${prop.type.jvmTypeName}")
+        }
+        appendLine("            get() {")
+        val needsArena = prop.type == KneType.STRING
+        if (needsArena) {
+            appendLine("                Arena.ofConfined().use { arena ->")
+            appendLine("                    val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+            appendLine("                    $getHandleName.invoke(buf, $STRING_BUF_SIZE)")
+            appendLine("                    return buf.getString(0)")
+            appendLine("                }")
+        } else {
+            appendCallAndReturn("                ", prop.type, getHandleName, "")
+        }
+        appendLine("            }")
+
+        if (prop.mutable) {
+            val setHandleName = "COMPANION_SET_${prop.name.uppercase()}_HANDLE"
+            appendLine("            set(value) {")
+            appendSetterInvoke("                ", setHandleName, prop.type, null)
+            appendLine("            }")
+        }
+    }
+
+    // ── Enum proxy ────────────────────────────────────────────────────────────
+
+    private fun generateEnumProxy(enum: KneEnum, module: KneModule, pkg: String): String = buildString {
+        val p = module.libName
+        val n = enum.simpleName
+
+        appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
+        appendLine("package $pkg")
+        appendLine()
+        appendLine("enum class $n {")
+        enum.entries.forEachIndexed { idx, entry ->
+            val separator = if (idx < enum.entries.size - 1) "," else ";"
+            appendLine("    $entry$separator")
+        }
+        appendLine("}")
     }
 
     // ── Top-level function object ──────────────────────────────────────────────
@@ -314,10 +422,7 @@ class FfmProxyGenerator {
                 appendLine("        }")
             } else {
                 val invokeArgs = fn.params.joinToString(", ") { p ->
-                    when (p.type) {
-                        KneType.BOOLEAN -> "if (${p.name}) 1 else 0"
-                        else -> p.name
-                    }
+                    buildJvmInvokeArg(p.name, p.type)
                 }
                 appendCallAndReturn("        ", fn.returnType, handleName, invokeArgs)
             }
@@ -354,6 +459,16 @@ class FfmProxyGenerator {
         return buildDescriptor(prop.type, paramLayouts)
     }
 
+    private fun buildCompanionGetterDescriptor(prop: KneProperty): String {
+        val paramLayouts = buildList {
+            if (prop.type == KneType.STRING) {
+                add("ADDRESS") // outBuf
+                add("JAVA_INT") // outLen
+            }
+        }
+        return buildDescriptor(prop.type, paramLayouts)
+    }
+
     private fun buildTopLevelDescriptor(fn: KneFunction): String {
         val paramLayouts = buildList {
             fn.params.forEach { p -> add(p.type.ffmLayout) }
@@ -381,27 +496,24 @@ class FfmProxyGenerator {
 
     // ── Invoke arg builders ───────────────────────────────────────────────────
 
-    private fun buildCtorInvokeArgs(params: List<io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam>): String {
+    /** Build the JVM invoke argument for a single parameter. */
+    private fun buildJvmInvokeArg(name: String, type: KneType): String = when (type) {
+        KneType.STRING -> "${name}Seg"
+        KneType.BOOLEAN -> "if ($name) 1 else 0"
+        is KneType.OBJECT -> "$name.handle"
+        is KneType.ENUM -> "$name.ordinal"
+        else -> name
+    }
+
+    private fun buildCtorInvokeArgs(params: List<KneParam>): String {
         if (params.isEmpty()) return ""
-        return params.joinToString(", ") { p ->
-            when (p.type) {
-                KneType.STRING -> "${p.name}Seg"
-                KneType.BOOLEAN -> "if (${p.name}) 1 else 0"
-                else -> p.name
-            }
-        }
+        return params.joinToString(", ") { p -> buildJvmInvokeArg(p.name, p.type) }
     }
 
     private fun buildClassInvokeArgs(fn: KneFunction): String {
         val args = buildList {
             add("handle")
-            fn.params.forEach { p ->
-                when (p.type) {
-                    KneType.STRING -> add("${p.name}Seg")
-                    KneType.BOOLEAN -> add("if (${p.name}) 1 else 0")
-                    else -> add(p.name)
-                }
-            }
+            fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
             if (fn.returnType == KneType.STRING) {
                 add("buf")
                 add("$STRING_BUF_SIZE")
@@ -413,25 +525,14 @@ class FfmProxyGenerator {
     private fun buildClassInvokeArgsDirect(fn: KneFunction): String {
         val args = buildList {
             add("handle")
-            fn.params.forEach { p ->
-                when (p.type) {
-                    KneType.BOOLEAN -> add("if (${p.name}) 1 else 0")
-                    else -> add(p.name)
-                }
-            }
+            fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
         }
         return args.joinToString(", ")
     }
 
     private fun buildTopLevelInvokeArgs(fn: KneFunction): String {
         val args = buildList {
-            fn.params.forEach { p ->
-                when (p.type) {
-                    KneType.STRING -> add("${p.name}Seg")
-                    KneType.BOOLEAN -> add("if (${p.name}) 1 else 0")
-                    else -> add(p.name)
-                }
-            }
+            fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
             if (fn.returnType == KneType.STRING) {
                 add("buf")
                 add("$STRING_BUF_SIZE")
@@ -446,7 +547,7 @@ class FfmProxyGenerator {
      * Emits Arena allocations for all String parameters.
      * Each String param becomes a `val <name>Seg = arena.allocateFrom(<name>)`.
      */
-    private fun StringBuilder.appendStringInvokeArgsAlloc(indent: String, params: List<io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam>) {
+    private fun StringBuilder.appendStringInvokeArgsAlloc(indent: String, params: List<KneParam>) {
         params.filter { it.type == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = arena.allocateFrom(${p.name})")
         }
@@ -476,6 +577,30 @@ class FfmProxyGenerator {
             KneType.FLOAT -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Float")
             KneType.BYTE -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Byte")
             KneType.SHORT -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Short")
+            is KneType.OBJECT -> {
+                appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return ${returnType.simpleName}.fromNativeHandle(resultHandle)")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}return ${returnType.simpleName}.entries[$handleName.invoke($invokeArgs) as Int]")
+            }
+        }
+    }
+
+    /** Emits a setter invoke with proper type conversion. */
+    private fun StringBuilder.appendSetterInvoke(indent: String, handleName: String, type: KneType, handleArg: String?) {
+        val prefix = if (handleArg != null) "$handleArg, " else ""
+        when (type) {
+            KneType.STRING -> {
+                appendLine("${indent}Arena.ofConfined().use { arena ->")
+                appendLine("${indent}    val valueSeg = arena.allocateFrom(value)")
+                appendLine("${indent}    $handleName.invoke(${prefix}valueSeg)")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> appendLine("${indent}$handleName.invoke(${prefix}if (value) 1 else 0)")
+            is KneType.OBJECT -> appendLine("${indent}$handleName.invoke(${prefix}value.handle)")
+            is KneType.ENUM -> appendLine("${indent}$handleName.invoke(${prefix}value.ordinal)")
+            else -> appendLine("${indent}$handleName.invoke(${prefix}value)")
         }
     }
 }

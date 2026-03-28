@@ -6,6 +6,7 @@ data class KneModule(
     val libName: String,
     val packages: Set<String>,
     val classes: List<KneClass>,
+    val enums: List<KneEnum>,
     val functions: List<KneFunction>,
 ) : Serializable
 
@@ -15,6 +16,14 @@ data class KneClass(
     val constructor: KneConstructor,
     val methods: List<KneFunction>,
     val properties: List<KneProperty>,
+    val companionMethods: List<KneFunction> = emptyList(),
+    val companionProperties: List<KneProperty> = emptyList(),
+) : Serializable
+
+data class KneEnum(
+    val simpleName: String,
+    val fqName: String,
+    val entries: List<String>,
 ) : Serializable
 
 data class KneConstructor(
@@ -48,6 +57,8 @@ sealed class KneType : Serializable {
     object SHORT : KneType()
     object STRING : KneType()
     object UNIT : KneType()
+    data class OBJECT(val fqName: String, val simpleName: String) : KneType()
+    data class ENUM(val fqName: String, val simpleName: String) : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -61,6 +72,8 @@ sealed class KneType : Serializable {
             SHORT -> "JAVA_SHORT"
             STRING -> "ADDRESS" // char* (input) or output buffer pattern (return)
             UNIT -> "" // void — used with FunctionDescriptor.ofVoid(...)
+            is OBJECT -> "JAVA_LONG" // opaque handle
+            is ENUM -> "JAVA_INT" // ordinal
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -75,6 +88,8 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "String"
             UNIT -> "Unit"
+            is OBJECT -> simpleName
+            is ENUM -> simpleName
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -89,5 +104,7 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "CPointer<ByteVar>?" // null-terminated char*
             UNIT -> "Unit"
+            is OBJECT -> "Long" // opaque handle
+            is ENUM -> "Int" // ordinal
         }
 }

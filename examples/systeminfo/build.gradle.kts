@@ -38,6 +38,9 @@ kotlin {
             val libnotify by creating {
                 defFile(project.file("src/nativeInterop/cinterop/libnotify.def"))
             }
+            val systray by creating {
+                defFile(project.file("src/nativeInterop/cinterop/systray.def"))
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin.codegen
 
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneProperty
@@ -32,10 +33,11 @@ class NativeBridgeGenerator {
         appendLine()
 
         module.classes.forEach { cls -> appendClass(cls, module.libName) }
+        module.enums.forEach { enum -> appendEnum(enum, module.libName) }
         module.functions.forEach { fn -> appendTopLevelFunction(fn, module.libName) }
     }
 
-    // ── Classes ──────────────────────────────────────────────────────────────
+    // ── Classes ���─────────────────────────────────────────────────────────────
 
     private fun StringBuilder.appendClass(cls: KneClass, prefix: String) {
         val p = prefix
@@ -47,11 +49,7 @@ class NativeBridgeGenerator {
             "${param.name}: ${param.type.nativeBridgeType}"
         }
         val ctorCall = cls.constructor.params.joinToString(", ") { param ->
-            when (param.type) {
-                KneType.BOOLEAN -> "${param.name} != 0"
-                KneType.STRING -> "${param.name}?.toKString() ?: \"\""
-                else -> param.name
-            }
+            buildParamConversion(param.name, param.type)
         }
         appendLine("@CName(\"${p}_${n}_new\")")
         appendLine("fun `${p}_${n}_new`($ctorArgs): Long =")
@@ -69,11 +67,16 @@ class NativeBridgeGenerator {
 
         // Properties — generate getter (and setter if mutable)
         cls.properties.forEach { prop -> appendProperty(prop, cls, p) }
+
+        // Companion methods
+        cls.companionMethods.forEach { method -> appendCompanionMethod(method, cls, p) }
+
+        // Companion properties
+        cls.companionProperties.forEach { prop -> appendCompanionProperty(prop, cls, p) }
     }
 
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
         val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
-        val hasStringParam = fn.params.any { it.type == KneType.STRING }
         val returnsString = fn.returnType == KneType.STRING
 
         // Build C-level parameter list
@@ -81,36 +84,18 @@ class NativeBridgeGenerator {
         val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
         val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams"
 
-        val returnDecl = when {
-            returnsString -> ": Int"
-            fn.returnType == KneType.UNIT -> ""
-            else -> ": ${fn.returnType.nativeBridgeType}"
-        }
+        val returnDecl = buildReturnDecl(fn.returnType)
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
 
-        // Convert String params
-        fn.params.filter { it.type == KneType.STRING }.forEach { p ->
-            appendLine("    val ${p.name}Str = ${p.name}?.toKString() ?: \"\"")
-        }
+        // Convert object params (recover from StableRef)
+        appendObjectParamConversions(fn)
 
-        val callArgs = fn.params.joinToString(", ") { p ->
-            when (p.type) {
-                KneType.STRING -> "${p.name}Str"
-                KneType.BOOLEAN -> "${p.name} != 0"
-                else -> p.name
-            }
-        }
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
 
-        when {
-            returnsString -> appendStringReturn("obj.${fn.name}($callArgs)")
-            fn.returnType == KneType.UNIT -> appendLine("    obj.${fn.name}($callArgs)")
-            fn.returnType == KneType.BOOLEAN ->
-                appendLine("    return if (obj.${fn.name}($callArgs)) 1 else 0")
-            else -> appendLine("    return obj.${fn.name}($callArgs)")
-        }
+        appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
 
         appendLine("}")
         appendLine()
@@ -119,20 +104,12 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
         val getterName = "${prefix}_${cls.simpleName}_get_${prop.name}"
         val extraParams = if (prop.type == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
-        val returnDecl = when {
-            prop.type == KneType.STRING -> ": Int"
-            prop.type == KneType.UNIT -> ""
-            else -> ": ${prop.type.nativeBridgeType}"
-        }
+        val returnDecl = buildReturnDecl(prop.type)
 
         appendLine("@CName(\"$getterName\")")
         appendLine("fun `$getterName`(handle: Long$extraParams)$returnDecl {")
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
-        when {
-            prop.type == KneType.STRING -> appendStringReturn("obj.${prop.name}")
-            prop.type == KneType.BOOLEAN -> appendLine("    return if (obj.${prop.name}) 1 else 0")
-            else -> appendLine("    return obj.${prop.name}")
-        }
+        appendReturnStatement("obj.${prop.name}", prop.type)
         appendLine("}")
         appendLine()
 
@@ -142,14 +119,79 @@ class NativeBridgeGenerator {
             appendLine("@CName(\"$setterName\")")
             appendLine("fun `$setterName`(handle: Long, $valueParam) {")
             appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
-            when (prop.type) {
-                KneType.STRING -> appendLine("    obj.${prop.name} = value?.toKString() ?: \"\"")
-                KneType.BOOLEAN -> appendLine("    obj.${prop.name} = value != 0")
-                else -> appendLine("    obj.${prop.name} = value")
-            }
+            appendSetterBody("obj.${prop.name}", prop.type)
             appendLine("}")
             appendLine()
         }
+    }
+
+    // ── Companion methods/properties ────────���────────────────────────────────
+
+    private fun StringBuilder.appendCompanionMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val symbolName = "${prefix}_${cls.simpleName}_companion_${fn.name}"
+        val returnsString = fn.returnType == KneType.STRING
+
+        val extraParams = if (returnsString) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
+        val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
+        val allParams = "$paramList$extraParams".trimStart(',', ' ')
+
+        val returnDecl = buildReturnDecl(fn.returnType)
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($allParams)$returnDecl {")
+
+        // Convert object params
+        appendObjectParamConversions(fn)
+
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
+
+        appendReturnStatement("${cls.fqName}.${fn.name}($callArgs)", fn.returnType)
+
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendCompanionProperty(prop: KneProperty, cls: KneClass, prefix: String) {
+        val getterName = "${prefix}_${cls.simpleName}_companion_get_${prop.name}"
+        val getterParams = if (prop.type == KneType.STRING) "outBuf: CPointer<ByteVar>?, outLen: Int" else ""
+        val returnDecl = buildReturnDecl(prop.type)
+
+        appendLine("@CName(\"$getterName\")")
+        appendLine("fun `$getterName`($getterParams)$returnDecl {")
+        // Clean up empty param list
+        appendReturnStatement("${cls.fqName}.${prop.name}", prop.type)
+        appendLine("}")
+        appendLine()
+
+        if (prop.mutable) {
+            val setterName = "${prefix}_${cls.simpleName}_companion_set_${prop.name}"
+            val valueParam = "value: ${prop.type.nativeBridgeType}"
+            appendLine("@CName(\"$setterName\")")
+            appendLine("fun `$setterName`($valueParam) {")
+            appendSetterBody("${cls.fqName}.${prop.name}", prop.type)
+            appendLine("}")
+            appendLine()
+        }
+    }
+
+    // ── Enums ────────────────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendEnum(enum: KneEnum, prefix: String) {
+        val p = prefix
+        val n = enum.simpleName
+        val fq = enum.fqName
+
+        // Get name from ordinal (string output-buffer pattern)
+        appendLine("@CName(\"${p}_${n}_name\")")
+        appendLine("fun `${p}_${n}_name`(ordinal: Int, outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
+        appendStringReturn("$fq.entries[ordinal].name")
+        appendLine("}")
+        appendLine()
+
+        // Get entry count
+        appendLine("@CName(\"${p}_${n}_count\")")
+        appendLine("fun `${p}_${n}_count`(): Int = $fq.entries.size")
+        appendLine()
     }
 
     // ── Top-level functions ───────────────────────────────────────────────────
@@ -161,40 +203,84 @@ class NativeBridgeGenerator {
         val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
         val allParams = "$paramList$extraParams"
 
-        val returnDecl = when {
-            returnsString -> ": Int"
-            fn.returnType == KneType.UNIT -> ""
-            else -> ": ${fn.returnType.nativeBridgeType}"
-        }
+        val returnDecl = buildReturnDecl(fn.returnType)
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
 
-        fn.params.filter { it.type == KneType.STRING }.forEach { p ->
-            appendLine("    val ${p.name}Str = ${p.name}?.toKString() ?: \"\"")
-        }
+        // Convert object params
+        appendObjectParamConversions(fn)
 
-        val callArgs = fn.params.joinToString(", ") { p ->
-            when (p.type) {
-                KneType.STRING -> "${p.name}Str"
-                KneType.BOOLEAN -> "${p.name} != 0"
-                else -> p.name
-            }
-        }
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
 
-        when {
-            returnsString -> appendStringReturn("${fn.name}($callArgs)")
-            fn.returnType == KneType.UNIT -> appendLine("    ${fn.name}($callArgs)")
-            fn.returnType == KneType.BOOLEAN ->
-                appendLine("    return if (${fn.name}($callArgs)) 1 else 0")
-            else -> appendLine("    return ${fn.name}($callArgs)")
-        }
+        appendReturnStatement("${fn.name}($callArgs)", fn.returnType)
 
         appendLine("}")
         appendLine()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Build the return type declaration for a bridge function. */
+    private fun buildReturnDecl(type: KneType): String = when {
+        type == KneType.STRING -> ": Int"
+        type == KneType.UNIT -> ""
+        type is KneType.OBJECT -> ": Long"
+        type is KneType.ENUM -> ": Int"
+        else -> ": ${type.nativeBridgeType}"
+    }
+
+    /** Convert a parameter value at the call site. */
+    private fun buildParamConversion(paramName: String, type: KneType): String = when (type) {
+        KneType.BOOLEAN -> "$paramName != 0"
+        KneType.STRING -> "$paramName?.toKString() ?: \"\""
+        is KneType.OBJECT -> "${paramName}Obj"
+        is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
+        else -> paramName
+    }
+
+    /** Build the call argument expression for a parameter. */
+    private fun buildCallArg(paramName: String, type: KneType): String = when (type) {
+        KneType.STRING -> "${paramName}Str"
+        KneType.BOOLEAN -> "$paramName != 0"
+        is KneType.OBJECT -> "${paramName}Obj"
+        is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
+        else -> paramName
+    }
+
+    /** Emit local variable conversions for String and Object params. */
+    private fun StringBuilder.appendObjectParamConversions(fn: KneFunction) {
+        fn.params.filter { it.type == KneType.STRING }.forEach { p ->
+            appendLine("    val ${p.name}Str = ${p.name}?.toKString() ?: \"\"")
+        }
+        fn.params.filter { it.type is KneType.OBJECT }.forEach { p ->
+            val objType = p.type as KneType.OBJECT
+            appendLine("    val ${p.name}Obj = ${p.name}.toCPointer<COpaque>()!!.asStableRef<${objType.fqName}>().get()")
+        }
+    }
+
+    /** Emit the return statement for a given expression and type. */
+    private fun StringBuilder.appendReturnStatement(expr: String, type: KneType) {
+        when (type) {
+            KneType.STRING -> appendStringReturn(expr)
+            KneType.UNIT -> appendLine("    $expr")
+            KneType.BOOLEAN -> appendLine("    return if ($expr) 1 else 0")
+            is KneType.OBJECT -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
+            is KneType.ENUM -> appendLine("    return ($expr).ordinal")
+            else -> appendLine("    return $expr")
+        }
+    }
+
+    /** Emit the setter body for a property assignment. */
+    private fun StringBuilder.appendSetterBody(target: String, type: KneType) {
+        when (type) {
+            KneType.STRING -> appendLine("    $target = value?.toKString() ?: \"\"")
+            KneType.BOOLEAN -> appendLine("    $target = value != 0")
+            is KneType.ENUM -> appendLine("    $target = ${type.fqName}.entries[value]")
+            is KneType.OBJECT -> appendLine("    $target = value.toCPointer<COpaque>()!!.asStableRef<${type.fqName}>().get()")
+            else -> appendLine("    $target = value")
+        }
+    }
 
     /**
      * Appends code to write a Kotlin String result to an output buffer.

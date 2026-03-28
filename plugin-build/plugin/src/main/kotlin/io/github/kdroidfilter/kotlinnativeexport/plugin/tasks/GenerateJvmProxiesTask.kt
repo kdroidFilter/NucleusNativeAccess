@@ -49,14 +49,14 @@ abstract class GenerateJvmProxiesTask : DefaultTask() {
         logger.lifecycle("kne: Parsing ${ktFiles.size} native source file(s) for JVM proxies...")
         val module = KotlinSourceParser().parse(ktFiles, libName.get())
 
-        if (module.classes.isEmpty() && module.functions.isEmpty()) {
+        if (module.classes.isEmpty() && module.enums.isEmpty() && module.functions.isEmpty()) {
             logger.lifecycle("kne: No public API found, skipping.")
             return
         }
 
         logger.lifecycle(
-            "kne: Generating JVM FFM proxies for ${module.classes.size} class(es) " +
-                "and ${module.functions.size} function(s)."
+            "kne: Generating JVM FFM proxies for ${module.classes.size} class(es), " +
+                "${module.enums.size} enum(s), and ${module.functions.size} function(s)."
         )
 
         val pkg = jvmPackage.get()

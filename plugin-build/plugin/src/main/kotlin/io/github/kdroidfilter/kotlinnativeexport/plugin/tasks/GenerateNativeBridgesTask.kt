@@ -46,14 +46,14 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
         logger.lifecycle("kne: Parsing ${ktFiles.size} native source file(s)...")
         val module = KotlinSourceParser().parse(ktFiles, libName.get())
 
-        if (module.classes.isEmpty() && module.functions.isEmpty()) {
-            logger.lifecycle("kne: No public classes or functions found, skipping.")
+        if (module.classes.isEmpty() && module.enums.isEmpty() && module.functions.isEmpty()) {
+            logger.lifecycle("kne: No public classes, enums, or functions found, skipping.")
             return
         }
 
         logger.lifecycle(
-            "kne: Generating native bridges for ${module.classes.size} class(es) " +
-                "and ${module.functions.size} function(s)."
+            "kne: Generating native bridges for ${module.classes.size} class(es), " +
+                "${module.enums.size} enum(s), and ${module.functions.size} function(s)."
         )
 
         val code = NativeBridgeGenerator().generate(module)
