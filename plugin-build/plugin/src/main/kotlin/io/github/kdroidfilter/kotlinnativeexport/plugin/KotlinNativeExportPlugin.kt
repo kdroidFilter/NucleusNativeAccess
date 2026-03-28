@@ -157,7 +157,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
 
         // java.library.path includes both, separated by the platform path separator
         val libraryPath = listOf(releaseDir, debugDir)
-            .joinToString(File.pathSeparator) { it.absolutePath }
+            .joinToString(File.pathSeparator) { it.absolutePath.replace("\\", "/") }
 
         // Link task for the configured build type
         val buildType = extension.buildType.get().replaceFirstChar { it.uppercaseChar() }

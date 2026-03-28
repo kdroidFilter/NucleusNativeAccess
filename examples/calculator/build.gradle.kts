@@ -47,7 +47,7 @@ kotlinNativeExport {
     nativePackage = "com.example.calculator"
 }
 
-val nativeBuildDir = "${project.projectDir}/build"
+val nativeBuildDir = "${project.projectDir}/build".replace("\\", "/")
 val hostTarget = when {
     System.getProperty("os.name") == "Linux" -> "linuxX64"
     System.getProperty("os.name") == "Mac OS X" -> "macosArm64"

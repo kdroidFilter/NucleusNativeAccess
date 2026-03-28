@@ -58,7 +58,7 @@ kotlinNativeExport {
     nativePackage = "com.example.systeminfo"
 }
 
-val nativeBuildDir = "${project.projectDir}/build"
+val nativeBuildDir = "${project.projectDir}/build".replace("\\", "/")
 val nativeLibPaths = listOf(
     "$nativeBuildDir/bin/$hostTarget/systeminfoReleaseShared",
     "$nativeBuildDir/bin/$hostTarget/systeminfoDebugShared",
