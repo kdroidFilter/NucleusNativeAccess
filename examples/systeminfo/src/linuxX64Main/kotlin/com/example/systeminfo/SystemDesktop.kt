@@ -73,6 +73,10 @@ actual class SystemDesktop {
         buf.toKString().trim().substringBefore("(").trim()
     }
 
+    actual fun showSystemTray(): Boolean = false // No native tray support on Linux without GTK
+
+    actual fun hideSystemTray(): Boolean = false
+
     private fun readProcValue(path: String, key: String): Long = memScoped {
         val fp = fopen(path, "r") ?: return 0
         val buf = allocArray<ByteVar>(256)

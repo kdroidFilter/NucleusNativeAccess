@@ -120,6 +120,27 @@ fun SystemInfoScreen() {
             Text(if (notifSent) "Notification sent!" else "Send native notification", color = Color.White)
         }
 
+        var trayVisible by remember { mutableStateOf(false) }
+
+        Button(
+            onClick = {
+                if (trayVisible) {
+                    desktop.hideSystemTray()
+                    trayVisible = false
+                } else {
+                    desktop.showSystemTray()
+                    trayVisible = true
+                }
+            },
+            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF2E7D32)),
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+        ) {
+            Text(
+                if (trayVisible) "Hide native menu bar item" else "Show native menu bar item",
+                color = Color.White,
+            )
+        }
+
         Button(
             onClick = {
                 availMem = desktop.getAvailableMemoryMB()

@@ -14,4 +14,6 @@ expect class SystemDesktop() {
     fun getCpuModel(): String
     fun getCpuCoreCount(): Int
     fun getKernelVersion(): String
+    fun showSystemTray(): Boolean
+    fun hideSystemTray(): Boolean
 }

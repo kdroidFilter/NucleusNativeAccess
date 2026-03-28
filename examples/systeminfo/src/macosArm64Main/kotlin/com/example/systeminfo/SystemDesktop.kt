@@ -3,12 +3,17 @@
 package com.example.systeminfo
 
 import kotlinx.cinterop.*
+import platform.AppKit.*
 import platform.Foundation.NSProcessInfo
 import platform.UserNotifications.*
+import platform.darwin.dispatch_async
+import platform.darwin.dispatch_get_main_queue
 import platform.darwin.sysctlbyname
 import platform.posix.*
 
 actual class SystemDesktop {
+
+    private var statusItem: NSStatusItem? = null
 
     actual fun sendNotification(title: String, body: String, icon: String): Boolean {
         val content = UNMutableNotificationContent().apply {
@@ -68,6 +73,43 @@ actual class SystemDesktop {
         val sysname = sysctlString("kern.ostype") ?: "Darwin"
         val release = sysctlString("kern.osrelease") ?: ""
         return "$sysname $release".trim()
+    }
+
+    actual fun showSystemTray(): Boolean {
+        dispatch_async(dispatch_get_main_queue()) {
+            val bar = NSStatusBar.systemStatusBar
+            val item = bar.statusItemWithLength(NSVariableStatusItemLength)
+            item.button?.title = "\uD83D\uDCBB"
+
+            val menu = NSMenu()
+            menu.addItemWithTitle("Hostname: ${getHostname()}", action = null, keyEquivalent = "")
+            menu.addItemWithTitle("CPU: ${getCpuModel()}", action = null, keyEquivalent = "")
+            menu.addItemWithTitle("Cores: ${getCpuCoreCount()}", action = null, keyEquivalent = "")
+            menu.addItemWithTitle("Memory: ${getAvailableMemoryMB()} MB / ${getTotalMemoryMB()} MB", action = null, keyEquivalent = "")
+            menu.addItemWithTitle("Uptime: ${formatUptime(getUptime())}", action = null, keyEquivalent = "")
+            menu.addItem(NSMenuItem.separatorItem())
+            menu.addItemWithTitle("Kernel: ${getKernelVersion()}", action = null, keyEquivalent = "")
+
+            item.menu = menu
+            statusItem = item
+        }
+        return true
+    }
+
+    actual fun hideSystemTray(): Boolean {
+        val item = statusItem ?: return false
+        dispatch_async(dispatch_get_main_queue()) {
+            NSStatusBar.systemStatusBar.removeStatusItem(item)
+            statusItem = null
+        }
+        return true
+    }
+
+    private fun formatUptime(seconds: Double): String {
+        if (seconds < 0) return "N/A"
+        val h = (seconds / 3600).toInt()
+        val m = ((seconds % 3600) / 60).toInt()
+        return "${h}h ${m}m"
     }
 
     private fun sysctlString(name: String): String? = memScoped {
