@@ -1,3 +1,5 @@
+import io.github.kdroidfilter.nucleus.desktop.application.dsl.TargetFormat
+
 plugins {
     kotlin("multiplatform")
     id("org.jetbrains.compose") version "1.10.2"
@@ -77,13 +79,39 @@ nucleus.application {
     }
 
     nativeDistributions {
+        targetFormats(TargetFormat.Deb, TargetFormat.Nsis, TargetFormat.Dmg)
         appName = "Native Calculator"
         packageName = "com.example.nativecalculator"
         packageVersion = "1.0.0"
         description = "Compose Desktop calculator powered by Kotlin/Native via FFM"
+        homepage = "https://github.com/kdroidFilter/KotlinNativeExport"
 
-        linux { debMaintainer = "dev@example.com" }
-        macOS { bundleID = "com.example.nativecalculator"; dockName = "NativeCalc" }
+        linux {
+            debMaintainer = "dev@example.com"
+        }
+
+        windows {
+            upgradeUuid = "a1b2c3d4-5678-9012-abcd-ef0123456789"
+            nsis {
+                oneClick = false
+                allowElevation = true
+                perMachine = true
+                allowToChangeInstallationDirectory = true
+                createDesktopShortcut = true
+                createStartMenuShortcut = true
+                runAfterFinish = true
+            }
+        }
+
+        macOS {
+            bundleID = "com.example.nativecalculator"
+            appCategory = "public.app-category.utilities"
+            dockName = "NativeCalc"
+            dmg {
+                title = "Native Calculator"
+                iconSize = 128
+            }
+        }
     }
 }
 
