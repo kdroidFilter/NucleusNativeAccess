@@ -279,7 +279,8 @@ The current implementation (Phase 1) covers the core use case. Phase 2 will add:
 - **Lambdas & callbacks** &mdash; FFM upcall handles for passing JVM lambdas to native
 - **Exceptions** &mdash; catch on native side, propagate error code + message to JVM
 - **Kotlin Analysis API** &mdash; replace regex source parser with proper K2 analysis (like swift-export-standalone) for full type resolution
-- **Automatic native lib bundling** &mdash; embed `.so`/`.dylib` in the JAR and extract at runtime
+- **GraalVM reachability-metadata generation** &mdash; auto-generate `reachability-metadata.json` with FFM downcall descriptors for native-image support (currently must be written manually)
+- **Automatic native lib bundling** &mdash; embed `.so`/`.dylib` in the JAR and extract at runtime, including GraalVM native-image output dir
 - **Multi-target support** &mdash; fat JARs with platform-specific native libs
 - **Companion objects** &mdash; expose as static methods on the JVM proxy
 

@@ -1,6 +1,6 @@
 plugins {
     kotlin("multiplatform")
-    id("org.jetbrains.compose") version "1.8.0"
+    id("org.jetbrains.compose") version "1.10.2"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     id("io.github.kdroidfilter.nucleus") version "1.7.2"
     id("io.github.kdroidfilter.kotlinnativeexport")
@@ -25,6 +25,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.runtime)
+                implementation("io.github.kdroidfilter:nucleus.graalvm-runtime:1.7.2")
             }
         }
         val jvmTest by getting {
@@ -59,6 +60,22 @@ nucleus.application {
         "-Djava.library.path=$nativeLibPaths",
     )
 
+    graalvm {
+        isEnabled = true
+        javaLanguageVersion = 25
+        jvmVendor = JvmVendorSpec.BELLSOFT
+        imageName = "native-calculator"
+        march = "compatibility"
+        buildArgs.addAll(
+            "-H:+AddAllCharsets",
+            "-Djava.awt.headless=false",
+            "-Os",
+            "-H:-IncludeMethodData",
+            "--enable-native-access=ALL-UNNAMED",
+            "-Djava.library.path=$nativeLibPaths",
+        )
+    }
+
     nativeDistributions {
         appName = "Native Calculator"
         packageName = "com.example.nativecalculator"
@@ -74,5 +91,19 @@ afterEvaluate {
     tasks.matching { it.name == "run" }.configureEach {
         val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
         dependsOn("linkCalculatorReleaseShared$cap")
+    }
+
+    // Copy the Kotlin/Native shared library into the GraalVM output so runGraalvmNative works
+    tasks.matching { it.name == "packageGraalvmNative" }.configureEach {
+        val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
+        dependsOn("linkCalculatorReleaseShared$cap")
+        doLast {
+            val src = file("build/bin/$hostTarget/calculatorReleaseShared/libcalculator.so")
+            val dst = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator/lib/libcalculator.so")
+            if (src.exists()) {
+                src.copyTo(dst, overwrite = true)
+                println("kne: Copied libcalculator.so to GraalVM output")
+            }
+        }
     }
 }

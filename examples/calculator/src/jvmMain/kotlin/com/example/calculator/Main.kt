@@ -31,16 +31,19 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 
-fun main() = application {
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "Kotlin/Native Calculator (via FFM)",
-        state = rememberWindowState(width = 360.dp, height = 660.dp),
-        resizable = false,
-    ) {
-        MaterialTheme(colors = darkColors()) {
-            Surface(modifier = Modifier.fillMaxSize()) {
-                CalculatorScreen()
+fun main() {
+    io.github.kdroidfilter.nucleus.graalvm.GraalVmInitializer.initialize()
+    application {
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "Kotlin/Native Calculator (via FFM)",
+            state = rememberWindowState(width = 360.dp, height = 660.dp),
+            resizable = false,
+        ) {
+            MaterialTheme(colors = darkColors()) {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    CalculatorScreen()
+                }
             }
         }
     }
