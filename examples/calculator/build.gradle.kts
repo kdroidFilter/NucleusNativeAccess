@@ -124,18 +124,28 @@ afterEvaluate {
         dependsOn("linkCalculatorReleaseShared$cap")
     }
 
-    // Copy the Kotlin/Native shared library into the GraalVM output so runGraalvmNative works
+    // Copy the Kotlin/Native shared library into the GraalVM native output
     tasks.matching { it.name == "packageGraalvmNative" }.configureEach {
         val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
         dependsOn("linkCalculatorReleaseShared$cap")
         doLast {
             val libFileName = System.mapLibraryName("calculator")
             val src = file("build/bin/$hostTarget/calculatorReleaseShared/$libFileName")
-            val graalvmOutputDir = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator")
-            val dst = graalvmOutputDir.resolve(libFileName)
-            if (src.exists()) {
-                src.copyTo(dst, overwrite = true)
-                println("kne: Copied $libFileName to GraalVM output")
+            if (!src.exists()) {
+                println("kne: WARNING - $src does not exist, skipping copy")
+                return@doLast
+            }
+            // Copy into the macOS .app bundle (Contents/MacOS/) where java.library.path points
+            val appBundleMacOS = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator.app/Contents/MacOS")
+            if (appBundleMacOS.exists()) {
+                src.copyTo(appBundleMacOS.resolve(libFileName), overwrite = true)
+                println("kne: Copied $libFileName to $appBundleMacOS")
+            }
+            // Also copy next to the bare native-image executable (for non-bundled runs)
+            val nativeCompileDir = file("build/compose/tmp/main/graalvm/nativeCompile")
+            if (nativeCompileDir.exists()) {
+                src.copyTo(nativeCompileDir.resolve(libFileName), overwrite = true)
+                println("kne: Copied $libFileName to $nativeCompileDir")
             }
         }
     }

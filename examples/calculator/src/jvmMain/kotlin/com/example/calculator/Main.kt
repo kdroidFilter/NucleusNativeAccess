@@ -1,6 +1,5 @@
 package com.example.calculator
 
-import androidx.compose.desktop.ui.tooling.preview.Preview
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -50,7 +49,7 @@ fun main() {
 }
 
 @Composable
-@Preview
+@androidx.compose.ui.tooling.preview.Preview
 fun CalculatorScreen() {
     // Every call on this object goes through FFM into Kotlin/Native
     var calc by remember { mutableStateOf(Calculator(0)) }
