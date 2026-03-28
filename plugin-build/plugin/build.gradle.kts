@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
     kotlin("jvm")
     `java-gradle-plugin`
@@ -9,19 +7,13 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib"))
     implementation(gradleApi())
+    compileOnly(libs.kotlin.gradle.plugin)
 
     testImplementation(libs.junit)
 }
 
-java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
-}
-
 kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_1_8)
-    }
+    jvmToolchain(21)
 }
 
 gradlePlugin {
@@ -32,8 +24,7 @@ gradlePlugin {
             version = property("VERSION").toString()
             description = property("DESCRIPTION").toString()
             displayName = property("DISPLAY_NAME").toString()
-            // Note: tags cannot include "plugin" or "gradle" when publishing
-            tags.set(listOf("sample", "template"))
+            tags.set(listOf("kotlin", "native", "jvm", "ffm", "interop"))
         }
     }
 }
@@ -43,7 +34,6 @@ gradlePlugin {
     vcsUrl.set(property("VCS_URL").toString())
 }
 
-// Use Detekt with type resolution for check
 tasks.named("check").configure {
     this.setDependsOn(
         this.dependsOn.filterNot {

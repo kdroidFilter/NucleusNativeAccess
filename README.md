@@ -1,95 +1,300 @@
-# kotlin-gradle-plugin-template 🐘
+# Kotlin Native Export
 
-[![Use this template](https://img.shields.io/badge/-Use%20this%20template-brightgreen)](https://github.com/cortinico/kotlin-gradle-plugin-template/generate) [![Pre Merge Checks](https://github.com/cortinico/kotlin-gradle-plugin-template/workflows/Pre%20Merge%20Checks/badge.svg)](https://github.com/cortinico/kotlin-gradle-plugin-template/actions?query=workflow%3A%22Pre+Merge+Checks%22)  [![License](https://img.shields.io/github/license/cortinico/kotlin-android-template.svg)](LICENSE) ![Language](https://img.shields.io/github/languages/top/cortinico/kotlin-android-template?color=blue&logo=kotlin)
+A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, top-level functions &mdash; everything is transparent to the JVM developer.
 
-A simple Github template that lets you create a **Gradle Plugin** 🐘 project using **100% Kotlin** and be up and running in a **few seconds**.
+Under the hood, the plugin generates [FFM (Foreign Function & Memory API)](https://openjdk.org/jeps/454) bindings inspired by [swift-java](https://github.com/swiftlang/swift-java) and [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone).
 
-This template is focused on delivering a project with **static analysis** and **continuous integration** already in place.
-
-## How to use 👣
-
-Just click on [![Use this template](https://img.shields.io/badge/-Use%20this%20template-brightgreen)](https://github.com/cortinico/kotlin-gradle-plugin-template/generate) button to create a new repo starting from this template.
-
-Once created don't forget to update the:
-- [gradle.properties](plugin-build/gradle.properties)
-- Plugin Usages (search for [com.ncorti.kotlin.gradle.template](https://github.com/cortinico/kotlin-gradle-plugin-template/search?q=com.ncorti.kotlin.gradle.template&unscoped_q=com.ncorti.kotlin.gradle.template) in the repo and replace it with your ID).
-
-## Features 🎨
-
-- **100% Kotlin-only template**.
-- Plugin build setup with **composite build**.
-- 100% Gradle Kotlin DSL setup.
-- Dependency versions managed via Gradle Versions Catalog (`libs.versions.toml`).
-- CI Setup with GitHub Actions.
-- Kotlin Static Analysis via `ktlint` and `detekt`.
-- Publishing-ready to Gradle Portal.
-- Issues Template (bug report + feature request)
-- Pull Request Template.
-
-## Composite Build 📦
-
-This template is using a [Gradle composite build](https://docs.gradle.org/current/userguide/composite_builds.html) to build, test and publish the plugin. This means that you don't need to run Gradle twice to test the changes on your Gradle plugin (no more `publishToMavenLocal` tricks or so).
-
-The included build is inside the [plugin-build](plugin-build) folder.
-
-### `preMerge` task
-
-A `preMerge` task on the top level build is already provided in the template. This allows you to run all the `check` tasks both in the top level and in the included build.
-
-You can easily invoke it with:
+## How it works
 
 ```
-./gradlew preMerge
+Kotlin/Native source           Plugin generates              JVM developer sees
+──────────────────            ────────────────              ──────────────────
+class Calculator {      →     @CName bridges (native)   →   class Calculator : AutoCloseable {
+  fun add(value: Int)         + StableRef lifecycle           fun add(value: Int): Int
+  val current: Int            + FFM MethodHandles             val current: Int
+}                             + output-buffer strings         // backed by native, via FFM
+                                                          }
 ```
 
-If you need to invoke a task inside the included build with:
+**Pipeline:**
+
+1. Plugin scans your `nativeMain` sources and extracts the public API
+2. Generates `@CName` bridge functions with `StableRef` for object lifecycle (native side)
+3. Generates JVM proxy classes with FFM `MethodHandle` downcalls (JVM side)
+4. Compiles to a shared library (`.so` / `.dylib` / `.dll`)
+5. JVM code calls the proxies transparently &mdash; every call crosses the FFM boundary into native
+
+## Quick start
+
+### 1. Apply the plugin
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("multiplatform") version "2.3.20"
+    id("io.github.kdroidfilter.kotlinnativeexport") version "0.1.0"
+}
+```
+
+### 2. Configure targets
+
+```kotlin
+kotlin {
+    jvmToolchain(25) // FFM is stable since JDK 22 (JEP 454), recommended JDK 25
+
+    linuxX64()       // use the real platform name (KMP convention)
+    // macosArm64()  // on macOS
+    // mingwX64()    // on Windows
+
+    jvm()
+
+    sourceSets {
+        val jvmMain by getting {
+            dependencies {
+                // your JVM dependencies (Compose, Ktor, etc.)
+            }
+        }
+    }
+}
+
+kotlinNativeExport {
+    nativeLibName = "mylib"         // output: libmylib.so (release ~700KB)
+    nativePackage = "com.example"   // package for generated JVM proxies
+    buildType = "release"           // "release" (default, optimized) or "debug"
+}
+```
+
+### 3. Write Kotlin/Native code
+
+```kotlin
+// src/nativeMain/kotlin/com/example/Calculator.kt
+package com.example
+
+class Calculator(initial: Int = 0) {
+    private var acc = initial
+
+    fun add(value: Int): Int { acc += value; return acc }
+    fun subtract(value: Int): Int { acc -= value; return acc }
+    val current: Int get() = acc
+    fun describe(): String = "Calculator(current=$acc)"
+}
+```
+
+### 4. Use it from JVM as if it were a normal class
+
+```kotlin
+// src/jvmMain/kotlin/com/example/Main.kt
+package com.example
+
+fun main() {
+    val calc = Calculator(0)  // allocates a Kotlin/Native object
+    calc.add(5)               // FFM → native → StableRef → add()
+    calc.add(3)
+    println(calc.current)     // 8
+    println(calc.describe())  // "Calculator(current=8)"
+    calc.close()              // releases the native object (also auto-GC'd via Cleaner)
+}
+```
+
+No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from JVM.
+
+### 5. Run
+
+```bash
+./gradlew jvmTest    # compiles native + generates bridges + runs JVM tests
+./gradlew run        # if using Compose Desktop / Nucleus
+```
+
+## Supported types
+
+| Kotlin type | FFM layout | Notes |
+|-------------|-----------|-------|
+| `Int` | `JAVA_INT` | direct pass-through |
+| `Long` | `JAVA_LONG` | direct pass-through |
+| `Double` | `JAVA_DOUBLE` | direct pass-through |
+| `Float` | `JAVA_FLOAT` | direct pass-through |
+| `Boolean` | `JAVA_INT` | 0/1 convention |
+| `Byte` | `JAVA_BYTE` | direct pass-through |
+| `Short` | `JAVA_SHORT` | direct pass-through |
+| `String` | `ADDRESS` | output-buffer pattern for returns |
+| `Unit` | void | `FunctionDescriptor.ofVoid(...)` |
+| Classes | `JAVA_LONG` | opaque handle via `StableRef` |
+
+## Configuration reference
+
+```kotlin
+kotlinNativeExport {
+    // Name of the shared library (required)
+    // Produces: libmylib.so (Linux), libmylib.dylib (macOS), mylib.dll (Windows)
+    nativeLibName = "mylib"
+
+    // Package for the generated JVM proxy classes (required)
+    nativePackage = "com.example"
+
+    // Build type: "release" (default, ~700KB .so) or "debug" (~6MB .so)
+    buildType = "release"
+}
+```
+
+### JVM runtime requirements
+
+The generated FFM proxies require:
+
+- **JDK 22+** (FFM API finalized in JDK 22 via [JEP 454](https://openjdk.org/jeps/454), recommended JDK 25)
+- **`--enable-native-access=ALL-UNNAMED`** JVM arg (auto-configured for tests by the plugin)
+- **`java.library.path`** pointing to the directory containing the `.so` (auto-configured for tests)
+
+### Using with Compose Desktop / Nucleus
+
+```kotlin
+plugins {
+    kotlin("multiplatform") version "2.3.20"
+    id("org.jetbrains.compose") version "1.8.0"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
+    id("io.github.kdroidfilter.nucleus") version "1.7.2"
+    id("io.github.kdroidfilter.kotlinnativeexport")
+}
+
+// Compose compiler only targets JVM (native sources have no @Composable)
+composeCompiler {
+    targetKotlinPlatforms.set(
+        setOf(org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.jvm)
+    )
+}
+
+// Configure native lib path for the run task
+nucleus.application {
+    mainClass = "com.example.MainKt"
+    jvmArgs += listOf(
+        "--enable-native-access=ALL-UNNAMED",
+        "-Djava.library.path=${project.projectDir}/build/bin/linuxX64/mylibReleaseShared",
+    )
+}
+```
+
+### Using with C interop (e.g. libnotify)
+
+You can combine the plugin with Kotlin/Native cinterop to wrap native C libraries and expose them to JVM:
+
+```kotlin
+// build.gradle.kts
+kotlin {
+    linuxX64().compilations["main"].cinterops {
+        val libnotify by creating {
+            defFile(project.file("src/nativeInterop/cinterop/libnotify.def"))
+        }
+    }
+}
+```
+
+```kotlin
+// src/nativeMain/kotlin/LinuxDesktop.kt
+class LinuxDesktop {
+    fun sendNotification(title: String, body: String, icon: String): Boolean {
+        // calls libnotify via cinterop — impossible from JVM without JNI
+        notify_init("MyApp")
+        val n = notify_notification_new(title, body, icon) ?: return false
+        return notify_notification_show(n, null) != 0
+    }
+
+    fun getHostname(): String = memScoped {
+        val buf = allocArray<ByteVar>(256)
+        gethostname(buf, 256u)
+        buf.toKString()
+    }
+}
+```
+
+```kotlin
+// src/jvmMain/kotlin/Main.kt — transparent usage
+val desktop = LinuxDesktop()
+desktop.sendNotification("Hello", "From Kotlin/Native via FFM!", "dialog-information")
+println(desktop.getHostname())
+desktop.close()
+```
+
+## Examples
+
+The repository includes two complete examples in [`examples/`](examples/):
+
+| Example | Description |
+|---------|-------------|
+| [`calculator/`](examples/calculator/) | Stateful Calculator class exported from Kotlin/Native, with Compose Desktop UI and Nucleus packaging |
+| [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
+
+Run them:
+
+```bash
+./gradlew :examples:calculator:run
+./gradlew :examples:systeminfo:run
+./gradlew :examples:calculator:jvmTest    # 5 tests
+./gradlew :examples:systeminfo:jvmTest    # 7 tests
+```
+
+## Architecture
+
+The plugin is inspired by two projects:
+
+- **[swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone)** (JetBrains) &mdash; how Kotlin exports its API to Swift via C bridges. We adapted the approach: scan Kotlin sources, generate `@CName` bridge functions with `StableRef` for object lifecycle.
+
+- **[swift-java](https://github.com/swiftlang/swift-java)** (Apple) &mdash; how Swift code is made callable from Java via FFM `MethodHandle` downcalls. We adapted the FFM binding generation: each method gets a `FunctionDescriptor` + `MethodHandle`, classes use `Cleaner` for GC safety.
 
 ```
-./gradlew -p plugin-build <task-name>
+plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/plugin/
+├── ir/                          # Intermediate representation (inspired by SirModule)
+│   └── KneIR.kt                 # KneModule, KneClass, KneFunction, KneType...
+├── analysis/
+│   └── KotlinSourceParser.kt    # Parses .kt files, extracts public API
+├── codegen/
+│   ├── NativeBridgeGenerator.kt # @CName + StableRef bridges (inspired by @_cdecl thunks)
+│   └── FfmProxyGenerator.kt     # JVM proxy classes with FFM (inspired by FFMSwift2JavaGenerator)
+├── tasks/
+│   ├── GenerateNativeBridgesTask.kt
+│   └── GenerateJvmProxiesTask.kt
+├── KotlinNativeExportExtension.kt
+└── KotlinNativeExportPlugin.kt
 ```
 
+## Phase 2 roadmap
 
-### Dependency substitution
+The current implementation (Phase 1) covers the core use case. Phase 2 will add:
 
-Please note that the project relies on module name/group in order for [dependency substitution](https://docs.gradle.org/current/userguide/resolution_rules.html#sec:dependency_substitution_rules) to work properly. If you change only the plugin ID everything will work as expected. If you change module name/group, things might break and you probably have to specify a [substitution rule](https://docs.gradle.org/current/userguide/resolution_rules.html#sub:project_to_module_substitution).
+### Planned
 
+- **Inheritance & interfaces** &mdash; generate JVM interfaces for Kotlin interfaces, proxy dispatch for open classes
+- **Constructor overloads** &mdash; detect default parameter values and generate no-arg / partial overloads on JVM
+- **Generics** &mdash; type-erased proxy generation for generic classes
+- **Nullable types** &mdash; proper `null` handling across FFM boundary (currently treated as non-null)
+- **Enums & sealed classes** &mdash; map to JVM enum/sealed hierarchy
+- **Lambdas & callbacks** &mdash; FFM upcall handles for passing JVM lambdas to native
+- **Exceptions** &mdash; catch on native side, propagate error code + message to JVM
+- **Kotlin Analysis API** &mdash; replace regex source parser with proper K2 analysis (like swift-export-standalone) for full type resolution
+- **Automatic native lib bundling** &mdash; embed `.so`/`.dylib` in the JAR and extract at runtime
+- **Multi-target support** &mdash; fat JARs with platform-specific native libs
+- **Companion objects** &mdash; expose as static methods on the JVM proxy
 
-## Publishing 🚀
+### Won't do (out of scope)
 
-This template is ready to let you publish to [Gradle Portal](https://plugins.gradle.org/).
+- Suspend functions / coroutines across FFM (fundamentally different runtimes)
+- Full Kotlin Multiplatform expect/actual (that's KMP's job, not ours)
 
-The [![Publish Plugin to Portal](https://github.com/cortinico/kotlin-gradle-plugin-template/workflows/Publish%20Plugin%20to%20Portal/badge.svg?branch=1.0.0)](https://github.com/cortinico/kotlin-gradle-plugin-template/actions?query=workflow%3A%22Publish+Plugin+to+Portal%22) Github Action will take care of the publishing whenever you **push a tag**.
+## Requirements
 
-Please note that you need to configure two secrets: `GRADLE_PUBLISH_KEY` and `GRADLE_PUBLISH_SECRET` with the credentials you can get from your profile on the Gradle Portal.
+- **Kotlin** 2.3.20+
+- **Gradle** 9.1+ (for JDK 25 support)
+- **JDK** 22+ (FFM stable since JDK 22 / JEP 454), recommended 25
+- **Kotlin/Native** toolchain (bundled with KMP plugin)
 
-## 100% Kotlin 🅺
+## License
 
-This template is designed to use Kotlin everywhere. The build files are written using [**Gradle Kotlin DSL**](https://docs.gradle.org/current/userguide/kotlin_dsl.html) as well as the [Plugin DSL](https://docs.gradle.org/current/userguide/plugins.html#sec:plugins_block) to setup the build.
-
-Dependencies are centralized inside the [libs.versions.toml](gradle/libs.versions.toml).
-
-Moreover, a minimalistic Gradle Plugin is already provided in Kotlin to let you easily start developing your own around it.
-
-## Static Analysis 🔍
-
-This template is using [**ktlint**](https://github.com/pinterest/ktlint) with the [ktlint-gradle](https://github.com/jlleitschuh/ktlint-gradle) plugin to format your code. To reformat all the source code as well as the buildscript you can run the `ktlintFormat` gradle task.
-
-This template is also using [**detekt**](https://github.com/arturbosch/detekt) to analyze the source code, with the configuration that is stored in the [detekt.yml](config/detekt/detekt.yml) file (the file has been generated with the `detektGenerateConfig` task).
-
-## CI ⚙️
-
-This template is using [**GitHub Actions**](https://github.com/cortinico/kotlin-android-template/actions) as CI. You don't need to setup any external service and you should have a running CI once you start using this template.
-
-There are currently the following workflows available:
-- [Validate Gradle Wrapper](.github/workflows/gradle-wrapper-validation.yml) - Will check that the gradle wrapper has a valid checksum
-- [Pre Merge Checks](.github/workflows/pre-merge.yaml) - Will run the `preMerge` tasks as well as trying to run the Gradle plugin.
-- [Publish to Plugin Portal](.github/workflows/publish-plugin.yaml) - Will run the `publishPlugin` task when pushing a new tag.
-
-## Contributing 🤝
-
-Feel free to open a issue or submit a pull request for any bugs/improvements.
-
-## License 📄
-
-This template is licensed under the MIT License - see the [License](LICENSE) file for details.
-Please note that the generated template is offering to start with a MIT license but you can change it to whatever you wish, as long as you attribute under the MIT terms that you're using the template.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

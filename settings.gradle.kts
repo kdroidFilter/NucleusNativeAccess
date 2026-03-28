@@ -1,4 +1,11 @@
 pluginManagement {
+    // Include plugin-build so our plugin is resolved from source, not the Plugin Portal
+    includeBuild("plugin-build")
+    plugins {
+        // Pin KMP version here so sub-projects don't need to re-declare it
+        // (avoids "already on classpath with unknown version" from the composite build)
+        kotlin("multiplatform") version "2.3.20"
+    }
     repositories {
         gradlePluginPortal()
         mavenCentral()
@@ -25,7 +32,7 @@ develocity {
     }
 }
 
-rootProject.name = "kotlin-gradle-plugin-template"
+rootProject.name = "kotlin-native-jvm-export"
 
-include(":example")
-includeBuild("plugin-build")
+include(":examples:calculator")
+include(":examples:systeminfo")
