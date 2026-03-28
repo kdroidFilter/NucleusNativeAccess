@@ -59,6 +59,7 @@ sealed class KneType : Serializable {
     object UNIT : KneType()
     data class OBJECT(val fqName: String, val simpleName: String) : KneType()
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
+    data class NULLABLE(val inner: KneType) : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -74,6 +75,14 @@ sealed class KneType : Serializable {
             UNIT -> "" // void — used with FunctionDescriptor.ofVoid(...)
             is OBJECT -> "JAVA_LONG" // opaque handle
             is ENUM -> "JAVA_INT" // ordinal
+            is NULLABLE -> when (inner) {
+                STRING -> "ADDRESS"
+                BOOLEAN, is ENUM -> "JAVA_INT"
+                SHORT, BYTE -> "JAVA_INT" // widened for sentinel
+                INT, LONG, FLOAT, DOUBLE -> "JAVA_LONG" // widened or raw bits
+                is OBJECT -> "JAVA_LONG"
+                else -> inner.ffmLayout
+            }
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -90,6 +99,7 @@ sealed class KneType : Serializable {
             UNIT -> "Unit"
             is OBJECT -> simpleName
             is ENUM -> simpleName
+            is NULLABLE -> "${inner.jvmTypeName}?"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -106,5 +116,14 @@ sealed class KneType : Serializable {
             UNIT -> "Unit"
             is OBJECT -> "Long" // opaque handle
             is ENUM -> "Int" // ordinal
+            is NULLABLE -> when (inner) {
+                STRING -> "CPointer<ByteVar>?"
+                BOOLEAN, is ENUM -> "Int" // -1 = null
+                SHORT, BYTE -> "Int" // widened, Int.MIN_VALUE = null
+                INT, LONG -> "Long" // widened, Long.MIN_VALUE = null
+                FLOAT, DOUBLE -> "Long" // raw bits, Long.MIN_VALUE = null
+                is OBJECT -> "Long" // 0L = null
+                else -> inner.nativeBridgeType
+            }
         }
 }

@@ -131,6 +131,24 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | Classes | `JAVA_LONG` | opaque handle via `StableRef` |
 | Enums | `JAVA_INT` | ordinal mapping |
 | Class references | `JAVA_LONG` | pass/return handles between classes |
+| `T?` (nullable) | widened | sentinel-based null encoding (see below) |
+
+### Nullable type encoding
+
+All nullable types are supported. The encoding uses sentinel values to represent `null` at the FFM boundary:
+
+| Nullable type | Wire type | Null sentinel |
+|---------------|-----------|---------------|
+| `String?` | output-buffer `Int` | -1 = null |
+| `Object?` | `JAVA_LONG` | 0L = null |
+| `Enum?` | `JAVA_INT` | -1 = null |
+| `Boolean?` | `JAVA_INT` | -1 = null, 0 = false, 1 = true |
+| `Int?` | `JAVA_LONG` | `Long.MIN_VALUE` = null |
+| `Long?` | `JAVA_LONG` | `Long.MIN_VALUE` = null |
+| `Short?` | `JAVA_INT` | `Int.MIN_VALUE` = null |
+| `Byte?` | `JAVA_INT` | `Int.MIN_VALUE` = null |
+| `Float?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
+| `Double?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
 
 ## Configuration reference
 
@@ -239,7 +257,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 5 tests
+./gradlew :examples:calculator:jvmTest    # 76 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
@@ -267,9 +285,9 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 └── KotlinNativeExportPlugin.kt
 ```
 
-## Phase 2 roadmap
+## Roadmap
 
-The current implementation (Phase 1) covers the core use case: classes, methods, properties, top-level functions with primitive types + String + Unit. Phase 2 extends the type system, improves analysis, and adds deployment features.
+The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, and nullable types. The roadmap extends the type system, improves analysis, and adds deployment features.
 
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
 
@@ -285,22 +303,22 @@ Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin
   - [ ] Keep regex parser as fallback (flag `useAnalysisApi = true|false` in extension DSL)
 
 - [ ] **Extend the IR model (`KneIR.kt`)** &mdash; add missing concepts to represent Phase 2 features
-  - [ ] `KneType.NULLABLE(inner: KneType)` &mdash; wrapper type for nullable values
-  - [ ] `KneType.ENUM(fqName)`, `KneType.SEALED(fqName, subclasses)` &mdash; algebraic types
+  - [x] `KneType.NULLABLE(inner: KneType)` &mdash; wrapper type for nullable values
+  - [ ] `KneType.SEALED(fqName, subclasses)` &mdash; algebraic types
   - [ ] `KneType.FUNCTION(params, returnType)` &mdash; function/lambda types
   - [ ] `KneInterface` &mdash; Kotlin interface declaration (protocols in SIR)
   - [ ] `KneClass.superClass`, `KneClass.interfaces`, `KneClass.modality` (OPEN / FINAL / ABSTRACT / SEALED)
-  - [ ] `KneClass.companionMembers: List<KneFunction | KneProperty>` &mdash; flattened static members
+  - [x] `KneClass.companionMethods`, `KneClass.companionProperties` &mdash; static members
   - [ ] `KneConstructor.overloads` &mdash; list of parameter combinations (from default params)
   - [ ] `KneFunction.errorType` &mdash; nullable, present when `@Throws` detected
-  - [ ] `KneEnum` with `cases: List<KneEnumCase>` (name, ordinal, associated values)
+  - [x] `KneEnum` with entries list (name, ordinal)
 
 ### Phase 2b &mdash; Type system extensions
 
-- [ ] **Nullable types** &mdash; proper `null` handling across FFM boundary
-  - [ ] Native bridge: nullable primitives boxed as `Long` (0 = null, otherwise value + 1), nullable objects as 0L handle = null
-  - [ ] FFM proxy: check for null before downcall, return `null` on 0L handle
-  - [ ] String params/returns: null pointer convention (`MemorySegment.NULL`)
+- [x] **Nullable types** &mdash; proper `null` handling across FFM boundary
+  - [x] Native bridge: sentinel-based encoding (widened types for primitives, -1/0L for reference types)
+  - [x] FFM proxy: check sentinels after downcall, return `null` when sentinel detected
+  - [x] String params/returns: `MemorySegment.NULL` for null, -1 return for null strings
 
 - [x] **Enums** &mdash; map Kotlin `enum class` to JVM enum
   - [x] Native bridge: `@CName` function returning ordinal `Int` + name `String` (output-buffer)

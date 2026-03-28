@@ -75,6 +75,22 @@ class Calculator(initial: Int = 0) {
 
     fun getLastOp(): Operation = lastOperation
 
+    // ── Nullable types ──────────────────────────────────────────────────────
+
+    var nickname: String? = null
+
+    fun divideOrNull(divisor: Int): Int? = if (divisor != 0) accumulator / divisor else null
+
+    fun describeOrNull(): String? = if (accumulator > 0) "Positive($accumulator)" else null
+
+    fun isPositiveOrNull(): Boolean? = if (accumulator == 0) null else accumulator > 0
+
+    fun findOp(name: String?): Operation? = if (name != null) Operation.entries.find { it.name == name } else null
+
+    fun toLongOrNull(): Long? = if (accumulator != 0) accumulator.toLong() else null
+
+    fun toDoubleOrNull(): Double? = if (accumulator != 0) accumulator.toDouble() else null
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {
@@ -101,6 +117,8 @@ class CalculatorManager {
     }
 
     fun get(name: String): Calculator = calculators[name] ?: Calculator(0)
+
+    fun getOrNull(name: String): Calculator? = calculators[name]
 
     fun addWith(calc: Calculator, value: Int): Int = calc.add(value)
 

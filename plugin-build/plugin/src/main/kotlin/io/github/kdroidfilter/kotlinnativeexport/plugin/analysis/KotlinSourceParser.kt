@@ -345,7 +345,12 @@ class KotlinSourceParser {
     }
 
     internal fun parseType(typeStr: String, knownTypes: TypeMaps = TypeMaps(emptyMap(), emptyMap())): KneType {
-        val clean = typeStr.trimEnd('?').trim()
+        val trimmed = typeStr.trim()
+        if (trimmed.endsWith("?")) {
+            val inner = parseType(trimmed.dropLast(1), knownTypes)
+            return if (inner == KneType.UNIT || inner is KneType.NULLABLE) inner else KneType.NULLABLE(inner)
+        }
+        val clean = trimmed
         return when (clean) {
             "Int" -> KneType.INT
             "Long" -> KneType.LONG

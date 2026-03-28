@@ -27,6 +27,12 @@ class FfmProxyGenerator {
         private const val STRING_BUF_SIZE = 8192
     }
 
+    private fun KneType.returnsViaBuffer(): Boolean =
+        this == KneType.STRING || (this is KneType.NULLABLE && inner == KneType.STRING)
+
+    private fun KneType.isStringLike(): Boolean =
+        this == KneType.STRING || (this is KneType.NULLABLE && inner == KneType.STRING)
+
     /**
      * Generates all proxy files for the module.
      * Returns a map of filename → file content.
@@ -120,6 +126,7 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("import java.lang.foreign.Arena")
         appendLine("import java.lang.foreign.FunctionDescriptor")
+        appendLine("import java.lang.foreign.MemorySegment")
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine("import java.lang.ref.Cleaner")
@@ -208,7 +215,7 @@ class FfmProxyGenerator {
         appendLine("         * The native object is automatically released when GC'd or close() is called.")
         appendLine("         */")
         appendLine("        operator fun invoke($ctorParams): $n {")
-        if (cls.constructor.params.any { it.type == KneType.STRING }) {
+        if (cls.constructor.params.any { it.type.isStringLike() }) {
             appendLine("            Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("                ", cls.constructor.params)
             val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
@@ -262,7 +269,7 @@ class FfmProxyGenerator {
 
         appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-        val needsArena = fn.params.any { it.type == KneType.STRING } || fn.returnType == KneType.STRING
+        val needsArena = fn.params.any { it.type.isStringLike() } || fn.returnType.isStringLike()
         if (needsArena) {
             appendLine("        Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("            ", fn.params)
@@ -286,12 +293,17 @@ class FfmProxyGenerator {
             appendLine("    val ${prop.name}: ${prop.type.jvmTypeName}")
         }
         appendLine("        get() {")
-        val needsArena = prop.type == KneType.STRING
+        val needsArena = prop.type.returnsViaBuffer()
         if (needsArena) {
             appendLine("            Arena.ofConfined().use { arena ->")
             appendLine("                val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-            appendLine("                $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE)")
-            appendLine("                return buf.getString(0)")
+            if (prop.type is KneType.NULLABLE) {
+                appendLine("                val len = $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE) as Int")
+                appendLine("                return if (len < 0) null else buf.getString(0)")
+            } else {
+                appendLine("                $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE)")
+                appendLine("                return buf.getString(0)")
+            }
             appendLine("            }")
         } else {
             appendCallAndReturn("            ", prop.type, getHandleName, "handle")
@@ -316,7 +328,7 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("        fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-        val needsArena = fn.params.any { it.type == KneType.STRING } || fn.returnType == KneType.STRING
+        val needsArena = fn.params.any { it.type.isStringLike() } || fn.returnType.isStringLike()
         if (needsArena) {
             appendLine("            Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("                ", fn.params)
@@ -340,12 +352,17 @@ class FfmProxyGenerator {
             appendLine("        val ${prop.name}: ${prop.type.jvmTypeName}")
         }
         appendLine("            get() {")
-        val needsArena = prop.type == KneType.STRING
+        val needsArena = prop.type.returnsViaBuffer()
         if (needsArena) {
             appendLine("                Arena.ofConfined().use { arena ->")
             appendLine("                    val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-            appendLine("                    $getHandleName.invoke(buf, $STRING_BUF_SIZE)")
-            appendLine("                    return buf.getString(0)")
+            if (prop.type is KneType.NULLABLE) {
+                appendLine("                    val len = $getHandleName.invoke(buf, $STRING_BUF_SIZE) as Int")
+                appendLine("                    return if (len < 0) null else buf.getString(0)")
+            } else {
+                appendLine("                    $getHandleName.invoke(buf, $STRING_BUF_SIZE)")
+                appendLine("                    return buf.getString(0)")
+            }
             appendLine("                }")
         } else {
             appendCallAndReturn("                ", prop.type, getHandleName, "")
@@ -392,6 +409,7 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("import java.lang.foreign.Arena")
         appendLine("import java.lang.foreign.FunctionDescriptor")
+        appendLine("import java.lang.foreign.MemorySegment")
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine()
@@ -413,7 +431,7 @@ class FfmProxyGenerator {
             val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
             appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-            val needsArena = fn.params.any { it.type == KneType.STRING } || fn.returnType == KneType.STRING
+            val needsArena = fn.params.any { it.type.isStringLike() } || fn.returnType.isStringLike()
             if (needsArena) {
                 appendLine("        Arena.ofConfined().use { arena ->")
                 appendStringInvokeArgsAlloc("            ", fn.params)
@@ -440,7 +458,7 @@ class FfmProxyGenerator {
         val paramLayouts = buildList {
             add("JAVA_LONG") // handle
             fn.params.forEach { p -> add(p.type.ffmLayout) }
-            if (fn.returnType == KneType.STRING) {
+            if (fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS") // outBuf
                 add("JAVA_INT") // outLen
             }
@@ -451,7 +469,7 @@ class FfmProxyGenerator {
     private fun buildGetterDescriptor(prop: KneProperty): String {
         val paramLayouts = buildList {
             add("JAVA_LONG") // handle
-            if (prop.type == KneType.STRING) {
+            if (prop.type.returnsViaBuffer()) {
                 add("ADDRESS") // outBuf
                 add("JAVA_INT") // outLen
             }
@@ -461,7 +479,7 @@ class FfmProxyGenerator {
 
     private fun buildCompanionGetterDescriptor(prop: KneProperty): String {
         val paramLayouts = buildList {
-            if (prop.type == KneType.STRING) {
+            if (prop.type.returnsViaBuffer()) {
                 add("ADDRESS") // outBuf
                 add("JAVA_INT") // outLen
             }
@@ -472,7 +490,7 @@ class FfmProxyGenerator {
     private fun buildTopLevelDescriptor(fn: KneFunction): String {
         val paramLayouts = buildList {
             fn.params.forEach { p -> add(p.type.ffmLayout) }
-            if (fn.returnType == KneType.STRING) {
+            if (fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS") // outBuf
                 add("JAVA_INT") // outLen
             }
@@ -482,8 +500,8 @@ class FfmProxyGenerator {
 
     private fun buildDescriptor(returnType: KneType, paramLayouts: List<String>): String {
         val params = paramLayouts.filter { it.isNotEmpty() }.joinToString(", ")
-        return if (returnType == KneType.UNIT || returnType == KneType.STRING) {
-            val retLayout = if (returnType == KneType.STRING) "JAVA_INT" else ""
+        return if (returnType == KneType.UNIT || returnType.returnsViaBuffer()) {
+            val retLayout = if (returnType.returnsViaBuffer()) "JAVA_INT" else ""
             if (retLayout.isEmpty()) "FunctionDescriptor.ofVoid($params)"
             else "FunctionDescriptor.of($retLayout${if (params.isNotEmpty()) ", $params" else ""})"
         } else {
@@ -502,6 +520,21 @@ class FfmProxyGenerator {
         KneType.BOOLEAN -> "if ($name) 1 else 0"
         is KneType.OBJECT -> "$name.handle"
         is KneType.ENUM -> "$name.ordinal"
+        is KneType.NULLABLE -> buildNullableJvmInvokeArg(name, type)
+        else -> name
+    }
+
+    private fun buildNullableJvmInvokeArg(name: String, type: KneType.NULLABLE): String = when (type.inner) {
+        KneType.STRING -> "${name}Seg"
+        KneType.BOOLEAN -> "if ($name == null) -1 else if ($name) 1 else 0"
+        KneType.INT -> "$name?.toLong() ?: Long.MIN_VALUE"
+        KneType.LONG -> "$name ?: Long.MIN_VALUE"
+        KneType.SHORT -> "$name?.toInt() ?: Int.MIN_VALUE"
+        KneType.BYTE -> "$name?.toInt() ?: Int.MIN_VALUE"
+        KneType.FLOAT -> "if ($name != null) $name.toRawBits().toLong() else Long.MIN_VALUE"
+        KneType.DOUBLE -> "if ($name != null) $name.toRawBits() else Long.MIN_VALUE"
+        is KneType.OBJECT -> "$name?.handle ?: 0L"
+        is KneType.ENUM -> "$name?.ordinal ?: -1"
         else -> name
     }
 
@@ -514,7 +547,7 @@ class FfmProxyGenerator {
         val args = buildList {
             add("handle")
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType == KneType.STRING) {
+            if (fn.returnType.returnsViaBuffer()) {
                 add("buf")
                 add("$STRING_BUF_SIZE")
             }
@@ -533,7 +566,7 @@ class FfmProxyGenerator {
     private fun buildTopLevelInvokeArgs(fn: KneFunction): String {
         val args = buildList {
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType == KneType.STRING) {
+            if (fn.returnType.returnsViaBuffer()) {
                 add("buf")
                 add("$STRING_BUF_SIZE")
             }
@@ -544,12 +577,15 @@ class FfmProxyGenerator {
     // ── Code emission helpers ─────────────────────────────────────────────────
 
     /**
-     * Emits Arena allocations for all String parameters.
+     * Emits Arena allocations for all String parameters (including nullable).
      * Each String param becomes a `val <name>Seg = arena.allocateFrom(<name>)`.
      */
     private fun StringBuilder.appendStringInvokeArgsAlloc(indent: String, params: List<KneParam>) {
         params.filter { it.type == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = arena.allocateFrom(${p.name})")
+        }
+        params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
+            appendLine("${indent}val ${p.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}) else MemorySegment.NULL")
         }
     }
 
@@ -584,6 +620,60 @@ class FfmProxyGenerator {
             is KneType.ENUM -> {
                 appendLine("${indent}return ${returnType.simpleName}.entries[$handleName.invoke($invokeArgs) as Int]")
             }
+            is KneType.NULLABLE -> appendNullableCallAndReturn(indent, returnType, handleName, invokeArgs)
+        }
+    }
+
+    private fun StringBuilder.appendNullableCallAndReturn(
+        indent: String,
+        type: KneType.NULLABLE,
+        handleName: String,
+        invokeArgs: String,
+    ) {
+        when (type.inner) {
+            KneType.STRING -> {
+                appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+                appendLine("${indent}val len = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}return if (len < 0) null else buf.getString(0)")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}return if (raw < 0) null else raw != 0")
+            }
+            KneType.INT -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return if (raw == Long.MIN_VALUE) null else raw.toInt()")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return if (raw == Long.MIN_VALUE) null else raw")
+            }
+            KneType.SHORT -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}return if (raw == Int.MIN_VALUE) null else raw.toShort()")
+            }
+            KneType.BYTE -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}return if (raw == Int.MIN_VALUE) null else raw.toByte()")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Float.fromBits(raw.toInt())")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Double.fromBits(raw)")
+            }
+            is KneType.OBJECT -> {
+                appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}return if (resultHandle == 0L) null else ${type.inner.simpleName}.fromNativeHandle(resultHandle)")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}return if (raw < 0) null else ${type.inner.simpleName}.entries[raw]")
+            }
+            KneType.UNIT -> appendLine("${indent}$handleName.invoke($invokeArgs)")
+            else -> appendLine("${indent}return $handleName.invoke($invokeArgs)")
         }
     }
 
@@ -600,6 +690,29 @@ class FfmProxyGenerator {
             KneType.BOOLEAN -> appendLine("${indent}$handleName.invoke(${prefix}if (value) 1 else 0)")
             is KneType.OBJECT -> appendLine("${indent}$handleName.invoke(${prefix}value.handle)")
             is KneType.ENUM -> appendLine("${indent}$handleName.invoke(${prefix}value.ordinal)")
+            is KneType.NULLABLE -> appendNullableSetterInvoke(indent, handleName, type, handleArg)
+            else -> appendLine("${indent}$handleName.invoke(${prefix}value)")
+        }
+    }
+
+    private fun StringBuilder.appendNullableSetterInvoke(indent: String, handleName: String, type: KneType.NULLABLE, handleArg: String?) {
+        val prefix = if (handleArg != null) "$handleArg, " else ""
+        when (type.inner) {
+            KneType.STRING -> {
+                appendLine("${indent}Arena.ofConfined().use { arena ->")
+                appendLine("${indent}    val valueSeg = if (value != null) arena.allocateFrom(value) else MemorySegment.NULL")
+                appendLine("${indent}    $handleName.invoke(${prefix}valueSeg)")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> appendLine("${indent}$handleName.invoke(${prefix}if (value == null) -1 else if (value) 1 else 0)")
+            KneType.INT -> appendLine("${indent}$handleName.invoke(${prefix}value?.toLong() ?: Long.MIN_VALUE)")
+            KneType.LONG -> appendLine("${indent}$handleName.invoke(${prefix}value ?: Long.MIN_VALUE)")
+            KneType.SHORT -> appendLine("${indent}$handleName.invoke(${prefix}value?.toInt() ?: Int.MIN_VALUE)")
+            KneType.BYTE -> appendLine("${indent}$handleName.invoke(${prefix}value?.toInt() ?: Int.MIN_VALUE)")
+            KneType.FLOAT -> appendLine("${indent}$handleName.invoke(${prefix}if (value != null) value.toRawBits().toLong() else Long.MIN_VALUE)")
+            KneType.DOUBLE -> appendLine("${indent}$handleName.invoke(${prefix}if (value != null) value.toRawBits() else Long.MIN_VALUE)")
+            is KneType.OBJECT -> appendLine("${indent}$handleName.invoke(${prefix}value?.handle ?: 0L)")
+            is KneType.ENUM -> appendLine("${indent}$handleName.invoke(${prefix}value?.ordinal ?: -1)")
             else -> appendLine("${indent}$handleName.invoke(${prefix}value)")
         }
     }
