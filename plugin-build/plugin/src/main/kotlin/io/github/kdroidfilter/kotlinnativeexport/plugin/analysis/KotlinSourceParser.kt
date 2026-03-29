@@ -457,6 +457,7 @@ class KotlinSourceParser {
         val supportedCallbackReturns = setOf(
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.UNIT,
+            KneType.STRING,
         )
         val returnType = parseType(returnStr, knownTypes)
         if (paramTypes.any { it !in supportedCallbackParams } || returnType !in supportedCallbackReturns) return null

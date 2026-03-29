@@ -410,6 +410,8 @@ class NativeBridgeGenerator {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         } else if (fnType.returnType == KneType.BOOLEAN) {
             appendLine("        _fnPtr.invoke($invokeArgs) != 0")
+        } else if (fnType.returnType == KneType.STRING) {
+            appendLine("        _fnPtr.invoke($invokeArgs)?.toKString() ?: \"\"")
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }
@@ -435,6 +437,7 @@ class NativeBridgeGenerator {
     private fun cFunctionReturnType(type: KneType): String = when (type) {
         KneType.UNIT -> "Unit"
         KneType.BOOLEAN -> "Int" // C uses int for bool
+        KneType.STRING -> "CPointer<ByteVar>?"
         else -> cFunctionParamType(type)
     }
 

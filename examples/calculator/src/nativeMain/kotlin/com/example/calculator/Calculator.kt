@@ -125,6 +125,15 @@ class Calculator(initial: Int = 0) {
         callback("Calculator(current=$accumulator)")
     }
 
+    fun formatWith(formatter: (Int) -> String): String {
+        return formatter(accumulator)
+    }
+
+    fun transformLabel(fn: (String) -> String): String {
+        label = fn(label)
+        return label
+    }
+
     fun findAndReport(keyword: String, callback: (String, Int) -> Unit) {
         val found = if (label.contains(keyword)) 1 else 0
         callback(label, found)

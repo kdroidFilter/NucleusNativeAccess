@@ -841,6 +841,49 @@ class CalculatorTest {
     }
 
     @Test
+    fun `callback (Int) to String - format value`() {
+        Calculator(42).use { calc ->
+            val result = calc.formatWith { v -> "Value is $v" }
+            assertEquals("Value is 42", result)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to String - negative value`() {
+        Calculator(-5).use { calc ->
+            val result = calc.formatWith { v -> "[$v]" }
+            assertEquals("[-5]", result)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to String - empty result`() {
+        Calculator(0).use { calc ->
+            val result = calc.formatWith { "" }
+            assertEquals("", result)
+        }
+    }
+
+    @Test
+    fun `callback (String) to String - transform label`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello"
+            val result = calc.transformLabel { it.uppercase() }
+            assertEquals("HELLO", result)
+            assertEquals("HELLO", calc.label)
+        }
+    }
+
+    @Test
+    fun `callback (String) to String - prepend prefix`() {
+        Calculator(0).use { calc ->
+            calc.label = "world"
+            val result = calc.transformLabel { "Hello $it" }
+            assertEquals("Hello world", result)
+        }
+    }
+
+    @Test
     fun `callback (String, Int) to Unit - matching keyword`() {
         Calculator(0).use { calc ->
             calc.label = "hello world"

@@ -240,6 +240,8 @@ class FfmProxyGenerator {
             appendLine("        _fn.invoke($invokeConvertedArgs)")
         } else if (sig.returnType == KneType.BOOLEAN) {
             appendLine("        return if (_fn.invoke($invokeConvertedArgs)) 1 else 0")
+        } else if (sig.returnType == KneType.STRING) {
+            appendLine("        return Arena.ofAuto().allocateFrom(_fn.invoke($invokeConvertedArgs))")
         } else {
             appendLine("        return _fn.invoke($invokeConvertedArgs)")
         }
