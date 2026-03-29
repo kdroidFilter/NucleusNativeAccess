@@ -355,6 +355,43 @@ class Calculator(initial: Int = 0) {
         emit(true); emit(false); emit(accumulator > 0)
     }
 
+    // ── Flow<DataClass> support ────────────────────────────────────────────────
+
+    fun pointFlow(count: Int): kotlinx.coroutines.flow.Flow<Point> = kotlinx.coroutines.flow.flow {
+        repeat(count) { i -> kotlinx.coroutines.delay(3); emit(Point(i, i * 2)) }
+    }
+
+    fun namedValueFlow(): kotlinx.coroutines.flow.Flow<NamedValue> = kotlinx.coroutines.flow.flow {
+        emit(NamedValue(label.ifEmpty { "default" }, accumulator))
+        emit(NamedValue("second", accumulator * 2))
+    }
+
+    fun taggedPointFlow(): kotlinx.coroutines.flow.Flow<TaggedPoint> = kotlinx.coroutines.flow.flow {
+        Operation.entries.forEach { op ->
+            emit(TaggedPoint(Point(accumulator, accumulator * 2), op))
+        }
+    }
+
+    fun emptyPointFlow(): kotlinx.coroutines.flow.Flow<Point> = kotlinx.coroutines.flow.emptyFlow()
+
+    fun singlePointFlow(): kotlinx.coroutines.flow.Flow<Point> = kotlinx.coroutines.flow.flowOf(Point(accumulator, accumulator * 2))
+
+    fun failingPointFlow(): kotlinx.coroutines.flow.Flow<Point> = kotlinx.coroutines.flow.flow {
+        emit(Point(1, 2)); error("point flow boom")
+    }
+
+    fun calcResultFlow(count: Int): kotlinx.coroutines.flow.Flow<CalcResult> = kotlinx.coroutines.flow.flow {
+        repeat(count) { i ->
+            kotlinx.coroutines.delay(3)
+            emit(CalcResult(accumulator + i, "step_$i"))
+        }
+    }
+
+    fun rectFlow(): kotlinx.coroutines.flow.Flow<Rect> = kotlinx.coroutines.flow.flow {
+        emit(Rect(Point(0, 0), Point(accumulator, accumulator)))
+        emit(Rect(Point(1, 1), Point(accumulator + 1, accumulator + 1)))
+    }
+
     // ── Object in callbacks ────────────────────────────────────────────────────
 
     fun onSelfReady(callback: (Calculator) -> Unit) {

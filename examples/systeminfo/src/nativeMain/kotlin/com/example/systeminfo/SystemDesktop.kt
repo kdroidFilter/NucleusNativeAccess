@@ -1,5 +1,7 @@
 package com.example.systeminfo
 
+data class MemoryInfo(val totalMB: Long, val availableMB: Long)
+
 /**
  * Cross-platform access to native OS APIs:
  *  - Desktop notifications (libnotify on Linux, NSUserNotification on macOS)
@@ -18,4 +20,5 @@ expect class SystemDesktop() {
     fun hideSystemTray(): Boolean
     fun updateTrayLabel(index: Int, label: String): Boolean
     fun trayClicks(): kotlinx.coroutines.flow.Flow<Int>
+    fun memoryFlow(intervalMs: Long = 1000L): kotlinx.coroutines.flow.Flow<MemoryInfo>
 }

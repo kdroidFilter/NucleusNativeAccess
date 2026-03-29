@@ -89,6 +89,10 @@ class NativeBridgeGenerator {
         // Generate list-of-DC accessor bridges for each DC used in collections
         val dcTypesInLists = collectDcListTypes(module)
         dcTypesInLists.forEach { dc -> appendListDcBridges(dc, module.libName) }
+
+        // Generate DC reader bridges for each DC used as Flow element
+        val dcTypesInFlows = collectFlowDcTypes(module)
+        dcTypesInFlows.forEach { dc -> appendFlowDcBridges(dc, module.libName) }
     }
 
     // ── Error query functions ────────────────────────────────────────────────
@@ -1265,6 +1269,33 @@ class NativeBridgeGenerator {
         return result
     }
 
+    private fun collectFlowDcTypes(module: KneModule): Set<KneType.DATA_CLASS> {
+        val result = mutableSetOf<KneType.DATA_CLASS>()
+        fun scan(type: KneType) {
+            if (type is KneType.FLOW && type.elementType is KneType.DATA_CLASS) result.add(type.elementType)
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> scan(fn.returnType) }
+            cls.companionMethods.forEach { fn -> scan(fn.returnType) }
+        }
+        module.functions.forEach { fn -> scan(fn.returnType) }
+        return result
+    }
+
+    private fun StringBuilder.appendFlowDcBridges(dc: KneType.DATA_CLASS, prefix: String) {
+        val n = dc.simpleName
+        val fq = dc.fqName
+        val outParams = buildDataClassOutParams(dc, "out")
+
+        appendLine("@CName(\"${prefix}_flowdc_${n}_read\")")
+        appendLine("fun `${prefix}_flowdc_${n}_read`(handle: Long$outParams) {")
+        appendLine("    val _item = handle.toCPointer<COpaque>()!!.asStableRef<$fq>().get()")
+        writeDataClassFields("_item", dc, "out")
+        appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<$fq>().dispose()")
+        appendLine("}")
+        appendLine()
+    }
+
     /** Generate size/get/dispose bridges for List<DC>. */
     private fun StringBuilder.appendListDcBridges(dc: KneType.DATA_CLASS, prefix: String) {
         val n = dc.simpleName
@@ -1472,6 +1503,10 @@ class NativeBridgeGenerator {
                 appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
             }
             is KneType.ENUM -> appendLine("                _nextFn.invoke($valueExpr.ordinal.toLong())")
+            is KneType.DATA_CLASS -> {
+                appendLine("                val _ref = StableRef.create($valueExpr)")
+                appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
+            }
             else -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
         }
     }

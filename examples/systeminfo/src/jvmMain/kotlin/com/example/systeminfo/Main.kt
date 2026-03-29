@@ -76,6 +76,14 @@ fun SystemInfoScreen() {
         kernel = desktop.getKernelVersion()
     }
 
+    // Real-time memory updates via Flow from native
+    LaunchedEffect(Unit) {
+        desktop.memoryFlow(2000L).collect { info ->
+            totalMem = info.totalMB
+            availMem = info.availableMB
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),

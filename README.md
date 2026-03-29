@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (739 end-to-end FFM tests)
+### Types — test coverage (770+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 739 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 53 suspend function tests with cancellation, and 23 Flow tests.
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 770+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 53 suspend function tests with cancellation, and 50+ Flow tests (including `Flow<DataClass>`).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -150,7 +150,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | `Map<K, V>` | ✅ 12t | ✅ 12t | &mdash; | ✅ 2t | ✅ 2t | String→Int, Int→String, Int→Int, String→String + merge/empty |
 | `Map<K, V>?` | &mdash; | ✅ 4t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
-| `Flow<T>` | &mdash; | ✅ 23t | &mdash; | &mdash; | &mdash; | `channelFlow` + 3 callbacks (onNext, onError, onComplete) |
+| `Flow<T>` | &mdash; | ✅ 50t+ | &mdash; | &mdash; | &mdash; | `channelFlow` + 3 callbacks (onNext, onError, onComplete), incl. `Flow<DataClass>` |
 
 ### Declarations
 
@@ -168,7 +168,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
 | Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (53 tests) |
-| Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (23 tests) |
+| Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (50+ tests, incl. DataClass) |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
 
@@ -213,7 +213,23 @@ calc.infiniteFlow().take(3).toList()     // [0, 1, 2] — auto-cancelled
 
 **Cancellation**: collecting only N elements (via `take`, `first`) automatically cancels the native Flow collection. Manual `Job.cancel()` also propagates.
 
-**Supported element types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `Object`.
+**Supported element types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `Object`, `data class` (including nested data classes).
+
+**Data class in Flow**: data classes are serialized element-by-element via `StableRef` + per-type reader bridges. Nested data classes (e.g. `Flow<Rect>` where `Rect` contains two `Point`) are fully supported.
+
+```kotlin
+// Kotlin/Native
+data class MemoryInfo(val totalMB: Long, val availableMB: Long)
+
+fun memoryFlow(intervalMs: Long = 1000L): Flow<MemoryInfo> = flow {
+    while (true) { emit(MemoryInfo(getTotalMemoryMB(), getAvailableMemoryMB())); delay(intervalMs) }
+}
+
+// JVM — transparent Flow<DataClass> collection
+desktop.memoryFlow(2000L).collect { info ->
+    println("${info.availableMB} MB / ${info.totalMB} MB")
+}
+```
 
 ### Callbacks & lambdas
 
@@ -427,7 +443,7 @@ The plugin auto-generates GraalVM reachability metadata under `META-INF/native-i
 
 - `reflect-config.json` &mdash; all generated proxy classes
 - `resource-config.json` &mdash; bundled native library resources
-- `reachability-metadata.json` &mdash; FFM foreign downcall descriptors, reflection, and resources
+- `reachability-metadata.json` &mdash; FFM foreign downcall + upcall descriptors, reflection, and resources
 
 For GraalVM native-image builds, the native `.so`/`.dylib` must be placed next to the executable (the plugin bundles it in the JAR for JVM, but native-image can't extract at runtime).
 
@@ -503,7 +519,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 739 end-to-end tests: all types, callbacks, collections, suspend, Flow, nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 770+ end-to-end tests: all types, callbacks, collections, suspend, Flow (incl. DataClass), nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -512,7 +528,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 739 end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 770+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 
