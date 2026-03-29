@@ -834,6 +834,372 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases: primitives at boundaries
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `Int MAX_VALUE`() {
+        Calculator(Int.MAX_VALUE).use { calc ->
+            assertEquals(Int.MAX_VALUE, calc.current)
+        }
+    }
+
+    @Test
+    fun `Int MIN_VALUE`() {
+        Calculator(Int.MIN_VALUE).use { calc ->
+            assertEquals(Int.MIN_VALUE, calc.current)
+        }
+    }
+
+    @Test
+    fun `Long large value`() {
+        Calculator(0).use { calc ->
+            assertEquals(1_000_000_000L, calc.addLong(1_000_000_000L))
+        }
+    }
+
+    @Test
+    fun `Double precision edge`() {
+        Calculator(0).use { calc ->
+            assertEquals(Double.MAX_VALUE, calc.addDouble(Double.MAX_VALUE), 1e300)
+        }
+    }
+
+    @Test
+    fun `Float NaN`() {
+        Calculator(0).use { calc ->
+            assertTrue(calc.addFloat(Float.NaN).isNaN())
+        }
+    }
+
+    @Test
+    fun `Boolean roundtrip both values`() {
+        Calculator(5).use { calc ->
+            assertTrue(calc.checkFlag(true))
+            assertFalse(calc.checkFlag(false))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases: String
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `String with special chars`() {
+        Calculator(0).use { calc ->
+            val special = "tab\there\nnewline\\backslash\"quote"
+            assertEquals(special, calc.echo(special))
+        }
+    }
+
+    @Test
+    fun `String with long content`() {
+        Calculator(0).use { calc ->
+            val long = "x".repeat(4000)
+            assertEquals(long, calc.echo(long))
+        }
+    }
+
+    @Test
+    fun `String property roundtrip unicode`() {
+        Calculator(0).use { calc ->
+            val emoji = "🎉🚀💻🔥"
+            calc.label = emoji
+            assertEquals(emoji, calc.label)
+        }
+    }
+
+    @Test
+    fun `String concat unicode`() {
+        Calculator(0).use { calc ->
+            assertEquals("日本語テスト", calc.concat("日本語", "テスト"))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases: Enum exhaustive
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `all enum operations produce correct results`() {
+        Calculator(10).use { calc ->
+            assertEquals(15, calc.applyOp(Operation.ADD, 5))
+            assertEquals(10, calc.applyOp(Operation.SUBTRACT, 5))
+            assertEquals(50, calc.applyOp(Operation.MULTIPLY, 5))
+        }
+    }
+
+    @Test
+    fun `enum property set and roundtrip all values`() {
+        Calculator(0).use { calc ->
+            for (op in Operation.entries) {
+                calc.lastOperation = op
+                assertEquals(op, calc.lastOperation)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases: Nullable boundary
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `nullable String property set null then non-null then null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.nickname)
+            calc.nickname = "first"
+            assertEquals("first", calc.nickname)
+            calc.nickname = null
+            assertNull(calc.nickname)
+            calc.nickname = "second"
+            assertEquals("second", calc.nickname)
+        }
+    }
+
+    @Test
+    fun `nullable Int at zero boundary`() {
+        Calculator(10).use { calc ->
+            assertEquals(5, calc.divideOrNull(2))
+            assertNull(calc.divideOrNull(0))
+            // Accumulator unchanged after null
+            assertEquals(10, calc.current)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Cross-feature: exception + other features
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `exception then callback still works`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            val result = calc.transform { it + 1 }
+            assertEquals(11, result)
+        }
+    }
+
+    @Test
+    fun `exception then data class still works`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            val p = calc.getPoint()
+            assertEquals(10, p.x)
+        }
+    }
+
+    @Test
+    fun `exception then nullable still works`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            assertEquals(5, calc.divideOrNull(2))
+        }
+    }
+
+    @Test
+    fun `exception then enum still works`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            assertEquals(15, calc.applyOp(Operation.ADD, 5))
+        }
+    }
+
+    @Test
+    fun `exception then companion still works`() {
+        assertFailsWith<KotlinNativeException> {
+            Calculator(0).use { it.divide(0) }
+        }
+        assertEquals("2.0", Calculator.version())
+    }
+
+    @Test
+    fun `exception then string still works`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            assertEquals("Calculator(current=10)", calc.describe())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Cross-feature: data class + other features
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `data class Point then modify accumulator then get again`() {
+        Calculator(5).use { calc ->
+            val p1 = calc.getPoint()
+            calc.add(10)
+            val p2 = calc.getPoint()
+            assertEquals(5, p1.x)
+            assertEquals(15, p2.x)
+        }
+    }
+
+    @Test
+    fun `data class NamedValue with empty string`() {
+        Calculator(0).use { calc ->
+            calc.setFromNamed(NamedValue("", 42))
+            assertEquals("", calc.label)
+            assertEquals(42, calc.current)
+        }
+    }
+
+    @Test
+    fun `data class NamedValue with unicode`() {
+        Calculator(0).use { calc ->
+            calc.setFromNamed(NamedValue("привет мир 🌍", 1))
+            assertEquals("привет мир 🌍", calc.label)
+        }
+    }
+
+    @Test
+    fun `data class after callback`() {
+        Calculator(10).use { calc ->
+            calc.transform { it * 3 }
+            val p = calc.getPoint()
+            assertEquals(30, p.x)
+            assertEquals(60, p.y)
+        }
+    }
+
+    @Test
+    fun `common data class CalcResult negative value`() {
+        Calculator(-5).use { calc ->
+            val r = calc.getResult()
+            assertEquals(-5, r.value)
+            assertEquals("Result: -5", r.description)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Cross-feature: callbacks + other features
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback String with unicode`() {
+        Calculator(42).use { calc ->
+            var received = ""
+            calc.withDescription { received = it }
+            assertTrue(received.contains("42"))
+        }
+    }
+
+    @Test
+    fun `callback (Int) to String with empty return`() {
+        Calculator(0).use { calc ->
+            val result = calc.formatWith { "" }
+            assertEquals("", result)
+        }
+    }
+
+    @Test
+    fun `callback (String) to String identity`() {
+        Calculator(0).use { calc ->
+            calc.label = "identity"
+            val result = calc.transformLabel { it }
+            assertEquals("identity", result)
+        }
+    }
+
+    @Test
+    fun `callback after data class operations`() {
+        Calculator(0).use { calc ->
+            calc.addPoint(Point(5, 10))
+            var received = -1
+            calc.onValueChanged { received = it }
+            assertEquals(15, received)
+        }
+    }
+
+    @Test
+    fun `callback predicate on negative value`() {
+        Calculator(-10).use { calc ->
+            assertTrue(calc.checkWith { it < 0 })
+            assertFalse(calc.checkWith { it > 0 })
+            assertTrue(calc.checkWith { it == -10 })
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Cross-feature: object types + other features
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `manager with multiple calculators then nullable`() {
+        CalculatorManager().use { mgr ->
+            mgr.create("a", 10)
+            val found = mgr.getOrNull("a")
+            val missing = mgr.getOrNull("z")
+            assertTrue(found != null)
+            assertEquals(10, found!!.current)
+            assertNull(missing)
+            found.close()
+        }
+    }
+
+    @Test
+    fun `manager count after multiple creates`() {
+        CalculatorManager().use { mgr ->
+            assertEquals(0, mgr.count())
+            mgr.create("a", 1)
+            assertEquals(1, mgr.count())
+            mgr.create("b", 2)
+            assertEquals(2, mgr.count())
+            mgr.create("c", 3)
+            assertEquals(3, mgr.count())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Sequential stress: many operations in sequence
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `100 sequential adds`() {
+        Calculator(0).use { calc ->
+            for (i in 1..100) calc.add(1)
+            assertEquals(100, calc.current)
+        }
+    }
+
+    @Test
+    fun `50 callback invocations`() {
+        Calculator(0).use { calc ->
+            val values = mutableListOf<Int>()
+            for (i in 1..50) {
+                calc.add(1)
+                calc.onValueChanged { values.add(it) }
+            }
+            assertEquals(50, values.size)
+            assertEquals(50, values.last())
+        }
+    }
+
+    @Test
+    fun `20 data class roundtrips`() {
+        Calculator(0).use { calc ->
+            for (i in 1..20) {
+                calc.setFromNamed(NamedValue("iter$i", i))
+                val nv = calc.getNamedValue()
+                assertEquals("iter$i", nv.name)
+                assertEquals(i, nv.value)
+            }
+        }
+    }
+
+    @Test
+    fun `10 exception recoveries`() {
+        Calculator(10).use { calc ->
+            for (i in 1..10) {
+                assertFailsWith<KotlinNativeException> { calc.divide(0) }
+                assertEquals(10, calc.current)
+            }
+            // Still works after all exceptions
+            assertEquals(5, calc.divide(2))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Phase 4: Callbacks / Lambdas (FFM upcall stubs)
     // ═══════════════════════════════════════════════════════════════════════════
 
