@@ -117,9 +117,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (685 end-to-end FFM tests)
+### Types — test coverage (739 end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (190+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 685 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), and 22 suspend function tests with cancellation.
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 739 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 53 suspend function tests with cancellation, and 23 Flow tests.
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -146,6 +146,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (190+ exported symbols)
 | `Map<K, V>` | ✅ 12t | ✅ 12t | &mdash; | ✅ 2t | ✅ 2t | String→Int, Int→String, Int→Int, String→String + merge/empty |
 | `Map<K, V>?` | &mdash; | ✅ 4t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
+| `Flow<T>` | &mdash; | ✅ 23t | &mdash; | &mdash; | &mdash; | `channelFlow` + 3 callbacks (onNext, onError, onComplete) |
 
 ### Declarations
 
@@ -162,7 +163,8 @@ Every test compiles Kotlin/Native → `libcalculator.so` (190+ exported symbols)
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
-| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation |
+| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (53 tests) |
+| Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (23 tests) |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
 
@@ -186,6 +188,28 @@ val result = calc.fetchData("test")  // suspends the coroutine
 **Cancellation**: JVM coroutine cancel → `Job.cancel()` on native side. Native `CancellationException` → JVM `CancellationException`. Bidirectional, automatic.
 
 **Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`, `Object`, nullable variants.
+
+### Flow&lt;T&gt;
+
+Kotlin/Native `Flow<T>` is transparently mapped to JVM `Flow<T>` via `channelFlow`. Event streams, tickers, and reactive patterns work naturally.
+
+```kotlin
+// Kotlin/Native
+fun countUp(max: Int): Flow<Int> = flow {
+    for (i in 1..max) { delay(10); emit(i) }
+}
+
+// JVM — transparent Flow collection
+calc.countUp(5).collect { println(it) }  // 1, 2, 3, 4, 5
+calc.countUp(100).toList()               // [1, 2, ..., 100]
+calc.infiniteFlow().take(3).toList()     // [0, 1, 2] — auto-cancelled
+```
+
+**How it works**: 3 native callbacks (`onNext`, `onError`, `onComplete`) are passed as FFM upcall stubs. The native side collects the Flow in a `CoroutineScope` and calls `onNext` for each element. The JVM proxy uses `channelFlow { trySend(...); awaitClose { cancelJob() } }`.
+
+**Cancellation**: collecting only N elements (via `take`, `first`) automatically cancels the native Flow collection. Manual `Job.cancel()` also propagates.
+
+**Supported element types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `Object`.
 
 ### Callbacks & lambdas
 
