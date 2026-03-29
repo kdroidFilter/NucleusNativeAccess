@@ -7,6 +7,10 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib"))
     implementation(gradleApi())
+
+    // kotlin-compiler-embeddable for PSI parsing (compileOnly — loaded at runtime via isolated Worker classloader)
+    compileOnly(libs.kotlin.compiler.embeddable)
+
     compileOnly(libs.kotlin.gradle.plugin)
 
     testImplementation(libs.junit)

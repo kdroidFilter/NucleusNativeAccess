@@ -16,3 +16,4 @@ versionCheck = { id = "com.github.ben-manes.versions", version.ref = "versionChe
 [libraries]
 junit = "junit:junit:4.13.2"
 kotlin-gradle-plugin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-plugin", version.ref = "kotlin" }
+kotlin-compiler-embeddable = { group = "org.jetbrains.kotlin", name = "kotlin-compiler-embeddable", version.ref = "kotlin" }

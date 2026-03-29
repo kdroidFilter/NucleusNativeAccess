@@ -1,11 +1,11 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin.tasks
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.analysis.RegexSourceParser
-import io.github.kdroidfilter.kotlinnativeexport.plugin.codegen.NativeBridgeGenerator
+import io.github.kdroidfilter.kotlinnativeexport.plugin.analysis.PsiParseWorkAction
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Classpath
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.OutputDirectory
@@ -13,58 +13,51 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.SkipWhenEmpty
 import org.gradle.api.tasks.TaskAction
+import org.gradle.workers.WorkerExecutor
+import javax.inject.Inject
 
-/**
- * Scans nativeMain sources and generates @CName bridge functions.
- * Output is added to the nativeMain source set before native compilation.
- */
 abstract class GenerateNativeBridgesTask : DefaultTask() {
 
-    @get:InputFiles
-    @get:SkipWhenEmpty
-    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Inject abstract val workerExecutor: WorkerExecutor
+
+    @get:InputFiles @get:SkipWhenEmpty @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val nativeSources: ConfigurableFileCollection
 
-    @get:InputFiles
-    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val commonSources: ConfigurableFileCollection
 
-    @get:Input
-    abstract val libName: Property<String>
-
-    @get:OutputDirectory
-    abstract val outputDir: DirectoryProperty
+    @get:Classpath abstract val psiClasspath: ConfigurableFileCollection
+    @get:Input abstract val libName: Property<String>
+    @get:Input abstract val jvmPackage: Property<String>
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+    @get:OutputDirectory abstract val jvmOutputDir: DirectoryProperty
 
     @TaskAction
     fun generate() {
-        val outDir = outputDir.get().asFile
-        outDir.deleteRecursively()
-        outDir.mkdirs()
+        outputDir.get().asFile.apply { deleteRecursively(); mkdirs() }
+        jvmOutputDir.get().asFile.apply { deleteRecursively(); mkdirs() }
 
         val ktFiles = nativeSources.asFileTree.filter { it.extension == "kt" }.files
-        if (ktFiles.isEmpty()) {
-            logger.lifecycle("kne: No Kotlin sources found in nativeMain, skipping bridge generation.")
-            return
-        }
+        if (ktFiles.isEmpty()) { logger.lifecycle("kne: No Kotlin sources found, skipping."); return }
 
         val commonKtFiles = commonSources.asFileTree.filter { it.extension == "kt" }.files
-        logger.lifecycle("kne: Parsing ${ktFiles.size} native + ${commonKtFiles.size} common source file(s)...")
-        val module = RegexSourceParser().parse(ktFiles, libName.get(), commonKtFiles)
+        logger.lifecycle("kne: Parsing ${ktFiles.size} native + ${commonKtFiles.size} common source file(s) [PSI]...")
 
-        if (module.classes.isEmpty() && module.enums.isEmpty() && module.functions.isEmpty()) {
-            logger.lifecycle("kne: No public classes, enums, or functions found, skipping.")
-            return
+        val pluginJarUrl = PsiParseWorkAction::class.java.protectionDomain?.codeSource?.location
+        val pluginJar = pluginJarUrl?.let { project.files(java.io.File(it.toURI())) } ?: project.files()
+
+        val workQueue = workerExecutor.classLoaderIsolation { spec ->
+            spec.classpath.from(psiClasspath)
+            spec.classpath.from(pluginJar)
         }
 
-        logger.lifecycle(
-            "kne: Generating native bridges for ${module.classes.size} class(es), " +
-                "${module.enums.size} enum(s), and ${module.functions.size} function(s)."
-        )
-
-        val code = NativeBridgeGenerator().generate(module)
-        val outFile = outDir.resolve("kne_bridges.kt")
-        outFile.writeText(code)
-
-        logger.lifecycle("kne: Native bridges written to ${outFile.absolutePath}")
+        workQueue.submit(PsiParseWorkAction::class.java) { params ->
+            params.nativeSourceFiles.from(ktFiles)
+            params.commonSourceFiles.from(commonKtFiles)
+            params.libName.set(libName)
+            params.jvmPackage.set(jvmPackage)
+            params.nativeBridgesDir.set(outputDir)
+            params.jvmProxiesDir.set(jvmOutputDir)
+        }
     }
 }

@@ -1,6 +1,5 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.tasks.GenerateJvmProxiesTask
 import io.github.kdroidfilter.kotlinnativeexport.plugin.tasks.GenerateNativeBridgesTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
@@ -70,32 +69,34 @@ class KotlinNativeExportPlugin : Plugin<Project> {
         val commonMainDir = project.projectDir.resolve("src/commonMain/kotlin")
         val commonSources = project.files(if (commonMainDir.exists()) commonMainDir else null)
 
+        // ── PSI parser classpath (kotlin-compiler-embeddable for isolated Worker classloader) ──
+        val kotlinVersion = kotlin.coreLibrariesVersion
+        val psiClasspath = project.configurations.create("knePsiClasspath") {
+            it.isCanBeConsumed = false
+            it.isCanBeResolved = true
+            it.isVisible = false
+        }
+        project.dependencies.add("knePsiClasspath", "org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinVersion")
+
         // ── Code-generation tasks ────────────────────────────────────────────
 
-        val generateNativeBridges = project.tasks.register(
+        // Single task generates both native bridges and JVM proxies (PSI parsing + codegen in isolated worker)
+        val generateBridges = project.tasks.register(
             "generateKneNativeBridges",
             GenerateNativeBridgesTask::class.java,
         ) { task ->
             task.group = "kne"
-            task.description = "Generate Kotlin/Native @CName bridge functions"
-            task.nativeSources.from(userNativeSources)
-            task.commonSources.from(commonSources)
-            task.libName.set(libName)
-            task.outputDir.set(nativeBridgesDir)
-        }
-
-        val generateJvmProxies = project.tasks.register(
-            "generateKneJvmProxies",
-            GenerateJvmProxiesTask::class.java,
-        ) { task ->
-            task.group = "kne"
-            task.description = "Generate Kotlin/JVM FFM proxy classes"
+            task.description = "Generate Kotlin/Native bridges and JVM FFM proxies"
             task.nativeSources.from(userNativeSources)
             task.commonSources.from(commonSources)
             task.libName.set(libName)
             task.jvmPackage.set(pkg)
-            task.outputDir.set(jvmProxiesDir)
+            task.outputDir.set(nativeBridgesDir)
+            task.jvmOutputDir.set(jvmProxiesDir)
+            task.psiClasspath.from(psiClasspath)
         }
+        // Keep old task name as alias
+        project.tasks.register("generateKneJvmProxies") { it.dependsOn(generateBridges) }
 
         // Wire generated bridges into the native source set (try nativeMain, fall back to <target>Main)
         val nativeSourceSet = kotlin.sourceSets.findByName("nativeMain")
@@ -112,10 +113,10 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                 (name.contains("Native", ignoreCase = true) || name.contains("LinuxX64") ||
                     name.contains("MacosArm64") || name.contains("MingwX64"))
             ) {
-                task.dependsOn(generateNativeBridges)
+                task.dependsOn(generateBridges)
             }
             if (name == "compileKotlinJvm" || name == "compileKotlinJvmMain") {
-                task.dependsOn(generateJvmProxies)
+                task.dependsOn(generateBridges)
             }
         }
 
