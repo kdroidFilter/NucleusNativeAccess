@@ -32,7 +32,7 @@ develocity {
     }
 }
 
-rootProject.name = "kotlin-native-jvm-export"
+rootProject.name = "NucleusNativeAccess"
 
 include(":examples:calculator")
 include(":examples:systeminfo")

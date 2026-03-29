@@ -1,4 +1,4 @@
-# Kotlin Native Export
+# Nucleus Native Access
 
 A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation, callbacks &mdash; everything is transparent to the JVM developer.
 
