@@ -518,3 +518,65 @@ class FramedCalculator(
     fun getLabel(): String = label
     fun add(value: Int): Int { accumulator += value; return accumulator }
 }
+
+// ── Deeply nested DC + Enum combinations ────────────────────────────────────
+
+data class Style(val bold: Boolean, val color: Int)
+
+data class StyledPoint(val point: Point, val style: Style)
+
+data class TaggedRect(val rect: Rect, val tag: Operation, val name: String)
+
+data class DeepNested(val tagged: TaggedPoint, val style: Style, val scale: Double)
+
+// Class with various DC/Enum/primitive default combos
+class RichCalculator(
+    initial: Int = 0,
+    val style: Style = Style(false, 0),
+    val origin: Point = Point(0, 0),
+    val op: Operation = Operation.ADD,
+    val name: String = "rich",
+    val factor: Double = 1.0,
+) {
+    private var accumulator: Int = initial
+    val current: Int get() = accumulator
+    fun getStyle(): Style = style
+    fun getOrigin(): Point = origin
+    fun getOp(): Operation = op
+    fun getName(): String = name
+    fun getFactor(): Double = factor
+    fun add(value: Int): Int { accumulator += value; return accumulator }
+    fun scaled(): Double = accumulator * factor
+}
+
+// Class with only DC defaults (no primitives)
+class PureDefaultCalc(
+    val bounds: Rect = Rect(Point(-1, -1), Point(1, 1)),
+    val tagged: TaggedPoint = TaggedPoint(Point(0, 0), Operation.ADD),
+) {
+    fun getBounds(): Rect = bounds
+    fun getTagged(): TaggedPoint = tagged
+    fun sum(): Int = bounds.topLeft.x + bounds.topLeft.y + bounds.bottomRight.x + bounds.bottomRight.y
+}
+
+// Methods that take/return nested DCs
+class NestedDcProcessor {
+    private var lastStyle = Style(false, 0)
+    private var lastPoint = Point(0, 0)
+
+    fun processStyledPoint(sp: StyledPoint): Int = sp.point.x + sp.point.y + sp.style.color
+    fun getStyledPoint(): StyledPoint = StyledPoint(lastPoint, lastStyle)
+    fun setStyledPoint(sp: StyledPoint) { lastPoint = sp.point; lastStyle = sp.style }
+
+    fun processTaggedRect(tr: TaggedRect): String = "${tr.name}:${tr.tag}(${tr.rect.topLeft.x},${tr.rect.topLeft.y}-${tr.rect.bottomRight.x},${tr.rect.bottomRight.y})"
+    fun getTaggedRect(): TaggedRect = TaggedRect(Rect(lastPoint, lastPoint), Operation.ADD, "default")
+
+    fun processDeepNested(dn: DeepNested): Int = dn.tagged.point.x + dn.tagged.point.y + dn.style.color + (dn.scale * 10).toInt()
+    fun getDeepNested(): DeepNested = DeepNested(TaggedPoint(lastPoint, Operation.MULTIPLY), lastStyle, 2.5)
+
+    fun processConfig(cfg: Config): Int = cfg.origin.x + cfg.origin.y + cfg.scale
+    fun swapPoint(p: Point): Point { val old = lastPoint; lastPoint = p; return old }
+
+    fun getStyleOrNull(): Style? = if (lastStyle.color != 0) lastStyle else null
+    fun getStyledPointOrNull(): StyledPoint? = if (lastPoint.x != 0) StyledPoint(lastPoint, lastStyle) else null
+}
