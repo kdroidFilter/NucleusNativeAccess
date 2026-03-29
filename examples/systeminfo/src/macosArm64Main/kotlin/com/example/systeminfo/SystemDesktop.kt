@@ -105,10 +105,6 @@ actual class SystemDesktop {
         return true
     }
 
-    actual fun setTrayClickCallback(callback: (Int) -> Unit) {
-        // TODO: implement macOS tray click callback
-    }
-
     actual fun trayClicks(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.emptyFlow()
 
     private fun formatUptime(seconds: Double): String {

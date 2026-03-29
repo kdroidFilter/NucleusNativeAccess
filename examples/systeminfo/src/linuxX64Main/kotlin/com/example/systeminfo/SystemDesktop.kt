@@ -97,13 +97,6 @@ actual class SystemDesktop {
         return systray_hide_dbus() != 0
     }
 
-    actual fun setTrayClickCallback(callback: (Int) -> Unit) {
-        _trayClickCallback = callback
-        systray_set_click_callback(staticCFunction { index ->
-            _trayClickCallback?.invoke(index)
-        })
-    }
-
     actual fun trayClicks(): Flow<Int> = callbackFlow {
         _trayClickCallback = { index -> trySend(index) }
         systray_set_click_callback(staticCFunction { index ->
