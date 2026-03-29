@@ -31,6 +31,7 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
     @get:Input abstract val jvmPackage: Property<String>
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
     @get:OutputDirectory abstract val jvmOutputDir: DirectoryProperty
+    @get:OutputDirectory abstract val jvmResourcesDir: DirectoryProperty
 
     @TaskAction
     fun generate() {
@@ -58,6 +59,7 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
             params.jvmPackage.set(jvmPackage)
             params.nativeBridgesDir.set(outputDir)
             params.jvmProxiesDir.set(jvmOutputDir)
+            params.jvmResourcesDir.set(jvmResourcesDir)
         }
     }
 }

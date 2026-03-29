@@ -48,23 +48,9 @@ kotlinNativeExport {
     nativePackage = "com.example.calculator"
 }
 
-val nativeBuildDir = "${project.projectDir}/build".replace("\\", "/")
-val hostTarget = when {
-    System.getProperty("os.name") == "Linux" -> "linuxX64"
-    System.getProperty("os.name") == "Mac OS X" -> "macosArm64"
-    else -> "mingwX64"
-}
-val nativeLibPaths = listOf(
-    "$nativeBuildDir/bin/$hostTarget/calculatorReleaseShared",
-    "$nativeBuildDir/bin/$hostTarget/calculatorDebugShared",
-).joinToString(File.pathSeparator)
-
 nucleus.application {
     mainClass = "com.example.calculator.MainKt"
-    jvmArgs += listOf(
-        "--enable-native-access=ALL-UNNAMED",
-        "-Djava.library.path=$nativeLibPaths",
-    )
+    jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 
     graalvm {
         isEnabled = true
@@ -78,7 +64,6 @@ nucleus.application {
             "-Os",
             "-H:-IncludeMethodData",
             "--enable-native-access=ALL-UNNAMED",
-            "-Djava.library.path=$nativeLibPaths",
         )
     }
 
@@ -120,40 +105,35 @@ nucleus.application {
 }
 
 afterEvaluate {
-    tasks.matching { it.name == "run" }.configureEach {
-        val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
-        dependsOn("linkCalculatorReleaseShared$cap")
+    // Copy the Kotlin/Native shared library next to the GraalVM native binary
+    // (native-image can't extract from JAR at runtime — needs .so beside the executable)
+    val hostTarget = when {
+        System.getProperty("os.name") == "Linux" -> "linuxX64"
+        System.getProperty("os.name") == "Mac OS X" -> "macosArm64"
+        else -> "mingwX64"
     }
-
-    // Copy the Kotlin/Native shared library into the GraalVM native output
     tasks.matching { it.name == "packageGraalvmNative" }.configureEach {
         val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
         dependsOn("linkCalculatorReleaseShared$cap")
         doLast {
             val libFileName = System.mapLibraryName("calculator")
             val src = file("build/bin/$hostTarget/calculatorReleaseShared/$libFileName")
-            if (!src.exists()) {
-                println("kne: WARNING - $src does not exist, skipping copy")
-                return@doLast
-            }
-            // Copy into the macOS .app bundle (Contents/MacOS/) where java.library.path points
-            val appBundleMacOS = file("build/compose/tmp/main/graalvm/output/com.example.nativecalculator.app/Contents/MacOS")
-            if (appBundleMacOS.exists()) {
-                src.copyTo(appBundleMacOS.resolve(libFileName), overwrite = true)
-                println("kne: Copied $libFileName to $appBundleMacOS")
-            }
-            // Copy next to the native-image compiler working dir (for compilation)
-            val nativeCompileDir = file("build/compose/tmp/main/graalvm/nativeCompile")
-            if (nativeCompileDir.exists()) {
-                src.copyTo(nativeCompileDir.resolve(libFileName), overwrite = true)
-                println("kne: Copied $libFileName to $nativeCompileDir")
-            }
-            // Copy next to the final native-image executable (for runtime)
-            val outputDir = file("build/compose/tmp/main/graalvm/output")
-            if (outputDir.exists()) {
-                outputDir.listFiles()?.filter { it.isDirectory }?.forEach { appDir ->
-                    src.copyTo(appDir.resolve(libFileName), overwrite = true)
-                    println("kne: Copied $libFileName to $appDir")
+            if (!src.exists()) return@doLast
+            listOf(
+                "build/compose/tmp/main/graalvm/nativeCompile",
+                "build/compose/tmp/main/graalvm/output",
+            ).forEach { dir ->
+                val target = file(dir)
+                if (target.exists()) {
+                    if (target.isDirectory && dir.endsWith("output")) {
+                        target.listFiles()?.filter { it.isDirectory }?.forEach { appDir ->
+                            src.copyTo(appDir.resolve(libFileName), overwrite = true)
+                            println("kne: Copied $libFileName to $appDir")
+                        }
+                    } else {
+                        src.copyTo(target.resolve(libFileName), overwrite = true)
+                        println("kne: Copied $libFileName to $target")
+                    }
                 }
             }
         }

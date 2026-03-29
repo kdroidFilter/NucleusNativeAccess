@@ -30,6 +30,103 @@ class FfmProxyGenerator {
         private const val STRING_BUF_SIZE = 8192
         private const val ERR_BUF_SIZE = 8192
         private const val MAX_COLLECTION_SIZE = 4096
+
+        /** Map FFM layout constants to GraalVM reachability-metadata type names. */
+        private val LAYOUT_TO_GRAAL = mapOf(
+            "JAVA_INT" to "int",
+            "JAVA_LONG" to "long long",
+            "JAVA_DOUBLE" to "double",
+            "JAVA_FLOAT" to "float",
+            "JAVA_BYTE" to "char",
+            "JAVA_SHORT" to "short",
+            "ADDRESS" to "void*",
+        )
+    }
+
+    /**
+     * Collect all unique FFM downcall descriptors required by the generated code.
+     * Returns a set of (parameterTypes, returnType) pairs in GraalVM reachability-metadata format.
+     * null returnType means void.
+     */
+    fun collectGraalVmDowncalls(module: KneModule): Set<Pair<List<String>, String?>> {
+        val descriptors = mutableSetOf<Pair<List<String>, String?>>()
+
+        fun reg(params: List<String>, ret: String?) {
+            descriptors.add(params.map { LAYOUT_TO_GRAAL[it] ?: it } to ret?.let { LAYOUT_TO_GRAAL[it] ?: it })
+        }
+
+        fun regFromDescriptor(descriptor: String) {
+            // Parse "FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT)" or "FunctionDescriptor.ofVoid(JAVA_LONG)"
+            val isVoid = descriptor.startsWith("FunctionDescriptor.ofVoid")
+            val inner = descriptor.substringAfter("(").substringBeforeLast(")")
+            val layouts = inner.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            if (isVoid) {
+                reg(layouts, null)
+            } else {
+                val ret = layouts.firstOrNull()
+                val params = layouts.drop(1)
+                reg(params, ret)
+            }
+        }
+
+        // Runtime: hasError, getLastError
+        reg(emptyList(), "int")
+        reg(listOf("void*", "int"), "int")
+
+        // Dispose handle (used by all classes)
+        reg(listOf("long long"), null)
+
+        // Suspend/Flow helpers
+        val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } || module.functions.any { it.isSuspend }
+        val hasFlow = module.classes.any { c -> c.methods.any { it.returnType is KneType.FLOW } } || module.functions.any { it.returnType is KneType.FLOW }
+        if (hasSuspend || hasFlow) {
+            reg(listOf("long long", "void*", "int"), "int")  // readStringRef
+        }
+
+        // All class constructors, methods, properties
+        for (cls in module.classes) {
+            regFromDescriptor(buildCtorDescriptor(cls.constructor.params))
+            val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+            for (drop in 1..trailingDefaults) {
+                regFromDescriptor(buildCtorDescriptor(cls.constructor.params.dropLast(drop)))
+            }
+            for (method in cls.methods) regFromDescriptor(buildMethodDescriptor(method))
+            for (prop in cls.properties) {
+                regFromDescriptor(buildGetterDescriptor(prop))
+                if (prop.mutable) reg(listOf("long long") + listOf(prop.type).filter { it.ffmLayout.isNotEmpty() }.map { LAYOUT_TO_GRAAL[it.ffmLayout] ?: it.ffmLayout }, null)
+            }
+            for (method in cls.companionMethods) regFromDescriptor(buildTopLevelDescriptor(method))
+            for (prop in cls.companionProperties) {
+                regFromDescriptor(buildCompanionGetterDescriptor(prop))
+                if (prop.mutable) reg(listOf(LAYOUT_TO_GRAAL[prop.type.ffmLayout] ?: prop.type.ffmLayout), null)
+            }
+            // List<DC> accessor handles
+            val dcListTypes = mutableSetOf<KneType.DATA_CLASS>()
+            fun scanForDcList(type: KneType) {
+                val inner = type.unwrapCollection()
+                val elem = when (inner) { is KneType.LIST -> inner.elementType; is KneType.SET -> inner.elementType; else -> null }
+                if (elem is KneType.DATA_CLASS) dcListTypes.add(elem)
+            }
+            cls.methods.forEach { m -> scanForDcList(m.returnType) }
+            cls.companionMethods.forEach { m -> scanForDcList(m.returnType) }
+            for (dc in dcListTypes) {
+                reg(listOf("long long"), "int")  // list_size
+                reg(listOf("long long"), null)    // list_dispose (same as dispose)
+                // list_get: JAVA_LONG, JAVA_INT, then ADDRESS per field (STRING/ByteArray get ADDRESS+JAVA_INT)
+                val getParams = buildList {
+                    add("long long"); add("int")
+                    flattenDcFields(dc, "").forEach { (_, type) ->
+                        when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("void*"); add("int") }; else -> add("void*") }
+                    }
+                }
+                reg(getParams, null)
+            }
+        }
+
+        // Top-level functions
+        for (fn in module.functions) regFromDescriptor(buildTopLevelDescriptor(fn))
+
+        return descriptors
     }
 
     private fun KneType.returnsViaBuffer(): Boolean =
@@ -143,11 +240,17 @@ class FfmProxyGenerator {
         appendLine("import java.lang.foreign.MemorySegment")
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
+        appendLine("import java.nio.file.Files")
         appendLine("import java.nio.file.Paths")
+        appendLine("import java.nio.file.StandardCopyOption")
         appendLine()
         appendLine("/**")
         appendLine(" * Shared FFM runtime: loads the native library, resolves MethodHandles,")
         appendLine(" * and propagates exceptions from the native side.")
+        appendLine(" *")
+        appendLine(" * Library loading is two-tier:")
+        appendLine(" *  1. Search java.library.path (works for packaged apps, manual config)")
+        appendLine(" *  2. Extract from JAR resources to persistent cache (zero-config)")
         appendLine(" */")
         appendLine("internal object KneRuntime {")
         appendLine()
@@ -158,21 +261,57 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("    private fun loadLibrary(name: String): SymbolLookup {")
         appendLine("        val fileName = System.mapLibraryName(name)")
+        appendLine()
+        appendLine("        // Tier 1: Search java.library.path + working dir")
         appendLine("        val sep = if (System.getProperty(\"os.name\").lowercase().contains(\"win\")) \";\" else \":\"")
         appendLine("        val basePaths = System.getProperty(\"java.library.path\", \"\").split(sep)")
         appendLine("        val extraDirs = mutableListOf(System.getProperty(\"user.dir\", \".\"))")
-        appendLine("        try {")
-        appendLine("            ProcessHandle.current().info().command().ifPresent { cmd ->")
-        appendLine("                Paths.get(cmd).parent?.toString()?.let { extraDirs.add(it) }")
-        appendLine("            }")
-        appendLine("        } catch (_: Exception) {}")
-        appendLine("        val allBases = (basePaths + extraDirs).distinct().filter { it.isNotBlank() }")
-        appendLine("        val paths = allBases + allBases.map { Paths.get(it, \"lib\").toString() }")
-        appendLine("        for (dir in paths) {")
+        appendLine("        try { ProcessHandle.current().info().command().ifPresent { cmd -> Paths.get(cmd).parent?.toString()?.let { extraDirs.add(it) } } } catch (_: Exception) {}")
+        appendLine("        for (dir in (basePaths + extraDirs).distinct().filter { it.isNotBlank() }) {")
         appendLine("            val file = Paths.get(dir, fileName).toFile()")
         appendLine("            if (file.exists()) return SymbolLookup.libraryLookup(file.toPath(), globalArena)")
+        appendLine("            val libFile = Paths.get(dir, \"lib\", fileName).toFile()")
+        appendLine("            if (libFile.exists()) return SymbolLookup.libraryLookup(libFile.toPath(), globalArena)")
         appendLine("        }")
+        appendLine()
+        appendLine("        // Tier 2: Extract from JAR resources to persistent cache")
+        appendLine("        val platform = detectPlatform()")
+        appendLine("        val resourcePath = \"/kne/native/\$platform/\$fileName\"")
+        appendLine("        val stream = KneRuntime::class.java.getResourceAsStream(resourcePath)")
+        appendLine("        if (stream != null) {")
+        appendLine("            val cacheDir = resolveCacheDir(platform)")
+        appendLine("            Files.createDirectories(cacheDir)")
+        appendLine("            val target = cacheDir.resolve(fileName)")
+        appendLine("            stream.use { input ->")
+        appendLine("                val bytes = input.readAllBytes()")
+        appendLine("                if (!Files.exists(target) || Files.size(target) != bytes.size.toLong()) {")
+        appendLine("                    val tmp = Files.createTempFile(cacheDir, name, \".tmp\")")
+        appendLine("                    Files.write(tmp, bytes)")
+        appendLine("                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)")
+        appendLine("                }")
+        appendLine("            }")
+        appendLine("            return SymbolLookup.libraryLookup(target, globalArena)")
+        appendLine("        }")
+        appendLine()
+        appendLine("        // Tier 3: Fallback to loader lookup (GraalVM native-image)")
         appendLine("        return SymbolLookup.loaderLookup()")
+        appendLine("    }")
+        appendLine()
+        appendLine("    private fun detectPlatform(): String {")
+        appendLine("        val os = System.getProperty(\"os.name\", \"\").lowercase()")
+        appendLine("        val arch = System.getProperty(\"os.arch\").let { if (it == \"aarch64\" || it == \"arm64\") \"aarch64\" else \"x64\" }")
+        appendLine("        val osName = when { os.contains(\"mac\") || os.contains(\"darwin\") -> \"darwin\"; os.contains(\"win\") -> \"win32\"; else -> \"linux\" }")
+        appendLine("        return \"\$osName-\$arch\"")
+        appendLine("    }")
+        appendLine()
+        appendLine("    private fun resolveCacheDir(platform: String): java.nio.file.Path {")
+        appendLine("        val os = System.getProperty(\"os.name\", \"\").lowercase()")
+        appendLine("        val base = when {")
+        appendLine("            os.contains(\"mac\") -> Paths.get(System.getProperty(\"user.home\"), \"Library\", \"Caches\")")
+        appendLine("            os.contains(\"win\") -> Paths.get(System.getenv(\"LOCALAPPDATA\") ?: System.getProperty(\"user.home\"))")
+        appendLine("            else -> Paths.get(System.getenv(\"XDG_CACHE_HOME\") ?: \"\${System.getProperty(\"user.home\")}/.cache\")")
+        appendLine("        }")
+        appendLine("        return base.resolve(\"kne\").resolve(\"native\").resolve(platform)")
         appendLine("    }")
         appendLine()
         appendLine("    fun handle(symbol: String, descriptor: FunctionDescriptor): MethodHandle =")

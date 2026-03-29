@@ -48,6 +48,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
 
         val nativeBridgesDir = project.layout.buildDirectory.dir("generated/kne/nativeBridges")
         val jvmProxiesDir = project.layout.buildDirectory.dir("generated/kne/jvmProxies")
+        val jvmResourcesDir = project.layout.buildDirectory.dir("generated/kne/jvmResources")
 
         // Detect native target and its source sets.
         // Convention: use src/nativeMain if it exists (shared native source set),
@@ -93,6 +94,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
             task.jvmPackage.set(pkg)
             task.outputDir.set(nativeBridgesDir)
             task.jvmOutputDir.set(jvmProxiesDir)
+            task.jvmResourcesDir.set(jvmResourcesDir)
             task.psiClasspath.from(psiClasspath)
         }
         // Keep old task name as alias
@@ -123,6 +125,9 @@ class KotlinNativeExportPlugin : Plugin<Project> {
         // Wire generated JVM proxies into jvmMain
         kotlin.sourceSets.findByName("jvmMain")?.kotlin?.srcDir(jvmProxiesDir)
 
+        // Wire generated GraalVM metadata into JVM resources
+        kotlin.sourceSets.findByName("jvmMain")?.resources?.srcDir(jvmResourcesDir)
+
         // Ensure compilation waits for generation
         project.tasks.configureEach { task ->
             val name = task.name
@@ -148,9 +153,54 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                 )
             }
 
+        // ── Bundle native lib into JVM resources (zero-config deployment) ────
+
+        if (nativeTarget != null) {
+            val targetName = nativeTarget.name
+            val targetCap = targetName.replaceFirstChar { it.uppercaseChar() }
+            val libCap = libName.replaceFirstChar { it.uppercaseChar() }
+            val platform = mapTargetToPlatform(targetName)
+            val linkTaskName = "link${libCap}ReleaseShared$targetCap"
+
+            val copyNativeLib = project.tasks.register("copyKneNativeLib") { task ->
+                task.group = "kne"
+                task.description = "Copy native shared library into JVM resources for JAR bundling"
+                task.dependsOn(project.tasks.matching { it.name == linkTaskName })
+                task.doLast {
+                    val releaseDir = project.layout.buildDirectory
+                        .dir("bin/$targetName/${libName}ReleaseShared").get().asFile
+                    val nativeFile = releaseDir.listFiles()?.firstOrNull { f ->
+                        f.extension in listOf("so", "dylib", "dll")
+                    }
+                    if (nativeFile != null) {
+                        val destDir = project.layout.buildDirectory
+                            .dir("resources/main/kne/native/$platform").get().asFile
+                        destDir.mkdirs()
+                        nativeFile.copyTo(destDir.resolve(nativeFile.name), overwrite = true)
+                        project.logger.lifecycle("kne: Bundled ${nativeFile.name} → kne/native/$platform/")
+                    }
+                }
+            }
+
+            // Wire: JVM compilation depends on native lib copy
+            project.tasks.configureEach { task ->
+                if (task.name == "jvmProcessResources" || task.name == "processJvmMainResources") {
+                    task.dependsOn(copyNativeLib)
+                }
+            }
+        }
+
         // ── JVM test configuration ───────────────────────────────────────────
 
         configureJvmTestPaths(project, kotlin, extension)
+    }
+
+    /** Map Kotlin/Native target name to platform directory name. */
+    private fun mapTargetToPlatform(targetName: String): String = when {
+        targetName.startsWith("linux") -> if (targetName.contains("Arm") || targetName.contains("aarch")) "linux-aarch64" else "linux-x64"
+        targetName.startsWith("macos") -> if (targetName.contains("Arm") || targetName.contains("arm64") || targetName.contains("Arm64")) "darwin-aarch64" else "darwin-x64"
+        targetName.startsWith("mingw") -> if (targetName.contains("Arm")) "win32-arm64" else "win32-x64"
+        else -> "unknown"
     }
 
     /**

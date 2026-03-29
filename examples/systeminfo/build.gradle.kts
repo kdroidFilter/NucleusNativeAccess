@@ -70,18 +70,9 @@ kotlinNativeExport {
     nativePackage = "com.example.systeminfo"
 }
 
-val nativeBuildDir = "${project.projectDir}/build".replace("\\", "/")
-val nativeLibPaths = listOf(
-    "$nativeBuildDir/bin/$hostTarget/systeminfoReleaseShared",
-    "$nativeBuildDir/bin/$hostTarget/systeminfoDebugShared",
-).joinToString(File.pathSeparator)
-
 nucleus.application {
     mainClass = "com.example.systeminfo.MainKt"
-    jvmArgs += listOf(
-        "--enable-native-access=ALL-UNNAMED",
-        "-Djava.library.path=$nativeLibPaths",
-    )
+    jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 
     nativeDistributions {
         appName = "Native System Info"
@@ -94,9 +85,3 @@ nucleus.application {
     }
 }
 
-afterEvaluate {
-    tasks.matching { it.name == "run" }.configureEach {
-        val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
-        dependsOn("linkSysteminfoReleaseShared$cap")
-    }
-}
