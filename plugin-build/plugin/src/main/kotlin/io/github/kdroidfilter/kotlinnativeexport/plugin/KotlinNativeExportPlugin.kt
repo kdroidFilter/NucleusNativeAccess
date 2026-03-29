@@ -161,6 +161,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
             val libCap = libName.replaceFirstChar { it.uppercaseChar() }
             val platform = mapTargetToPlatform(targetName)
             val linkTaskName = "link${libCap}ReleaseShared$targetCap"
+            val nativeLibResourceDir = project.layout.buildDirectory.dir("generated/kne/nativeLib")
 
             val copyNativeLib = project.tasks.register("copyKneNativeLib") { task ->
                 task.group = "kne"
@@ -173,8 +174,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                         f.extension in listOf("so", "dylib", "dll")
                     }
                     if (nativeFile != null) {
-                        val destDir = project.layout.buildDirectory
-                            .dir("resources/main/kne/native/$platform").get().asFile
+                        val destDir = nativeLibResourceDir.get().asFile.resolve("kne/native/$platform")
                         destDir.mkdirs()
                         nativeFile.copyTo(destDir.resolve(nativeFile.name), overwrite = true)
                         project.logger.lifecycle("kne: Bundled ${nativeFile.name} → kne/native/$platform/")
@@ -182,7 +182,10 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                 }
             }
 
-            // Wire: JVM compilation depends on native lib copy
+            // Wire native lib resource dir into JVM resources
+            kotlin.sourceSets.findByName("jvmMain")?.resources?.srcDir(nativeLibResourceDir)
+
+            // Ensure processResources waits for the native lib copy
             project.tasks.configureEach { task ->
                 if (task.name == "jvmProcessResources" || task.name == "processJvmMainResources") {
                     task.dependsOn(copyNativeLib)

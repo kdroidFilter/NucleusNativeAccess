@@ -22,7 +22,9 @@ class Calculator {      →     @CName bridges (native)   →   class Calculator
 2. Generates `@CName` bridge functions with `StableRef` for object lifecycle (native side)
 3. Generates JVM proxy classes with FFM `MethodHandle` downcalls (JVM side)
 4. Compiles to a shared library (`.so` / `.dylib` / `.dll`)
-5. JVM code calls the proxies transparently &mdash; every call crosses the FFM boundary into native
+5. Bundles the native library into the JAR under `kne/native/{os}-{arch}/`
+6. Generates GraalVM reachability metadata (reflection, resources, FFM downcall descriptors)
+7. JVM code calls the proxies transparently &mdash; every call crosses the FFM boundary into native
 
 ## Quick start
 
@@ -399,14 +401,33 @@ The generated FFM proxies require:
 
 - **JDK 22+** (FFM API finalized in JDK 22 via [JEP 454](https://openjdk.org/jeps/454), recommended JDK 25)
 - **`--enable-native-access=ALL-UNNAMED`** JVM arg (auto-configured for tests by the plugin)
-- **`java.library.path`** pointing to the directory containing the `.so` (auto-configured for tests)
+
+The native library is automatically bundled in the JAR and extracted at runtime &mdash; no manual `java.library.path` configuration needed.
+
+### Zero-config native library loading
+
+The generated `KneRuntime` uses a three-tier loading strategy:
+
+1. **`java.library.path`** &mdash; for development, packaged apps, or manual override
+2. **JAR extraction** &mdash; extracts from `kne/native/{os}-{arch}/` in the classpath to a persistent cache (`~/.cache/kne/`)
+3. **Loader lookup** &mdash; fallback for GraalVM native-image (native lib beside the executable)
+
+### GraalVM native-image support
+
+The plugin auto-generates GraalVM reachability metadata under `META-INF/native-image/kne/{libName}/`:
+
+- `reflect-config.json` &mdash; all generated proxy classes
+- `resource-config.json` &mdash; bundled native library resources
+- `reachability-metadata.json` &mdash; FFM foreign downcall descriptors, reflection, and resources
+
+For GraalVM native-image builds, the native `.so`/`.dylib` must be placed next to the executable (the plugin bundles it in the JAR for JVM, but native-image can't extract at runtime).
 
 ### Using with Compose Desktop / Nucleus
 
 ```kotlin
 plugins {
     kotlin("multiplatform") version "2.3.20"
-    id("org.jetbrains.compose") version "1.8.0"
+    id("org.jetbrains.compose") version "1.10.2"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     id("io.github.kdroidfilter.nucleus") version "1.7.2"
     id("io.github.kdroidfilter.kotlinnativeexport")
@@ -419,13 +440,10 @@ composeCompiler {
     )
 }
 
-// Configure native lib path for the run task
+// No java.library.path needed — native lib is auto-extracted from JAR
 nucleus.application {
     mainClass = "com.example.MainKt"
-    jvmArgs += listOf(
-        "--enable-native-access=ALL-UNNAMED",
-        "-Djava.library.path=${project.projectDir}/build/bin/linuxX64/mylibReleaseShared",
-    )
+    jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 }
 ```
 
@@ -508,9 +526,9 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 │   ├── NativeBridgeGenerator.kt # @CName + StableRef bridges (inspired by @_cdecl thunks)
 │   └── FfmProxyGenerator.kt     # JVM proxy classes with FFM (inspired by FFMSwift2JavaGenerator)
 ├── tasks/
-│   └── GenerateNativeBridgesTask.kt  # Single task: PSI parse + native bridges + JVM proxies
+│   └── GenerateNativeBridgesTask.kt  # Single task: PSI parse + native bridges + JVM proxies + GraalVM metadata
 ├── KotlinNativeExportExtension.kt
-└── KotlinNativeExportPlugin.kt
+└── KotlinNativeExportPlugin.kt       # Task wiring, native lib JAR bundling, test configuration
 ```
 
 **Source analysis**: the plugin uses Kotlin PSI (`kotlin-compiler-embeddable`) for proper AST-based parsing, running in an isolated Gradle Worker classloader. This handles nested generics, function types, default parameters, multi-line constructors, and `suspend`/`Flow` detection natively &mdash; no regex.
@@ -519,16 +537,20 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, bridge generation) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles).
 
-### Next &mdash; Packaging & deployment
+### Done
 
-- [ ] **Automatic native lib bundling** &mdash; single-JAR deployment
-  - [ ] Embed `.so`/`.dylib`/`.dll` in JAR under `META-INF/native/{os}-{arch}/`
-  - [ ] `KneRuntime.loadLibrary()`: extract to temp dir at startup, load via `System.load()`
-  - [ ] Detect GraalVM native-image: skip extraction, use `SymbolLookup.loaderLookup()`
+- [x] **Automatic native lib bundling** &mdash; single-JAR deployment
+  - [x] Embed `.so`/`.dylib`/`.dll` in JAR under `kne/native/{os}-{arch}/`
+  - [x] `KneRuntime.loadLibrary()`: three-tier loading (library path, JAR extraction to `~/.cache/kne/`, loader lookup)
+  - [x] GraalVM native-image fallback via `SymbolLookup.loaderLookup()`
 
-- [ ] **GraalVM reachability-metadata generation**
-  - [ ] Generate `reachability-metadata.json` for FFM downcall descriptors
-  - [ ] Output to `META-INF/native-image/{groupId}/{artifactId}/`
+- [x] **GraalVM reachability metadata generation**
+  - [x] `reflect-config.json` for all generated proxy classes
+  - [x] `resource-config.json` for bundled native library resources
+  - [x] `reachability-metadata.json` with FFM foreign downcall descriptors
+  - [x] Output to `META-INF/native-image/kne/{libName}/`
+
+### Next
 
 - [ ] **Multi-target fat JARs**
   - [ ] Bundle per-platform native libs, detect OS/arch at startup
