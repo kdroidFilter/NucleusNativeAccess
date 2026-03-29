@@ -573,16 +573,24 @@ class FfmProxyGenerator {
         appendLine()
     }
 
+    /** Flatten data class into out-param (name, type) pairs (recursive for nested). */
+    private fun flattenDcFields(dc: KneType.DATA_CLASS, prefix: String): List<Pair<String, KneType>> =
+        dc.fields.flatMap { f ->
+            val name = "${prefix}_${f.name}"
+            if (f.type is KneType.DATA_CLASS) flattenDcFields(f.type, name)
+            else listOf(Pair(name, f.type))
+        }
+
     /** Generate the return-via-out-params pattern for DATA_CLASS return types. */
     private fun StringBuilder.appendDataClassReturnProxy(indent: String, fn: KneFunction, handleName: String, nullable: Boolean = false) {
         val dc = extractDataClass(fn.returnType)!!
+        val flatFields = flattenDcFields(dc, "out")
 
-        // Allocate out-params for each field
-        dc.fields.forEach { f ->
-            if (f.type == KneType.STRING) {
-                appendLine("${indent}val out_${f.name} = arena.allocate($STRING_BUF_SIZE.toLong())")
-            } else {
-                appendLine("${indent}val out_${f.name} = arena.allocate(${f.type.ffmLayout})")
+        // Allocate out-params for each flat field
+        flatFields.forEach { (name, type) ->
+            when (type) {
+                KneType.STRING, KneType.BYTE_ARRAY -> appendLine("${indent}val $name = arena.allocate($STRING_BUF_SIZE.toLong())")
+                else -> appendLine("${indent}val $name = arena.allocate(${type.ffmLayout})")
             }
         }
 
@@ -590,11 +598,10 @@ class FfmProxyGenerator {
         val paramArgs = buildList {
             add("handle")
             fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
-            dc.fields.forEach { f ->
-                if (f.type == KneType.STRING) {
-                    add("out_${f.name}"); add("$STRING_BUF_SIZE")
-                } else {
-                    add("out_${f.name}")
+            flatFields.forEach { (name, type) ->
+                when (type) {
+                    KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }
+                    else -> add(name)
                 }
             }
         }.joinToString(", ")
@@ -608,15 +615,24 @@ class FfmProxyGenerator {
             appendLine("${indent}KneRuntime.checkError()")
         }
 
-        // Read fields and construct data class
-        val ctorArgs = dc.fields.joinToString(", ") { f ->
+        // Reconstruct the data class from flat out-params (recursive)
+        appendLine("${indent}return ${buildDcCtorFromOutParams(dc, "out")}")
+    }
+
+    /** Build a constructor call that reads from out-params (recursive for nested data classes). */
+    private fun buildDcCtorFromOutParams(dc: KneType.DATA_CLASS, prefix: String): String {
+        val args = dc.fields.joinToString(", ") { f ->
+            val name = "${prefix}_${f.name}"
             when (f.type) {
-                KneType.STRING -> "${f.name} = out_${f.name}.getString(0)"
-                KneType.BOOLEAN -> "${f.name} = out_${f.name}.get(JAVA_INT, 0) != 0"
-                else -> "${f.name} = out_${f.name}.get(${f.type.ffmLayout}, 0) as ${f.type.jvmTypeName}"
+                KneType.STRING -> "${f.name} = $name.getString(0)"
+                KneType.BOOLEAN -> "${f.name} = $name.get(JAVA_INT, 0) != 0"
+                is KneType.ENUM -> "${f.name} = ${f.type.simpleName}.entries[$name.get(JAVA_INT, 0)]"
+                is KneType.OBJECT -> "${f.name} = ${f.type.simpleName}.fromNativeHandle($name.get(JAVA_LONG, 0) as Long)"
+                is KneType.DATA_CLASS -> "${f.name} = ${buildDcCtorFromOutParams(f.type, name)}"
+                else -> "${f.name} = $name.get(${f.type.ffmLayout}, 0) as ${f.type.jvmTypeName}"
             }
         }
-        appendLine("${indent}return ${dc.simpleName}($ctorArgs)")
+        return "${dc.simpleName}($args)"
     }
 
     /** Build invoke args with DATA_CLASS params expanded into individual fields. */
@@ -637,22 +653,30 @@ class FfmProxyGenerator {
         return args.joinToString(", ")
     }
 
-    /** Expand a single param into invoke args. DATA_CLASS becomes N args, ByteArray adds size. */
+    /** Expand a single param into invoke args. DATA_CLASS becomes N args (recursive), ByteArray adds size. */
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
         if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
         val dc = extractDataClass(p.type)
         if (dc == null) return listOf(buildJvmInvokeArg(p.name, p.type))
         val isNullable = p.type is KneType.NULLABLE
-        val accessPrefix = if (isNullable) "${p.name}?." else "${p.name}."
-        val fieldArgs = dc.fields.map { f ->
+        val objExpr = p.name
+        val flatArgs = buildFlatInvokeArgs(dc, objExpr, p.name, isNullable)
+        return if (isNullable) listOf("if ($objExpr == null) 1 else 0") + flatArgs else flatArgs
+    }
+
+    private fun buildFlatInvokeArgs(dc: KneType.DATA_CLASS, objExpr: String, prefix: String, nullable: Boolean): List<String> =
+        dc.fields.flatMap { f ->
+            val access = if (nullable) "$objExpr?.${f.name}" else "$objExpr.${f.name}"
+            val paramName = "${prefix}_${f.name}"
             when (f.type) {
-                KneType.STRING -> "${p.name}_${f.name}Seg"
-                KneType.BOOLEAN -> "if (${accessPrefix}${f.name} == true) 1 else 0"
-                else -> "${accessPrefix}${f.name} ?: 0"
+                KneType.STRING -> listOf("${paramName}Seg")
+                KneType.BOOLEAN -> listOf("if ($access == true) 1 else 0")
+                is KneType.ENUM -> listOf("$access?.ordinal ?: 0")
+                is KneType.OBJECT -> listOf("$access?.handle ?: 0L")
+                is KneType.DATA_CLASS -> buildFlatInvokeArgs(f.type, access ?: "null", paramName, nullable)
+                else -> listOf("$access ?: 0")
             }
         }
-        return if (isNullable) listOf("if (${p.name} == null) 1 else 0") + fieldArgs else fieldArgs
-    }
 
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
         val getHandleName = "GET_${prop.name.uppercase()}_HANDLE"
@@ -852,9 +876,15 @@ class FfmProxyGenerator {
                 val dc = extractDataClass(p.type)
                 if (dc != null) {
                     if (p.type is KneType.NULLABLE) add("JAVA_INT") // isNull flag
-                    dc.fields.forEach { f -> add(f.type.ffmLayout) }
+                    // Param: String fields are just ADDRESS (null-terminated), no size needed
+                    flattenDcFields(dc, "").forEach { (_, type) ->
+                        when (type) {
+                            KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
+                            else -> add(type.ffmLayout)
+                        }
+                    }
                 } else if (p.type == KneType.BYTE_ARRAY) {
-                    add("ADDRESS"); add("JAVA_INT") // pointer + size
+                    add("ADDRESS"); add("JAVA_INT")
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -863,11 +893,10 @@ class FfmProxyGenerator {
                 add("ADDRESS"); add("JAVA_INT")
             }
             if (returnDc != null) {
-                returnDc.fields.forEach { f ->
-                    if (f.type == KneType.STRING) {
-                        add("ADDRESS"); add("JAVA_INT")
-                    } else {
-                        add("ADDRESS")
+                flattenDcFields(returnDc, "").forEach { (_, type) ->
+                    when (type) {
+                        KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
+                        else -> add("ADDRESS")
                     }
                 }
             }

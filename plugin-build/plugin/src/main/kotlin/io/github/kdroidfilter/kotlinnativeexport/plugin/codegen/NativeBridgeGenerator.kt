@@ -205,13 +205,20 @@ class NativeBridgeGenerator {
         appendLine()
     }
 
-    /** Expand params: DATA_CLASS becomes individual field params, ByteArray adds size param. */
+    /** Expand params: DATA_CLASS becomes individual field params (recursive), ByteArray adds size param. */
     private fun buildExpandedParamList(params: List<KneParam>): String =
         params.flatMap { p ->
             val dc = extractDataClass(p.type)
             when {
                 dc != null -> {
-                    val fields = dc.fields.map { f -> "${p.name}_${f.name}: ${f.type.nativeBridgeType}" }
+                    val flat = flattenDataClassFields(dc, p.name)
+                    val fields = flat.map { (name, type) ->
+                        when {
+                            type == KneType.STRING -> "$name: CPointer<ByteVar>?"
+                            type == KneType.BYTE_ARRAY -> "$name: CPointer<ByteVar>?, ${name}_size: Int"
+                            else -> "$name: ${type.nativeBridgeType}"
+                        }
+                    }
                     if (p.type is KneType.NULLABLE) listOf("${p.name}_isNull: Int") + fields else fields
                 }
                 p.type == KneType.BYTE_ARRAY -> listOf("${p.name}: CPointer<ByteVar>?", "${p.name}_size: Int")
@@ -219,29 +226,62 @@ class NativeBridgeGenerator {
             }
         }.joinToString(", ")
 
-    /** Build out-params for DATA_CLASS return (one per field). */
-    private fun buildDataClassOutParams(dc: KneType.DATA_CLASS): String =
-        dc.fields.joinToString("") { f ->
-            if (f.type == KneType.STRING) {
-                ", out_${f.name}: CPointer<ByteVar>?, out_${f.name}_len: Int"
-            } else {
-                ", out_${f.name}: CPointer<${f.type.nativePointerType}>?"
+    /** Build out-params for DATA_CLASS return (one per field, recursive for nested data class). */
+    private fun buildDataClassOutParams(dc: KneType.DATA_CLASS, prefix: String = "out"): String =
+        flattenDataClassFields(dc, prefix).joinToString("") { (paramName, type) ->
+            when {
+                type == KneType.STRING -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
+                type == KneType.BYTE_ARRAY -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
+                else -> ", $paramName: CPointer<${type.nativePointerType}>?"
             }
         }
 
-    /** Write data class fields to out-params. */
+    /** Build a constructor expression from flattened params, recursively handling nested data classes. */
+    private fun buildDataClassCtorExpr(dc: KneType.DATA_CLASS, prefix: String): String {
+        val fieldArgs = dc.fields.joinToString(", ") { f ->
+            val paramName = "${prefix}_${f.name}"
+            when (f.type) {
+                KneType.BOOLEAN -> "${f.name} = $paramName != 0"
+                KneType.STRING -> "${f.name} = $paramName?.toKString() ?: \"\""
+                is KneType.ENUM -> "${f.name} = ${f.type.fqName}.entries[$paramName]"
+                is KneType.OBJECT -> "${f.name} = $paramName.toCPointer<COpaque>()!!.asStableRef<${f.type.fqName}>().get()"
+                is KneType.DATA_CLASS -> "${f.name} = ${buildDataClassCtorExpr(f.type, paramName)}"
+                else -> "${f.name} = $paramName"
+            }
+        }
+        return "${dc.fqName}($fieldArgs)"
+    }
+
+    /** Flatten data class fields, expanding nested data classes with prefixed names. */
+    private fun flattenDataClassFields(dc: KneType.DATA_CLASS, prefix: String): List<Pair<String, KneType>> =
+        dc.fields.flatMap { f ->
+            val name = "${prefix}_${f.name}"
+            if (f.type is KneType.DATA_CLASS) flattenDataClassFields(f.type, name)
+            else listOf(Pair(name, f.type))
+        }
+
+    /** Write data class fields to out-params (recursive for nested data classes). */
     private fun StringBuilder.appendDataClassReturn(expr: String, dc: KneType.DATA_CLASS) {
         appendLine("    val _result = $expr")
+        writeDataClassFields("_result", dc, "out")
+    }
+
+    private fun StringBuilder.writeDataClassFields(objExpr: String, dc: KneType.DATA_CLASS, prefix: String) {
         dc.fields.forEach { f ->
-            if (f.type == KneType.STRING) {
-                appendLine("    val _${f.name}_bytes = _result.${f.name}.encodeToByteArray()")
-                appendLine("    val _${f.name}_writeLen = minOf(_${f.name}_bytes.size, out_${f.name}_len - 1)")
-                appendLine("    _${f.name}_bytes.forEachIndexed { i, b -> if (i < _${f.name}_writeLen) out_${f.name}?.set(i, b) }")
-                appendLine("    out_${f.name}?.set(_${f.name}_writeLen, 0)")
-            } else if (f.type == KneType.BOOLEAN) {
-                appendLine("    out_${f.name}!![0] = if (_result.${f.name}) 1 else 0")
-            } else {
-                appendLine("    out_${f.name}!![0] = _result.${f.name}")
+            val outName = "${prefix}_${f.name}"
+            val valueExpr = "$objExpr.${f.name}"
+            when (f.type) {
+                KneType.STRING -> {
+                    appendLine("    val ${outName}_bytes = $valueExpr.encodeToByteArray()")
+                    appendLine("    val ${outName}_writeLen = minOf(${outName}_bytes.size, ${outName}_len - 1)")
+                    appendLine("    ${outName}_bytes.forEachIndexed { i, b -> if (i < ${outName}_writeLen) $outName?.set(i, b) }")
+                    appendLine("    $outName?.set(${outName}_writeLen, 0)")
+                }
+                KneType.BOOLEAN -> appendLine("    $outName!![0] = if ($valueExpr) 1 else 0")
+                is KneType.ENUM -> appendLine("    $outName!![0] = $valueExpr.ordinal")
+                is KneType.OBJECT -> appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
+                is KneType.DATA_CLASS -> writeDataClassFields(valueExpr, f.type, outName)
+                else -> appendLine("    $outName!![0] = $valueExpr")
             }
         }
     }
@@ -250,18 +290,7 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendNullableDataClassReturn(expr: String, dc: KneType.DATA_CLASS) {
         appendLine("    val _result = $expr")
         appendLine("    if (_result == null) return 0")
-        dc.fields.forEach { f ->
-            if (f.type == KneType.STRING) {
-                appendLine("    val _${f.name}_bytes = _result.${f.name}.encodeToByteArray()")
-                appendLine("    val _${f.name}_writeLen = minOf(_${f.name}_bytes.size, out_${f.name}_len - 1)")
-                appendLine("    _${f.name}_bytes.forEachIndexed { i, b -> if (i < _${f.name}_writeLen) out_${f.name}?.set(i, b) }")
-                appendLine("    out_${f.name}?.set(_${f.name}_writeLen, 0)")
-            } else if (f.type == KneType.BOOLEAN) {
-                appendLine("    out_${f.name}!![0] = if (_result.${f.name}) 1 else 0")
-            } else {
-                appendLine("    out_${f.name}!![0] = _result.${f.name}")
-            }
-        }
+        writeDataClassFields("_result", dc, "out")
         appendLine("    return 1")
     }
 
@@ -479,21 +508,14 @@ class NativeBridgeGenerator {
             val fnType = p.type as KneType.FUNCTION
             appendFunctionParamConversion(p.name, fnType)
         }
-        // Reconstruct data classes from flattened fields (including nullable variants)
+        // Reconstruct data classes from flattened fields (including nullable variants and nested)
         fn.params.forEach { p ->
             val dc = extractDataClass(p.type) ?: return@forEach
-            val fieldArgs = dc.fields.joinToString(", ") { f ->
-                val fieldParam = "${p.name}_${f.name}"
-                when (f.type) {
-                    KneType.BOOLEAN -> "${f.name} = $fieldParam != 0"
-                    KneType.STRING -> "${f.name} = $fieldParam?.toKString() ?: \"\""
-                    else -> "${f.name} = $fieldParam"
-                }
-            }
+            val ctorExpr = buildDataClassCtorExpr(dc, p.name)
             if (p.type is KneType.NULLABLE) {
-                appendLine("    val ${p.name}Obj = if (${p.name}_isNull != 0) null else ${dc.fqName}($fieldArgs)")
+                appendLine("    val ${p.name}Obj = if (${p.name}_isNull != 0) null else $ctorExpr")
             } else {
-                appendLine("    val ${p.name}Obj = ${dc.fqName}($fieldArgs)")
+                appendLine("    val ${p.name}Obj = $ctorExpr")
             }
         }
     }

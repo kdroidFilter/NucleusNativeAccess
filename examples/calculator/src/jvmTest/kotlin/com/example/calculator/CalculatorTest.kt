@@ -772,6 +772,47 @@ class CalculatorTest {
         }
     }
 
+    // ── data class with enum field ─────────────────────────────────────────
+
+    @Test
+    fun `data class with enum field - return`() {
+        Calculator(5).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 2)
+            val tp = calc.getTaggedPoint()
+            assertEquals(Point(10, 20), tp.point)
+            assertEquals(Operation.MULTIPLY, tp.tag)
+        }
+    }
+
+    @Test
+    fun `data class with enum field - param`() {
+        Calculator(0).use { calc ->
+            calc.setFromTagged(TaggedPoint(Point(3, 7), Operation.SUBTRACT))
+            assertEquals(10, calc.current)
+            assertEquals(Operation.SUBTRACT, calc.lastOperation)
+        }
+    }
+
+    // ── nested data class ───────────────────────────────────────────────────
+
+    @Test
+    fun `nested data class return - Rect`() {
+        Calculator(5).use { calc ->
+            val r = calc.getRect()
+            assertEquals(Point(0, 0), r.topLeft)
+            assertEquals(Point(5, 5), r.bottomRight)
+        }
+    }
+
+    @Test
+    fun `nested data class return - zero`() {
+        Calculator(0).use { calc ->
+            val r = calc.getRect()
+            assertEquals(Point(0, 0), r.topLeft)
+            assertEquals(Point(0, 0), r.bottomRight)
+        }
+    }
+
     // ── nullable data class ───────────────────────────────────────────────
 
     @Test

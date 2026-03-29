@@ -55,19 +55,37 @@ class KotlinSourceParser {
         val ktFiles = files.filter { it.extension == "kt" }
         val commonKtFiles = commonFiles.filter { it.extension == "kt" }
 
-        // Pre-scan: collect all class, enum, and data class names for type resolution
-        // Scan both native and common sources for type discovery
+        // Phase 1: collect all type names and raw data class param strings
         val knownClasses = mutableMapOf<String, String>()
         val knownEnums = mutableMapOf<String, String>()
-        val knownDataClasses = mutableMapOf<String, Pair<String, List<KneParam>>>()
+        val rawDataClasses = mutableMapOf<String, Pair<String, String>>() // name -> (fqName, rawParamsStr)
         val commonDataClassNames = mutableSetOf<String>()
+        val allFiles = commonKtFiles + ktFiles
         for (file in commonKtFiles) {
-            prescanTypes(file, knownClasses, knownEnums, knownDataClasses)
-            // Track which data classes come from commonMain
-            knownDataClasses.keys.forEach { commonDataClassNames.add(it) }
+            prescanTypeNames(file, knownClasses, knownEnums, rawDataClasses)
+            rawDataClasses.keys.forEach { commonDataClassNames.add(it) }
         }
         for (file in ktFiles) {
-            prescanTypes(file, knownClasses, knownEnums, knownDataClasses)
+            prescanTypeNames(file, knownClasses, knownEnums, rawDataClasses)
+        }
+
+        // Phase 2: resolve data class fields iteratively (handles dependencies between data classes)
+        val knownDataClasses = mutableMapOf<String, Pair<String, List<KneParam>>>()
+        var changed = true
+        while (changed) {
+            changed = false
+            for ((name, info) in rawDataClasses) {
+                if (name in knownDataClasses) continue
+                val fields = resolveDataClassFields(info.second, knownEnums, knownClasses, knownDataClasses)
+                if (fields != null) {
+                    knownDataClasses[name] = Pair(info.first, fields)
+                    changed = true
+                }
+            }
+        }
+        // Unresolved data classes fall back to regular classes
+        for ((name, info) in rawDataClasses) {
+            if (name !in knownDataClasses) knownClasses[name] = info.first
         }
         val knownTypes = TypeMaps(knownClasses, knownEnums, knownDataClasses)
 
@@ -107,13 +125,13 @@ class KotlinSourceParser {
     )
 
     /**
-     * Lightweight first pass: collects class, enum, and data class names with their fqNames.
+     * Phase 1: collects type names and raw data class constructor strings.
      */
-    private fun prescanTypes(
+    private fun prescanTypeNames(
         file: File,
         knownClasses: MutableMap<String, String>,
         knownEnums: MutableMap<String, String>,
-        knownDataClasses: MutableMap<String, Pair<String, List<KneParam>>>,
+        rawDataClasses: MutableMap<String, Pair<String, String>>,
     ) {
         var packageName = ""
         for (rawLine in file.readLines()) {
@@ -134,9 +152,8 @@ class KotlinSourceParser {
                     val name = match.groupValues[1]
                     val fq = if (packageName.isNotEmpty()) "$packageName.$name" else name
                     val ctorMatch = Regex("""class\s+\w+\s*\(([^)]*)\)""").find(line)
-                    val fields = ctorMatch?.let { prescanDataClassFields(it.groupValues[1]) }
-                    if (fields != null) {
-                        knownDataClasses[name] = Pair(fq, fields)
+                    if (ctorMatch != null) {
+                        rawDataClasses[name] = Pair(fq, ctorMatch.groupValues[1])
                     } else {
                         knownClasses[name] = fq
                     }
@@ -151,8 +168,16 @@ class KotlinSourceParser {
         }
     }
 
-    /** Extract data class fields from constructor params. Returns null if any field has unsupported type. */
-    private fun prescanDataClassFields(paramsStr: String): List<KneParam>? {
+    /**
+     * Phase 2: resolve data class fields using full type knowledge.
+     * Returns null if any field type can't be resolved yet.
+     */
+    private fun resolveDataClassFields(
+        paramsStr: String,
+        knownEnums: Map<String, String>,
+        knownClasses: Map<String, String>,
+        knownDataClasses: Map<String, Pair<String, List<KneParam>>>,
+    ): List<KneParam>? {
         if (paramsStr.isBlank()) return null
         val fields = mutableListOf<KneParam>()
         for (raw in paramsStr.split(",")) {
@@ -160,8 +185,7 @@ class KotlinSourceParser {
             if (!s.contains(Regex("""\bval\b|\bvar\b"""))) continue
             val colonIdx = s.indexOf(':')
             if (colonIdx < 0) return null
-            val name = s.substring(0, colonIdx).trim()
-                .substringAfterLast(' ').trim()
+            val name = s.substring(0, colonIdx).trim().substringAfterLast(' ').trim()
             val typeStr = s.substring(colonIdx + 1).substringBefore('=').trim()
             val type = when (typeStr) {
                 "Int" -> KneType.INT
@@ -172,7 +196,20 @@ class KotlinSourceParser {
                 "Byte" -> KneType.BYTE
                 "Short" -> KneType.SHORT
                 "String" -> KneType.STRING
-                else -> return null
+                "ByteArray" -> KneType.BYTE_ARRAY
+                else -> {
+                    val enumFq = knownEnums[typeStr]
+                    if (enumFq != null) KneType.ENUM(enumFq, typeStr)
+                    else {
+                        val dcInfo = knownDataClasses[typeStr]
+                        if (dcInfo != null) KneType.DATA_CLASS(dcInfo.first, typeStr, dcInfo.second)
+                        else {
+                            val classFq = knownClasses[typeStr]
+                            if (classFq != null) KneType.OBJECT(classFq, typeStr)
+                            else return null // unresolvable
+                        }
+                    }
+                }
             }
             fields.add(KneParam(name = name, type = type))
         }

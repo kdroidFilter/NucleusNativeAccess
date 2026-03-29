@@ -157,6 +157,8 @@ sealed class KneType : Serializable {
             BOOLEAN -> "IntVar"
             BYTE -> "ByteVar"
             SHORT -> "ShortVar"
+            is ENUM -> "IntVar" // ordinal
+            is OBJECT -> "LongVar" // StableRef handle
             else -> "ByteVar"
         }
 }

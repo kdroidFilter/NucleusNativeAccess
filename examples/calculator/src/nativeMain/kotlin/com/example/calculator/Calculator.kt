@@ -6,6 +6,10 @@ data class Point(val x: Int, val y: Int)
 
 data class NamedValue(val name: String, val value: Int)
 
+data class TaggedPoint(val point: Point, val tag: Operation)
+
+data class Rect(val topLeft: Point, val bottomRight: Point)
+
 // ── Enum ────────────────────────────────────────────────────────────────────
 
 enum class Operation {
@@ -156,6 +160,15 @@ class Calculator(initial: Int = 0) {
         label = nv.name
         accumulator = nv.value
     }
+
+    fun getTaggedPoint(): TaggedPoint = TaggedPoint(Point(accumulator, accumulator * 2), lastOperation)
+
+    fun setFromTagged(tp: TaggedPoint) {
+        accumulator = tp.point.x + tp.point.y
+        lastOperation = tp.tag
+    }
+
+    fun getRect(): Rect = Rect(Point(0, 0), Point(accumulator, accumulator))
 
     fun getPointOrNull(): Point? = if (accumulator != 0) Point(accumulator, accumulator * 2) else null
 
