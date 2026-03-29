@@ -337,6 +337,40 @@ class Calculator(initial: Int = 0) {
 
     fun concatMapEntries(data: Map<String, String>): String = data.entries.joinToString(", ") { "${it.key}=${it.value}" }
 
+    // ── Collections in callbacks ────────────────────────────────────────────
+
+    fun onScoresReady(callback: (List<Int>) -> Unit) {
+        callback(listOf(accumulator, accumulator * 2, accumulator * 3))
+    }
+
+    fun onLabelsReady(callback: (List<String>) -> Unit) {
+        callback(listOf(label.ifEmpty { "default" }, "item_$accumulator"))
+    }
+
+    fun onOpsReady(callback: (List<Operation>) -> Unit) {
+        callback(Operation.entries.toList())
+    }
+
+    fun onFlagsReady(callback: (List<Boolean>) -> Unit) {
+        callback(listOf(accumulator > 0, accumulator % 2 == 0))
+    }
+
+    // ── Nullable collections ────────────────────────────────────────────────
+
+    fun getScoresOrNull(): List<Int>? = if (accumulator != 0) listOf(accumulator, accumulator * 2) else null
+
+    fun getLabelsOrNull(): List<String>? = if (label.isNotEmpty()) listOf(label, "extra") else null
+
+    fun sumAllOrNull(values: List<Int>?): Int {
+        if (values == null) return -1
+        accumulator = values.sum()
+        return accumulator
+    }
+
+    fun getOpsOrNull(): Set<Operation>? = if (accumulator > 0) setOf(lastOperation, Operation.ADD) else null
+
+    fun getMetadataOrNull(): Map<String, Int>? = if (accumulator != 0) mapOf("val" to accumulator) else null
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {
@@ -371,4 +405,10 @@ class CalculatorManager {
     fun count(): Int = calculators.size
 
     fun describe(calc: Calculator): String = calc.describe()
+
+    fun getAll(): List<Calculator> = calculators.values.toList()
+
+    fun sumAll(calcs: List<Calculator>): Int = calcs.sumOf { it.current }
+
+    fun getAllOrNull(): List<Calculator>? = if (calculators.isEmpty()) null else calculators.values.toList()
 }

@@ -2657,4 +2657,239 @@ class CalculatorTest {
             assertTrue(result.contains("value=99"))
         }
     }
+
+    // ── Nullable Collection: List<Int>? ─────────────────────────────────────
+
+    @Test
+    fun `nullable List Int return - non-null`() {
+        Calculator(5).use { calc ->
+            val scores = calc.getScoresOrNull()
+            assertEquals(listOf(5, 10), scores)
+        }
+    }
+
+    @Test
+    fun `nullable List Int return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getScoresOrNull())
+        }
+    }
+
+    @Test
+    fun `nullable List Int return - negative`() {
+        Calculator(-3).use { calc ->
+            val scores = calc.getScoresOrNull()
+            assertEquals(listOf(-3, -6), scores)
+        }
+    }
+
+    // ── Nullable Collection: List<String>? ──────────────────────────────────
+
+    @Test
+    fun `nullable List String return - non-null`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello"
+            val labels = calc.getLabelsOrNull()
+            assertEquals(listOf("hello", "extra"), labels)
+        }
+    }
+
+    @Test
+    fun `nullable List String return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getLabelsOrNull())
+        }
+    }
+
+    // ── Nullable Collection param: List<Int>? ───────────────────────────────
+
+    @Test
+    fun `nullable List Int param - non-null`() {
+        Calculator(0).use { calc ->
+            assertEquals(15, calc.sumAllOrNull(listOf(5, 10)))
+        }
+    }
+
+    @Test
+    fun `nullable List Int param - null`() {
+        Calculator(0).use { calc ->
+            assertEquals(-1, calc.sumAllOrNull(null))
+        }
+    }
+
+    @Test
+    fun `nullable List Int param - empty`() {
+        Calculator(42).use { calc ->
+            assertEquals(0, calc.sumAllOrNull(emptyList()))
+        }
+    }
+
+    // ── Nullable Collection: Set<Enum>? ─────────────────────────────────────
+
+    @Test
+    fun `nullable Set Enum return - non-null`() {
+        Calculator(5).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 2)
+            val ops = calc.getOpsOrNull()
+            assertTrue(ops != null)
+            assertTrue(ops!!.contains(Operation.MULTIPLY))
+            assertTrue(ops.contains(Operation.ADD))
+        }
+    }
+
+    @Test
+    fun `nullable Set Enum return - null`() {
+        Calculator(-1).use { calc ->
+            assertNull(calc.getOpsOrNull())
+        }
+    }
+
+    // ── Nullable Collection: Map<String, Int>? ──────────────────────────────
+
+    @Test
+    fun `nullable Map return - non-null`() {
+        Calculator(42).use { calc ->
+            val meta = calc.getMetadataOrNull()
+            assertEquals(mapOf("val" to 42), meta)
+        }
+    }
+
+    @Test
+    fun `nullable Map return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getMetadataOrNull())
+        }
+    }
+
+    // ── Collection: List<Object> ────────────────────────────────────────────
+
+    @Test
+    fun `List Object return - getAll`() {
+        CalculatorManager().use { mgr ->
+            mgr.create("a", 10)
+            mgr.create("b", 20)
+            val all = mgr.getAll()
+            assertEquals(2, all.size)
+            // Each element is a Calculator proxy
+            val currents = all.map { it.current }.sorted()
+            assertEquals(listOf(10, 20), currents)
+            all.forEach { it.close() }
+        }
+    }
+
+    @Test
+    fun `List Object return - empty`() {
+        CalculatorManager().use { mgr ->
+            val all = mgr.getAll()
+            assertEquals(0, all.size)
+        }
+    }
+
+    @Test
+    fun `List Object param - sumAll`() {
+        CalculatorManager().use { mgr ->
+            val c1 = mgr.create("a", 10)
+            val c2 = mgr.create("b", 20)
+            val sum = mgr.sumAll(listOf(c1, c2))
+            assertEquals(30, sum)
+        }
+    }
+
+    @Test
+    fun `List Object param - empty list`() {
+        CalculatorManager().use { mgr ->
+            assertEquals(0, mgr.sumAll(emptyList()))
+        }
+    }
+
+    @Test
+    fun `nullable List Object return - non-null`() {
+        CalculatorManager().use { mgr ->
+            mgr.create("x", 5)
+            val all = mgr.getAllOrNull()
+            assertTrue(all != null)
+            assertEquals(1, all!!.size)
+            assertEquals(5, all[0].current)
+            all.forEach { it.close() }
+        }
+    }
+
+    @Test
+    fun `nullable List Object return - null`() {
+        CalculatorManager().use { mgr ->
+            assertNull(mgr.getAllOrNull())
+        }
+    }
+
+    // ── Callback: List<Int> ─────────────────────────────────────────────────
+
+    @Test
+    fun `callback List Int - onScoresReady`() {
+        Calculator(10).use { calc ->
+            var received = emptyList<Int>()
+            calc.onScoresReady { scores -> received = scores }
+            assertEquals(listOf(10, 20, 30), received)
+        }
+    }
+
+    @Test
+    fun `callback List Int - zero`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<Int>()
+            calc.onScoresReady { received = it }
+            assertEquals(listOf(0, 0, 0), received)
+        }
+    }
+
+    // ── Callback: List<String> ──────────────────────────────────────────────
+
+    @Test
+    fun `callback List String - onLabelsReady`() {
+        Calculator(5).use { calc ->
+            calc.label = "test"
+            var received = emptyList<String>()
+            calc.onLabelsReady { received = it }
+            assertEquals(listOf("test", "item_5"), received)
+        }
+    }
+
+    @Test
+    fun `callback List String - default label`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<String>()
+            calc.onLabelsReady { received = it }
+            assertEquals(listOf("default", "item_0"), received)
+        }
+    }
+
+    // ── Callback: List<Enum> ────────────────────────────────────────────────
+
+    @Test
+    fun `callback List Enum - onOpsReady`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<Operation>()
+            calc.onOpsReady { received = it }
+            assertEquals(listOf(Operation.ADD, Operation.SUBTRACT, Operation.MULTIPLY), received)
+        }
+    }
+
+    // ── Callback: List<Boolean> ─────────────────────────────────────────────
+
+    @Test
+    fun `callback List Boolean - onFlagsReady positive`() {
+        Calculator(4).use { calc ->
+            var received = emptyList<Boolean>()
+            calc.onFlagsReady { received = it }
+            assertEquals(listOf(true, true), received) // 4 > 0, 4 % 2 == 0
+        }
+    }
+
+    @Test
+    fun `callback List Boolean - onFlagsReady zero`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<Boolean>()
+            calc.onFlagsReady { received = it }
+            assertEquals(listOf(false, true), received) // 0 > 0 = false, 0 % 2 == 0 = true
+        }
+    }
 }

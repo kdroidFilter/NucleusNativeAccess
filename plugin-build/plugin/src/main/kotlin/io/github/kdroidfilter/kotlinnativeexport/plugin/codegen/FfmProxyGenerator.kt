@@ -44,8 +44,16 @@ class FfmProxyGenerator {
 
     private fun KneType.isFunctionType(): Boolean = this is KneType.FUNCTION
 
-    private fun KneType.isCollection(): Boolean =
-        this is KneType.LIST || this is KneType.SET || this is KneType.MAP
+    private fun KneType.isCollection(): Boolean = when (this) {
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> true
+        is KneType.NULLABLE -> inner is KneType.LIST || inner is KneType.SET || inner is KneType.MAP
+        else -> false
+    }
+
+    private fun KneType.unwrapCollection(): KneType = when (this) {
+        is KneType.NULLABLE -> inner
+        else -> this
+    }
 
     /** Check if a function needs a confined arena (for string/byte/collection alloc — callbacks use persistent arena). */
     private fun needsConfinedArena(params: List<KneParam>, returnType: KneType): Boolean =
@@ -116,8 +124,9 @@ class FfmProxyGenerator {
 
     /** Generate a unique identifier for a callback signature. */
     private fun callbackId(fnType: KneType.FUNCTION): String {
-        val params = fnType.paramTypes.joinToString("_") { it.jvmTypeName }
-        val ret = fnType.returnType.jvmTypeName
+        fun sanitize(s: String) = s.replace("<", "_").replace(">", "").replace(", ", "_").replace("?", "N")
+        val params = fnType.paramTypes.joinToString("_") { sanitize(it.jvmTypeName) }
+        val ret = sanitize(fnType.returnType.jvmTypeName)
         return "${params.ifEmpty { "Void" }}_to_$ret"
     }
 
@@ -227,13 +236,17 @@ class FfmProxyGenerator {
 
         // Static upcall target method
         // Expand DATA_CLASS params into individual field params at C ABI level
+        // Expand LIST/SET params into MemorySegment + Int (pointer + size)
         data class FlatParam(val name: String, val type: KneType)
         val flatParams = mutableListOf<FlatParam>()
         sig.paramTypes.forEachIndexed { i, t ->
-            if (t is KneType.DATA_CLASS) {
-                t.fields.forEach { f -> flatParams.add(FlatParam("p${i}_${f.name}", f.type)) }
-            } else {
-                flatParams.add(FlatParam("p$i", t))
+            when (t) {
+                is KneType.DATA_CLASS -> t.fields.forEach { f -> flatParams.add(FlatParam("p${i}_${f.name}", f.type)) }
+                is KneType.LIST, is KneType.SET -> {
+                    flatParams.add(FlatParam("p${i}_ptr", KneType.STRING)) // MemorySegment (ADDRESS)
+                    flatParams.add(FlatParam("p${i}_size", KneType.INT))
+                }
+                else -> flatParams.add(FlatParam("p$i", t))
             }
         }
 
@@ -252,7 +265,39 @@ class FfmProxyGenerator {
         appendLine("        @Suppress(\"UNCHECKED_CAST\")")
         appendLine("        val _fn = fn as ${sig.jvmTypeName}")
 
-        // Reconstruct DATA_CLASS params from flat fields, convert others
+        // Reconstruct DATA_CLASS/LIST/SET params from flat fields, convert others
+        // First emit collection reconstruction as local vals
+        sig.paramTypes.forEachIndexed { i, t ->
+            val elemType = when (t) { is KneType.LIST -> t.elementType; is KneType.SET -> (t as KneType.SET).elementType; else -> null }
+            if (elemType != null) {
+                val layout = KneType.collectionElementLayout(elemType)
+                when (elemType) {
+                    KneType.STRING -> {
+                        appendLine("        val _list$i = mutableListOf<String>()")
+                        appendLine("        var _off$i = 0L")
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                        appendLine("        repeat(p${i}_size) { _list${i}.add(_seg${i}.getString(_off${i})); _off$i += _list${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                    }
+                    KneType.BOOLEAN -> {
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(p${i}_size.toLong() * 4)")
+                        appendLine("        val _list$i = List(p${i}_size) { _seg${i}.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+                    }
+                    is KneType.ENUM -> {
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(p${i}_size.toLong() * 4)")
+                        appendLine("        val _list$i = List(p${i}_size) { ${elemType.simpleName}.entries[_seg${i}.getAtIndex(JAVA_INT, it.toLong())] }")
+                    }
+                    else -> {
+                        val elemSize = fieldSize(elemType)
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(p${i}_size.toLong() * $elemSize)")
+                        appendLine("        val _list$i = List(p${i}_size) { _seg${i}.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+                    }
+                }
+                if (t is KneType.SET) {
+                    appendLine("        val _set$i = _list${i}.toSet()")
+                }
+            }
+        }
+
         val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
@@ -269,6 +314,8 @@ class FfmProxyGenerator {
                     }
                     "${t.simpleName}($fieldArgs)"
                 }
+                is KneType.LIST -> "_list$i"
+                is KneType.SET -> "_set$i"
                 else -> "p$i"
             }
         }.joinToString(", ")
@@ -665,10 +712,19 @@ class FfmProxyGenerator {
     /** Expand a single param into invoke args. DATA_CLASS becomes N args (recursive), ByteArray/collections add size. */
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
         if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
+        val isNullableColl = p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner.let { it is KneType.LIST || it is KneType.SET || it is KneType.MAP }
         if (p.type is KneType.LIST) return listOf("${p.name}Seg", "${p.name}.size")
         if (p.type is KneType.SET) return listOf("${p.name}Seg", "${p.name}.size")
-        if (p.type is KneType.MAP) {
-            return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
+        if (p.type is KneType.MAP) return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
+        if (isNullableColl) {
+            val inner = (p.type as KneType.NULLABLE).inner
+            val sizeExpr = "if (${p.name} == null) -1 else ${p.name}.size"
+            return when (inner) {
+                is KneType.LIST -> listOf("${p.name}Seg", sizeExpr)
+                is KneType.SET -> listOf("${p.name}Seg", sizeExpr)
+                is KneType.MAP -> listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", sizeExpr)
+                else -> listOf(buildJvmInvokeArg(p.name, p.type))
+            }
         }
         val dc = extractDataClass(p.type)
         if (dc == null) return listOf(buildJvmInvokeArg(p.name, p.type))
@@ -899,12 +955,13 @@ class FfmProxyGenerator {
                     }
                 } else if (p.type == KneType.BYTE_ARRAY) {
                     add("ADDRESS"); add("JAVA_INT")
-                } else if (p.type is KneType.LIST || p.type is KneType.SET) {
-                    add("ADDRESS"); add("JAVA_INT") // pointer + size
-                } else if (p.type is KneType.MAP) {
-                    add("ADDRESS") // keys pointer
-                    add("ADDRESS") // values pointer
-                    add("JAVA_INT") // size
+                } else if (p.type.isCollection()) {
+                    val inner = p.type.unwrapCollection()
+                    when (inner) {
+                        is KneType.LIST, is KneType.SET -> { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
+                        else -> {}
+                    }
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -920,18 +977,18 @@ class FfmProxyGenerator {
                     }
                 }
             }
-            // Collection return out-params
+            // Collection return out-params (unwrap nullable)
             if (fn.returnType.isCollection()) {
-                when (fn.returnType) {
+                val collInner = fn.returnType.unwrapCollection()
+                when (collInner) {
                     is KneType.LIST, is KneType.SET -> {
                         add("ADDRESS"); add("JAVA_INT") // outBuf + outLen/outBufLen
                     }
                     is KneType.MAP -> {
-                        val map = fn.returnType as KneType.MAP
                         add("ADDRESS") // outKeys
-                        if (map.keyType == KneType.STRING) add("JAVA_INT")
+                        if (collInner.keyType == KneType.STRING) add("JAVA_INT")
                         add("ADDRESS") // outValues
-                        if (map.valueType == KneType.STRING) add("JAVA_INT")
+                        if (collInner.valueType == KneType.STRING) add("JAVA_INT")
                         add("JAVA_INT") // outLen
                     }
                     else -> {}
@@ -1088,16 +1145,36 @@ class FfmProxyGenerator {
 
     // ── Collection marshaling ────────────────────────────────────────────────
 
-    /** Allocate MemorySegments for collection parameters. */
+    /** Allocate MemorySegments for collection parameters (including nullable). */
     private fun StringBuilder.appendCollectionParamAlloc(indent: String, params: List<KneParam>) {
         params.forEach { p ->
-            when (p.type) {
-                is KneType.LIST -> appendListParamAlloc(indent, p.name, p.type.elementType)
-                is KneType.SET -> {
-                    appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
-                    appendListParamAlloc(indent, p.name, p.type.elementType, srcExpr = "${p.name}AsList")
+            val isNullable = p.type is KneType.NULLABLE
+            val inner = p.type.unwrapCollection()
+            when (inner) {
+                is KneType.LIST -> {
+                    if (isNullable) {
+                        appendLine("${indent}val ${p.name}Unwrapped = ${p.name} ?: emptyList()")
+                        appendListParamAlloc(indent, p.name, inner.elementType, srcExpr = "${p.name}Unwrapped")
+                    } else {
+                        appendListParamAlloc(indent, p.name, inner.elementType)
+                    }
                 }
-                is KneType.MAP -> appendMapParamAlloc(indent, p.name, p.type)
+                is KneType.SET -> {
+                    if (isNullable) {
+                        appendLine("${indent}val ${p.name}AsList = ${p.name}?.toList() ?: emptyList()")
+                    } else {
+                        appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
+                    }
+                    appendListParamAlloc(indent, p.name, inner.elementType, srcExpr = "${p.name}AsList")
+                }
+                is KneType.MAP -> {
+                    if (isNullable) {
+                        appendLine("${indent}val ${p.name}Unwrapped = ${p.name} ?: emptyMap()")
+                        appendMapParamAlloc(indent, p.name, inner, srcExpr = "${p.name}Unwrapped")
+                    } else {
+                        appendMapParamAlloc(indent, p.name, inner)
+                    }
+                }
                 else -> {}
             }
         }
@@ -1132,31 +1209,33 @@ class FfmProxyGenerator {
         }
     }
 
-    private fun StringBuilder.appendMapParamAlloc(indent: String, name: String, type: KneType.MAP) {
-        appendLine("${indent}val ${name}KeysList = ${name}.keys.toList()")
-        appendLine("${indent}val ${name}ValuesList = ${name}.values.toList()")
+    private fun StringBuilder.appendMapParamAlloc(indent: String, name: String, type: KneType.MAP, srcExpr: String = name) {
+        appendLine("${indent}val ${name}KeysList = ${srcExpr}.keys.toList()")
+        appendLine("${indent}val ${name}ValuesList = ${srcExpr}.values.toList()")
         appendListParamAlloc(indent, "${name}_keys", type.keyType, srcExpr = "${name}KeysList")
         appendListParamAlloc(indent, "${name}_values", type.valueType, srcExpr = "${name}ValuesList")
     }
 
-    /** Generate the return-proxy for collection types. */
+    /** Generate the return-proxy for collection types (handles nullable: -1 = null). */
     private fun StringBuilder.appendCollectionReturnProxy(indent: String, fn: KneFunction, handleName: String) {
-        val type = fn.returnType
-        when (type) {
-            is KneType.LIST -> appendListReturnProxy(indent, fn, handleName, type.elementType, "List")
-            is KneType.SET -> appendListReturnProxy(indent, fn, handleName, type.elementType, "Set")
-            is KneType.MAP -> appendMapReturnProxy(indent, fn, handleName, type)
+        val isNullable = fn.returnType is KneType.NULLABLE
+        val inner = fn.returnType.unwrapCollection()
+        when (inner) {
+            is KneType.LIST -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "List", isNullable)
+            is KneType.SET -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "Set", isNullable)
+            is KneType.MAP -> appendMapReturnProxy(indent, fn, handleName, inner, isNullable)
             else -> {}
         }
     }
 
-    private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String) {
+    private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String, nullable: Boolean = false) {
         when (elemType) {
             KneType.STRING -> {
                 appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
                 val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $STRING_BUF_SIZE"
                 appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
+                if (nullable) appendLine("${indent}if (_count < 0) return null")
                 appendLine("${indent}val _list = mutableListOf<String>()")
                 appendLine("${indent}var _off = 0L")
                 appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -1169,6 +1248,7 @@ class FfmProxyGenerator {
                 val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $MAX_COLLECTION_SIZE"
                 appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
+                if (nullable) appendLine("${indent}if (_count < 0) return null")
                 appendCollectionElementRead(indent, elemType, "_count", collType)
             }
         }
@@ -1194,7 +1274,7 @@ class FfmProxyGenerator {
         else appendLine("${indent}return _list")
     }
 
-    private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP) {
+    private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP, nullable: Boolean = false) {
         val kLayout = KneType.collectionElementLayout(type.keyType)
         val vLayout = KneType.collectionElementLayout(type.valueType)
         val isKeyString = type.keyType == KneType.STRING
@@ -1216,6 +1296,7 @@ class FfmProxyGenerator {
 
         appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
         appendLine("${indent}KneRuntime.checkError()")
+        if (nullable) appendLine("${indent}if (_count < 0) return null")
         appendLine("${indent}val _map = mutableMapOf<${type.keyType.jvmTypeName}, ${type.valueType.jvmTypeName}>()")
         // Read keys
         if (isKeyString) {

@@ -30,9 +30,18 @@ class NativeBridgeGenerator {
         this == KneType.STRING || this == KneType.BYTE_ARRAY ||
         (this is KneType.NULLABLE && (inner == KneType.STRING || inner == KneType.BYTE_ARRAY))
 
-    /** Whether this type is a collection (List, Set, Map). */
-    private fun KneType.isCollection(): Boolean =
-        this is KneType.LIST || this is KneType.SET || this is KneType.MAP
+    /** Whether this type is a collection (List, Set, Map), including nullable. */
+    private fun KneType.isCollection(): Boolean = when (this) {
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> true
+        is KneType.NULLABLE -> inner is KneType.LIST || inner is KneType.SET || inner is KneType.MAP
+        else -> false
+    }
+
+    /** Extract the inner collection type (unwrap nullable). */
+    private fun KneType.unwrapCollection(): KneType = when (this) {
+        is KneType.NULLABLE -> inner
+        else -> this
+    }
 
     /** Whether this type returns via the collection out-buffer pattern. */
     private fun KneType.returnsViaCollectionBuffer(): Boolean = isCollection()
@@ -237,17 +246,18 @@ class NativeBridgeGenerator {
                     if (p.type is KneType.NULLABLE) listOf("${p.name}_isNull: Int") + fields else fields
                 }
                 p.type == KneType.BYTE_ARRAY -> listOf("${p.name}: CPointer<ByteVar>?", "${p.name}_size: Int")
-                p.type is KneType.LIST || p.type is KneType.SET -> {
-                    val elemType = if (p.type is KneType.LIST) (p.type as KneType.LIST).elementType else (p.type as KneType.SET).elementType
-                    listOf("${p.name}: ${KneType.collectionPointerType(elemType)}", "${p.name}_size: Int")
-                }
-                p.type is KneType.MAP -> {
-                    val map = p.type as KneType.MAP
-                    listOf(
-                        "${p.name}_keys: ${KneType.collectionPointerType(map.keyType)}",
-                        "${p.name}_values: ${KneType.collectionPointerType(map.valueType)}",
-                        "${p.name}_size: Int",
-                    )
+                p.type.isCollection() -> {
+                    val inner = p.type.unwrapCollection()
+                    when (inner) {
+                        is KneType.LIST -> listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
+                        is KneType.SET -> listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
+                        is KneType.MAP -> listOf(
+                            "${p.name}_keys: ${KneType.collectionPointerType(inner.keyType)}",
+                            "${p.name}_values: ${KneType.collectionPointerType(inner.valueType)}",
+                            "${p.name}_size: Int",
+                        )
+                        else -> listOf("${p.name}: ${p.type.nativeBridgeType}")
+                    }
                 }
                 else -> listOf("${p.name}: ${p.type.nativeBridgeType}")
             }
@@ -323,37 +333,45 @@ class NativeBridgeGenerator {
 
     // ── Collection support ────────────────────────────────────────────────────
 
-    /** Build out-params for collection returns. */
-    private fun buildCollectionOutParams(type: KneType): String = when (type) {
-        is KneType.LIST -> {
-            val elem = type.elementType
-            if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
-            else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
+    /** Build out-params for collection returns (unwraps nullable). */
+    private fun buildCollectionOutParams(type: KneType): String {
+        val inner = type.unwrapCollection()
+        return when (inner) {
+            is KneType.LIST -> {
+                val elem = inner.elementType
+                if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
+                else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
+            }
+            is KneType.SET -> {
+                val elem = inner.elementType
+                if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
+                else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
+            }
+            is KneType.MAP -> {
+                val k = inner.keyType; val v = inner.valueType
+                val keysParam = if (k == KneType.STRING) "outKeys: CPointer<ByteVar>?, outKeysLen: Int" else "outKeys: ${KneType.collectionPointerType(k)}"
+                val valuesParam = if (v == KneType.STRING) "outValues: CPointer<ByteVar>?, outValuesLen: Int" else "outValues: ${KneType.collectionPointerType(v)}"
+                ", $keysParam, $valuesParam, outLen: Int"
+            }
+            else -> ""
         }
-        is KneType.SET -> {
-            val elem = type.elementType
-            if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
-            else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
-        }
-        is KneType.MAP -> {
-            val k = type.keyType; val v = type.valueType
-            val keysParam = if (k == KneType.STRING) "outKeys: CPointer<ByteVar>?, outKeysLen: Int" else "outKeys: ${KneType.collectionPointerType(k)}"
-            val valuesParam = if (v == KneType.STRING) "outValues: CPointer<ByteVar>?, outValuesLen: Int" else "outValues: ${KneType.collectionPointerType(v)}"
-            ", $keysParam, $valuesParam, outLen: Int"
-        }
-        else -> ""
     }
 
-    /** Emit collection return logic. */
+    /** Emit collection return logic (handles nullable: returns -1 for null). */
     private fun StringBuilder.appendCollectionReturn(expr: String, type: KneType) {
+        val isNullable = type is KneType.NULLABLE
+        val inner = type.unwrapCollection()
         appendLine("    val _result = $expr")
-        when (type) {
-            is KneType.LIST -> appendCollectionElementsReturn("_result", type.elementType)
+        if (isNullable) {
+            appendLine("    if (_result == null) return -1")
+        }
+        when (inner) {
+            is KneType.LIST -> appendCollectionElementsReturn("_result", inner.elementType)
             is KneType.SET -> {
                 appendLine("    val _list = _result.toList()")
-                appendCollectionElementsReturn("_list", type.elementType)
+                appendCollectionElementsReturn("_list", inner.elementType)
             }
-            is KneType.MAP -> appendMapReturn(type)
+            is KneType.MAP -> appendMapReturn(inner)
             else -> appendLine("    return 0")
         }
     }
@@ -581,6 +599,9 @@ class NativeBridgeGenerator {
         type is KneType.LIST -> "${paramName}List"
         type is KneType.SET -> "${paramName}Set"
         type is KneType.MAP -> "${paramName}Map"
+        type is KneType.NULLABLE && type.inner is KneType.LIST -> "${paramName}List"
+        type is KneType.NULLABLE && type.inner is KneType.SET -> "${paramName}Set"
+        type is KneType.NULLABLE && type.inner is KneType.MAP -> "${paramName}Map"
         type is KneType.OBJECT -> "${paramName}Obj"
         type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         type is KneType.FUNCTION -> "${paramName}Fn"
@@ -612,6 +633,9 @@ class NativeBridgeGenerator {
         type is KneType.LIST -> "${paramName}List"
         type is KneType.SET -> "${paramName}Set"
         type is KneType.MAP -> "${paramName}Map"
+        type is KneType.NULLABLE && type.inner is KneType.LIST -> "${paramName}List"
+        type is KneType.NULLABLE && type.inner is KneType.SET -> "${paramName}Set"
+        type is KneType.NULLABLE && type.inner is KneType.MAP -> "${paramName}Map"
         type is KneType.OBJECT -> "${paramName}Obj"
         type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         type is KneType.FUNCTION -> "${paramName}Fn"
@@ -668,12 +692,32 @@ class NativeBridgeGenerator {
                 appendLine("    val ${p.name}Obj = $ctorExpr")
             }
         }
-        // Reconstruct collections from flat native pointers
+        // Reconstruct collections from flat native pointers (including nullable)
         fn.params.forEach { p ->
-            when (p.type) {
-                is KneType.LIST -> appendCollectionParamRead(p.name, p.type.elementType, "List")
-                is KneType.SET -> appendCollectionParamRead(p.name, p.type.elementType, "Set")
-                is KneType.MAP -> appendMapParamRead(p.name, p.type)
+            val isNullable = p.type is KneType.NULLABLE
+            val inner = if (isNullable) (p.type as KneType.NULLABLE).inner else p.type
+            when (inner) {
+                is KneType.LIST -> {
+                    if (isNullable) {
+                        appendLine("    val ${p.name}List = if (${p.name}_size < 0) null else {")
+                        appendCollectionParamReadInner(p.name, inner.elementType, "List")
+                        appendLine("    }")
+                    } else appendCollectionParamRead(p.name, inner.elementType, "List")
+                }
+                is KneType.SET -> {
+                    if (isNullable) {
+                        appendLine("    val ${p.name}Set = if (${p.name}_size < 0) null else {")
+                        appendCollectionParamReadInner(p.name, inner.elementType, "List")
+                        appendLine("    .toSet() }")
+                    } else appendCollectionParamRead(p.name, inner.elementType, "Set")
+                }
+                is KneType.MAP -> {
+                    if (isNullable) {
+                        appendLine("    val ${p.name}Map: Map<${inner.keyType.jvmTypeName}, ${inner.valueType.jvmTypeName}>? = if (${p.name}_size < 0) null else {")
+                        appendMapParamReadInner(p.name, inner)
+                        appendLine("    }")
+                    } else appendMapParamRead(p.name, inner)
+                }
                 else -> {}
             }
         }
@@ -709,6 +753,33 @@ class NativeBridgeGenerator {
         if (collType == "Set") {
             appendLine("    val ${paramName}Set = $listVar.toSet()")
         }
+    }
+
+    /** Emit an expression-returning collection read (for nullable wrappers). */
+    private fun StringBuilder.appendCollectionParamReadInner(paramName: String, elemType: KneType, collType: String) {
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val _${paramName}Tmp = mutableListOf<String>()")
+                appendLine("        var _${paramName}Offset = 0")
+                appendLine("        for (i in 0 until ${paramName}_size) {")
+                appendLine("            val _s = ($paramName!! + _${paramName}Offset)!!.toKString()")
+                appendLine("            _${paramName}Tmp.add(_s)")
+                appendLine("            _${paramName}Offset += _s.encodeToByteArray().size + 1")
+                appendLine("        }")
+                appendLine("        _${paramName}Tmp")
+            }
+            KneType.BOOLEAN -> appendLine("        List(${paramName}_size) { $paramName!![it] != 0 }")
+            is KneType.ENUM -> appendLine("        List(${paramName}_size) { ${elemType.fqName}.entries[$paramName!![it]] }")
+            is KneType.OBJECT -> appendLine("        List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
+            else -> appendLine("        List(${paramName}_size) { $paramName!![it] }")
+        }
+    }
+
+    /** Emit an expression-returning map read (for nullable wrappers). */
+    private fun StringBuilder.appendMapParamReadInner(paramName: String, type: KneType.MAP) {
+        // Reuse the same logic but as expression
+        appendMapParamRead(paramName, type)
+        appendLine("        ${paramName}Map")
     }
 
     /** Emit local variable to read a Map from native parallel arrays. */
@@ -760,14 +831,48 @@ class NativeBridgeGenerator {
         val hasStringInvoke = fnType.paramTypes.any {
             it == KneType.STRING || (it is KneType.DATA_CLASS && it.fields.any { f -> f.type == KneType.STRING })
         }
+        val hasCollectionInvoke = fnType.paramTypes.any { it is KneType.LIST || it is KneType.SET }
+        val needsMemScoped = hasStringInvoke || hasCollectionInvoke
 
         appendLine("    val ${paramName}Fn: ${fnType.jvmTypeName} = { $lambdaParamsStr ->")
-        if (hasStringInvoke) {
+        if (needsMemScoped) {
             appendLine("        memScoped {")
         }
         appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
 
-        // Build invoke args — decompose DATA_CLASS into fields, convert enum to ordinal
+        // Pre-allocate collection arrays for CFunction invoke
+        fnType.paramTypes.forEachIndexed { i, t ->
+            if (t is KneType.LIST || t is KneType.SET) {
+                val elemType = if (t is KneType.LIST) t.elementType else (t as KneType.SET).elementType
+                val src = if (t is KneType.SET) "_p$i.toList()" else "_p$i"
+                val varType = KneType.collectionElementVarType(elemType)
+                when (elemType) {
+                    KneType.STRING -> {
+                        appendLine("        val _coll$i = $src")
+                        appendLine("        val _buf$i = allocArray<ByteVar>(_coll$i.sumOf { it.encodeToByteArray().size + 1 }.coerceAtLeast(1))")
+                        appendLine("        var _off$i = 0")
+                        appendLine("        for (_s in _coll$i) { val _b = _s.encodeToByteArray(); _b.forEachIndexed { j, b -> _buf${i}[_off$i + j] = b }; _buf${i}[_off$i + _b.size] = 0; _off$i += _b.size + 1 }")
+                    }
+                    KneType.BOOLEAN -> {
+                        appendLine("        val _coll$i = $src")
+                        appendLine("        val _buf$i = allocArray<IntVar>(_coll$i.size)")
+                        appendLine("        _coll$i.forEachIndexed { j, v -> _buf${i}[j] = if (v) 1 else 0 }")
+                    }
+                    is KneType.ENUM -> {
+                        appendLine("        val _coll$i = $src")
+                        appendLine("        val _buf$i = allocArray<IntVar>(_coll$i.size)")
+                        appendLine("        _coll$i.forEachIndexed { j, v -> _buf${i}[j] = v.ordinal }")
+                    }
+                    else -> {
+                        appendLine("        val _coll$i = $src")
+                        appendLine("        val _buf$i = allocArray<$varType>(_coll$i.size)")
+                        appendLine("        _coll$i.forEachIndexed { j, v -> _buf${i}[j] = v }")
+                    }
+                }
+            }
+        }
+
+        // Build invoke args — decompose DATA_CLASS into fields, convert enum to ordinal, expand collections to ptr+size
         val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
@@ -780,6 +885,7 @@ class NativeBridgeGenerator {
                         else -> "_p$i.${f.name}"
                     }
                 }
+                is KneType.LIST, is KneType.SET -> "_buf$i, _coll$i.size"
                 else -> "_p$i"
             }
         }.joinToString(", ")
@@ -814,15 +920,17 @@ class NativeBridgeGenerator {
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }
-        if (hasStringInvoke) {
+        if (needsMemScoped) {
             appendLine("        }")
         }
         appendLine("    }")
     }
 
-    /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. */
+    /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. LIST becomes pointer+size. */
     private fun expandCFuncParamTypes(type: KneType): List<String> = when (type) {
         is KneType.DATA_CLASS -> type.fields.map { cFunctionParamType(it.type) }
+        is KneType.LIST -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
+        is KneType.SET -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
         else -> listOf(cFunctionParamType(type))
     }
 
