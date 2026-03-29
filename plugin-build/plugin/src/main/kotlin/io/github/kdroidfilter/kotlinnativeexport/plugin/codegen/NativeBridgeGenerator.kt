@@ -390,14 +390,18 @@ class NativeBridgeGenerator {
 
         val lambdaParams = fnType.paramTypes.mapIndexed { i, t -> "_p$i: ${t.jvmTypeName}" }
         val lambdaParamsStr = lambdaParams.joinToString(", ")
+        val hasStringParams = fnType.paramTypes.any { it == KneType.STRING }
 
         appendLine("    val ${paramName}Fn: ${fnType.jvmTypeName} = { $lambdaParamsStr ->")
+        if (hasStringParams) {
+            appendLine("        memScoped {")
+        }
         appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
 
-        // Build invoke args, converting Boolean to Int for C ABI
         val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
+                KneType.STRING -> "_p$i.cstr.ptr"
                 else -> "_p$i"
             }
         }.joinToString(", ")
@@ -408,6 +412,9 @@ class NativeBridgeGenerator {
             appendLine("        _fnPtr.invoke($invokeArgs) != 0")
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
+        }
+        if (hasStringParams) {
+            appendLine("        }")
         }
         appendLine("    }")
     }
@@ -421,6 +428,7 @@ class NativeBridgeGenerator {
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.BYTE -> "Byte"
         KneType.SHORT -> "Short"
+        KneType.STRING -> "CPointer<ByteVar>?"
         else -> "Int" // fallback
     }
 

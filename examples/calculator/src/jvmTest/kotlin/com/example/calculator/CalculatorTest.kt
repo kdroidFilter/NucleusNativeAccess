@@ -809,6 +809,75 @@ class CalculatorTest {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase 4b: String in callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback (String) to Unit - receives description`() {
+        Calculator(42).use { calc ->
+            var received = ""
+            calc.withDescription { desc -> received = desc }
+            assertEquals("Calculator(current=42)", received)
+        }
+    }
+
+    @Test
+    fun `callback (String) to Unit - empty accumulator`() {
+        Calculator(0).use { calc ->
+            var received = ""
+            calc.withDescription { desc -> received = desc }
+            assertEquals("Calculator(current=0)", received)
+        }
+    }
+
+    @Test
+    fun `callback (String) to Unit - negative accumulator`() {
+        Calculator(-7).use { calc ->
+            var received = ""
+            calc.withDescription { desc -> received = desc }
+            assertEquals("Calculator(current=-7)", received)
+        }
+    }
+
+    @Test
+    fun `callback (String, Int) to Unit - matching keyword`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello world"
+            var receivedLabel = ""
+            var receivedFound = -1
+            calc.findAndReport("hello") { label, found ->
+                receivedLabel = label
+                receivedFound = found
+            }
+            assertEquals("hello world", receivedLabel)
+            assertEquals(1, receivedFound)
+        }
+    }
+
+    @Test
+    fun `callback (String, Int) to Unit - no match`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello"
+            var receivedFound = -1
+            calc.findAndReport("xyz") { _, found ->
+                receivedFound = found
+            }
+            assertEquals(0, receivedFound)
+        }
+    }
+
+    @Test
+    fun `callback (String, Int) to Unit - empty label`() {
+        Calculator(0).use { calc ->
+            var receivedLabel = "initial"
+            calc.findAndReport("test") { label, _ ->
+                receivedLabel = label
+            }
+            assertEquals("", receivedLabel)
+        }
+    }
+
     @Test
     fun `multiple callbacks in sequence`() {
         Calculator(5).use { calc ->

@@ -121,6 +121,15 @@ class Calculator(initial: Int = 0) {
         return predicate(accumulator)
     }
 
+    fun withDescription(callback: (String) -> Unit) {
+        callback("Calculator(current=$accumulator)")
+    }
+
+    fun findAndReport(keyword: String, callback: (String, Int) -> Unit) {
+        val found = if (label.contains(keyword)) 1 else 0
+        callback(label, found)
+    }
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {

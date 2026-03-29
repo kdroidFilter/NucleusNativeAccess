@@ -106,6 +106,7 @@ class FfmProxyGenerator {
         appendLine("import java.lang.foreign.FunctionDescriptor")
         appendLine("import java.lang.foreign.Linker")
         appendLine("import java.lang.foreign.SymbolLookup")
+        appendLine("import java.lang.foreign.MemorySegment")
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine("import java.nio.file.Paths")
@@ -223,24 +224,32 @@ class FfmProxyGenerator {
             }
         }.joinToString(", ")
 
-        val castExpr = "@Suppress(\"UNCHECKED_CAST\")\n        val _fn = fn as $fnTypeStr"
-        appendLine("        $castExpr")
+        appendLine("        @Suppress(\"UNCHECKED_CAST\")")
+        appendLine("        val _fn = fn as $fnTypeStr")
+
+        // Convert C ABI values to Kotlin types
+        val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
+            when (t) {
+                KneType.BOOLEAN -> "p$i != 0"
+                KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
+                else -> "p$i"
+            }
+        }.joinToString(", ")
 
         if (sig.returnType == KneType.UNIT) {
-            appendLine("        _fn.invoke($invokeArgs)")
+            appendLine("        _fn.invoke($invokeConvertedArgs)")
         } else if (sig.returnType == KneType.BOOLEAN) {
-            appendLine("        return if (_fn.invoke($invokeArgs)) 1 else 0")
+            appendLine("        return if (_fn.invoke($invokeConvertedArgs)) 1 else 0")
         } else {
-            appendLine("        return _fn.invoke($invokeArgs)")
+            appendLine("        return _fn.invoke($invokeConvertedArgs)")
         }
         appendLine("    }")
 
         // MethodHandle for the upcall target
         val methodTypeArgs = buildList {
-            if (sig.returnType == KneType.UNIT) add("Void.TYPE")
-            else add("${upcallJvmBoxedType(sig.returnType)}::class.javaPrimitiveType")
+            add(upcallMethodTypeArg(sig.returnType))
             add("Any::class.java")
-            sig.paramTypes.forEach { t -> add("${upcallJvmBoxedType(t)}::class.javaPrimitiveType") }
+            sig.paramTypes.forEach { t -> add(upcallMethodTypeArg(t)) }
         }.joinToString(", ")
 
         appendLine()
@@ -271,7 +280,7 @@ class FfmProxyGenerator {
         appendLine("    }")
     }
 
-    /** The Java primitive type name for upcall method signatures (C ABI compatible). */
+    /** The Java type name for upcall method signatures (C ABI compatible). */
     private fun upcallJvmType(type: KneType): String = when (type) {
         KneType.INT -> "Int"
         KneType.LONG -> "Long"
@@ -280,20 +289,16 @@ class FfmProxyGenerator {
         KneType.BOOLEAN -> "Int" // C ABI: int for bool
         KneType.BYTE -> "Byte"
         KneType.SHORT -> "Short"
+        KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
         else -> "Int"
     }
 
-    /** The boxed Java type for MethodType construction. */
-    private fun upcallJvmBoxedType(type: KneType): String = when (type) {
-        KneType.INT -> "Int"
-        KneType.LONG -> "Long"
-        KneType.DOUBLE -> "Double"
-        KneType.FLOAT -> "Float"
-        KneType.BOOLEAN -> "Int" // C ABI
-        KneType.BYTE -> "Byte"
-        KneType.SHORT -> "Short"
-        else -> "Int"
+    /** The MethodType argument for a callback param/return type. */
+    private fun upcallMethodTypeArg(type: KneType): String = when (type) {
+        KneType.UNIT -> "Void.TYPE"
+        KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
+        else -> "${upcallJvmType(type)}::class.javaPrimitiveType"
     }
 
     /** The FFM ValueLayout for a callback parameter/return type. */
@@ -305,6 +310,7 @@ class FfmProxyGenerator {
         KneType.BOOLEAN -> "JAVA_INT"
         KneType.BYTE -> "JAVA_BYTE"
         KneType.SHORT -> "JAVA_SHORT"
+        KneType.STRING -> "ADDRESS"
         else -> "JAVA_INT"
     }
 
