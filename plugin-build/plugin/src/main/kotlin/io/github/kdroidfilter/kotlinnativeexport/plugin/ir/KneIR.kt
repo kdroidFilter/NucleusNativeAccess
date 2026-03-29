@@ -60,6 +60,7 @@ sealed class KneType : Serializable {
     data class OBJECT(val fqName: String, val simpleName: String) : KneType()
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
     data class NULLABLE(val inner: KneType) : KneType()
+    data class FUNCTION(val paramTypes: List<KneType>, val returnType: KneType) : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -83,6 +84,7 @@ sealed class KneType : Serializable {
                 is OBJECT -> "JAVA_LONG"
                 else -> inner.ffmLayout
             }
+            is FUNCTION -> "JAVA_LONG" // function pointer address
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -100,6 +102,7 @@ sealed class KneType : Serializable {
             is OBJECT -> simpleName
             is ENUM -> simpleName
             is NULLABLE -> "${inner.jvmTypeName}?"
+            is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -125,5 +128,6 @@ sealed class KneType : Serializable {
                 is OBJECT -> "Long" // 0L = null
                 else -> inner.nativeBridgeType
             }
+            is FUNCTION -> "Long" // function pointer address
         }
 }

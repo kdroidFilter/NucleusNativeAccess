@@ -694,4 +694,129 @@ class CalculatorTest {
             assertEquals(5, calc.divide(2))
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase 4: Callbacks / Lambdas (FFM upcall stubs)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback (Int) to Unit - receives current value`() {
+        Calculator(42).use { calc ->
+            var received = -1
+            calc.onValueChanged { value -> received = value }
+            assertEquals(42, received)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Unit - zero value`() {
+        Calculator(0).use { calc ->
+            var received = -1
+            calc.onValueChanged { value -> received = value }
+            assertEquals(0, received)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Unit - negative value`() {
+        Calculator(-5).use { calc ->
+            var received = 999
+            calc.onValueChanged { value -> received = value }
+            assertEquals(-5, received)
+        }
+    }
+
+    @Test
+    fun `transform with (Int) to Int lambda - double`() {
+        Calculator(10).use { calc ->
+            val result = calc.transform { it * 2 }
+            assertEquals(20, result)
+            assertEquals(20, calc.current)
+        }
+    }
+
+    @Test
+    fun `transform with (Int) to Int lambda - negate`() {
+        Calculator(7).use { calc ->
+            val result = calc.transform { -it }
+            assertEquals(-7, result)
+        }
+    }
+
+    @Test
+    fun `transform with (Int) to Int lambda - add constant`() {
+        Calculator(10).use { calc ->
+            val result = calc.transform { it + 100 }
+            assertEquals(110, result)
+        }
+    }
+
+    @Test
+    fun `compute with (Int, Int) to Int - addition`() {
+        Calculator(0).use { calc ->
+            val result = calc.compute(3, 4) { a, b -> a + b }
+            assertEquals(7, result)
+            assertEquals(7, calc.current)
+        }
+    }
+
+    @Test
+    fun `compute with (Int, Int) to Int - multiplication`() {
+        Calculator(0).use { calc ->
+            val result = calc.compute(6, 7) { a, b -> a * b }
+            assertEquals(42, result)
+        }
+    }
+
+    @Test
+    fun `compute with (Int, Int) to Int - subtraction`() {
+        Calculator(0).use { calc ->
+            val result = calc.compute(10, 3) { a, b -> a - b }
+            assertEquals(7, result)
+        }
+    }
+
+    @Test
+    fun `checkWith (Int) to Boolean - true`() {
+        Calculator(10).use { calc ->
+            assertTrue(calc.checkWith { it > 0 })
+        }
+    }
+
+    @Test
+    fun `checkWith (Int) to Boolean - false`() {
+        Calculator(-5).use { calc ->
+            assertFalse(calc.checkWith { it > 0 })
+        }
+    }
+
+    @Test
+    fun `checkWith (Int) to Boolean - equality check`() {
+        Calculator(42).use { calc ->
+            assertTrue(calc.checkWith { it == 42 })
+            assertFalse(calc.checkWith { it == 0 })
+        }
+    }
+
+    @Test
+    fun `callbacks work after exception recovery`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            // Callback should still work after exception
+            var received = -1
+            calc.onValueChanged { value -> received = value }
+            assertEquals(10, received)
+        }
+    }
+
+    @Test
+    fun `multiple callbacks in sequence`() {
+        Calculator(5).use { calc ->
+            val values = mutableListOf<Int>()
+            calc.onValueChanged { values.add(it) }
+            calc.add(3)
+            calc.onValueChanged { values.add(it) }
+            assertEquals(listOf(5, 8), values)
+        }
+    }
 }

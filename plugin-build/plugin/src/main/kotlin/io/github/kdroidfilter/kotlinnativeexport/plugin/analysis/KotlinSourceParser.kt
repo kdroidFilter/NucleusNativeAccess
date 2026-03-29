@@ -31,9 +31,9 @@ class KotlinSourceParser {
             """^(?:(?:public|expect|actual)\s+)*enum\s+class\s+(\w+)"""
         )
 
-        // Matches fun declarations
-        private val FUN_RE = Regex(
-            """^(?:(?:public|open|override|operator|inline|actual)\s+)*fun\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*([\w.<>?,\s]+?))?(?:\s*[{=]|$)"""
+        // Matches fun declarations (name only — params extracted manually for nested-paren support)
+        private val FUN_START_RE = Regex(
+            """^(?:(?:public|open|override|operator|inline|actual)\s+)*fun\s+(\w+)\s*\("""
         )
 
         // Matches property declarations inside a class
@@ -236,18 +236,20 @@ class KotlinSourceParser {
 
             // Function declaration
             if (!isPrivate && !line.startsWith("class ") && !line.contains("class ")) {
-                FUN_RE.find(line)?.let { match ->
+                FUN_START_RE.find(line)?.let { match ->
                     val name = match.groupValues[1]
                     if (name != "init" && !name.startsWith("_")) {
-                        val paramsStr = match.groupValues[2]
-                        val returnStr = match.groupValues[3].trim().takeIf { it.isNotEmpty() } ?: "Unit"
-                        val params = parseFunParams(paramsStr, knownTypes)
-                        val returnType = parseType(returnStr, knownTypes)
-                        val fn = KneFunction(name = name, params = params, returnType = returnType)
-                        when {
-                            inCompanionObject -> currentCompanionMethods.add(fn)
-                            currentClassName != null -> currentMethods.add(fn)
-                            braceDepth == 0 -> topLevelFunctions.add(fn)
+                        val extracted = extractFunParamsAndReturn(line, match.range.last + 1)
+                        if (extracted != null) {
+                            val (paramsStr, returnStr) = extracted
+                            val params = parseFunParams(paramsStr, knownTypes)
+                            val returnType = parseType(returnStr, knownTypes)
+                            val fn = KneFunction(name = name, params = params, returnType = returnType)
+                            when {
+                                inCompanionObject -> currentCompanionMethods.add(fn)
+                                currentClassName != null -> currentMethods.add(fn)
+                                braceDepth == 0 -> topLevelFunctions.add(fn)
+                            }
                         }
                     }
                 }
@@ -323,6 +325,34 @@ class KotlinSourceParser {
         return ParseResult(classes, enums, topLevelFunctions, packageName.takeIf { it.isNotEmpty() })
     }
 
+    /**
+     * Given a line like `fun foo(callback: (Int) -> Unit): Int {`
+     * and the index right after the opening `(`, finds the matching `)`,
+     * extracts the parameter string and the return type.
+     * Returns (paramsStr, returnTypeStr) or null if parsing fails.
+     */
+    private fun extractFunParamsAndReturn(line: String, startAfterParen: Int): Pair<String, String>? {
+        var depth = 1
+        var i = startAfterParen
+        while (i < line.length && depth > 0) {
+            when (line[i]) {
+                '(' -> depth++
+                ')' -> depth--
+            }
+            i++
+        }
+        if (depth != 0) return null
+        val paramsStr = line.substring(startAfterParen, i - 1) // everything between ( and matching )
+        val afterParams = line.substring(i).trim()
+        val returnStr = if (afterParams.startsWith(":")) {
+            afterParams.substring(1).trim()
+                .substringBefore('{').substringBefore('=').trim()
+        } else {
+            "Unit"
+        }
+        return Pair(paramsStr, returnStr)
+    }
+
     private fun parseCtorParams(paramsStr: String, knownTypes: TypeMaps): List<KneParam> {
         if (paramsStr.isBlank()) return emptyList()
         return paramsStr.split(",").mapNotNull { raw ->
@@ -334,7 +364,9 @@ class KotlinSourceParser {
 
     private fun parseFunParams(paramsStr: String, knownTypes: TypeMaps): List<KneParam> {
         if (paramsStr.isBlank()) return emptyList()
-        return paramsStr.split(",").mapNotNull { raw ->
+        // Split by commas at depth 0 (handle function types with nested commas)
+        val parts = splitAtTopLevelCommas(paramsStr)
+        return parts.mapNotNull { raw ->
             val s = raw.trim()
             val colonIdx = s.indexOf(':')
             if (colonIdx < 0) return@mapNotNull null
@@ -344,11 +376,34 @@ class KotlinSourceParser {
         }
     }
 
+    /** Split a string by commas, ignoring commas inside parentheses or angle brackets. */
+    private fun splitAtTopLevelCommas(str: String): List<String> {
+        val parts = mutableListOf<String>()
+        var depth = 0
+        var start = 0
+        for (i in str.indices) {
+            when (str[i]) {
+                '(', '<' -> depth++
+                ')', '>' -> depth--
+                ',' -> if (depth == 0) {
+                    parts.add(str.substring(start, i))
+                    start = i + 1
+                }
+            }
+        }
+        parts.add(str.substring(start))
+        return parts
+    }
+
     internal fun parseType(typeStr: String, knownTypes: TypeMaps = TypeMaps(emptyMap(), emptyMap())): KneType {
         val trimmed = typeStr.trim()
         if (trimmed.endsWith("?")) {
             val inner = parseType(trimmed.dropLast(1), knownTypes)
             return if (inner == KneType.UNIT || inner is KneType.NULLABLE) inner else KneType.NULLABLE(inner)
+        }
+        // Function type: (Params) -> Return
+        if (trimmed.startsWith("(") && trimmed.contains("->")) {
+            return parseFunctionType(trimmed, knownTypes) ?: KneType.UNIT
         }
         val clean = trimmed
         return when (clean) {
@@ -369,5 +424,40 @@ class KotlinSourceParser {
                 KneType.UNIT // Unsupported types are silently skipped for now
             }
         }
+    }
+
+    /**
+     * Parses a function type like `(Int, Double) -> Unit` into KneType.FUNCTION.
+     * Returns null if the function type contains unsupported parameter/return types.
+     */
+    private fun parseFunctionType(typeStr: String, knownTypes: TypeMaps): KneType.FUNCTION? {
+        // Find the closing paren for the params (handle nested parens)
+        var depth = 0
+        var closeIdx = -1
+        for (i in typeStr.indices) {
+            when (typeStr[i]) {
+                '(' -> depth++
+                ')' -> { depth--; if (depth == 0) { closeIdx = i; break } }
+            }
+        }
+        if (closeIdx < 0) return null
+
+        val paramsStr = typeStr.substring(1, closeIdx).trim()
+        val afterParen = typeStr.substring(closeIdx + 1).trim()
+        if (!afterParen.startsWith("->")) return null
+        val returnStr = afterParen.substring(2).trim()
+
+        val paramTypes = if (paramsStr.isEmpty()) emptyList()
+        else paramsStr.split(",").map { parseType(it.trim(), knownTypes) }
+
+        // Only support primitive params and returns (no String, Object, Enum in callbacks)
+        val supportedCallbackTypes = setOf(
+            KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.UNIT,
+        )
+        val returnType = parseType(returnStr, knownTypes)
+        if (paramTypes.any { it !in supportedCallbackTypes } || returnType !in supportedCallbackTypes) return null
+
+        return KneType.FUNCTION(paramTypes, returnType)
     }
 }

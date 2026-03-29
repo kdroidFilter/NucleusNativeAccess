@@ -106,6 +106,7 @@ class NativeBridgeGenerator {
             is KneType.OBJECT -> "0L"
             else -> "0"
         }
+        is KneType.FUNCTION -> "0" // callbacks never return error values
     }
 
     // ── Classes ──────────────────────────────────────────────────────────────
@@ -316,6 +317,7 @@ class NativeBridgeGenerator {
         is KneType.OBJECT -> "${paramName}Obj"
         is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         is KneType.NULLABLE -> buildNullableParamConversion(paramName, type)
+        is KneType.FUNCTION -> "${paramName}Fn"
         else -> paramName
     }
 
@@ -340,6 +342,7 @@ class NativeBridgeGenerator {
         is KneType.OBJECT -> "${paramName}Obj"
         is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         is KneType.NULLABLE -> buildNullableCallArg(paramName, type)
+        is KneType.FUNCTION -> "${paramName}Fn"
         else -> paramName
     }
 
@@ -357,7 +360,7 @@ class NativeBridgeGenerator {
         else -> paramName
     }
 
-    /** Emit local variable conversions for String and Object params (including nullable variants). */
+    /** Emit local variable conversions for String, Object, and Function params (including nullable variants). */
     private fun StringBuilder.appendObjectParamConversions(fn: KneFunction) {
         fn.params.filter { it.type == KneType.STRING }.forEach { p ->
             appendLine("    val ${p.name}Str = ${p.name}?.toKString() ?: \"\"")
@@ -373,6 +376,58 @@ class NativeBridgeGenerator {
             val objType = (p.type as KneType.NULLABLE).inner as KneType.OBJECT
             appendLine("    val ${p.name}Obj = if (${p.name} != 0L) ${p.name}.toCPointer<COpaque>()!!.asStableRef<${objType.fqName}>().get() else null")
         }
+        fn.params.filter { it.type is KneType.FUNCTION }.forEach { p ->
+            val fnType = p.type as KneType.FUNCTION
+            appendFunctionParamConversion(p.name, fnType)
+        }
+    }
+
+    /** Generate a Kotlin lambda wrapper that calls through the native CFunction pointer. */
+    private fun StringBuilder.appendFunctionParamConversion(paramName: String, fnType: KneType.FUNCTION) {
+        val cFuncParams = fnType.paramTypes.joinToString(", ") { cFunctionParamType(it) }
+        val cFuncReturn = cFunctionReturnType(fnType.returnType)
+        val cFuncType = "CFunction<($cFuncParams) -> $cFuncReturn>"
+
+        val lambdaParams = fnType.paramTypes.mapIndexed { i, t -> "_p$i: ${t.jvmTypeName}" }
+        val lambdaParamsStr = lambdaParams.joinToString(", ")
+
+        appendLine("    val ${paramName}Fn: ${fnType.jvmTypeName} = { $lambdaParamsStr ->")
+        appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
+
+        // Build invoke args, converting Boolean to Int for C ABI
+        val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
+            when (t) {
+                KneType.BOOLEAN -> "if (_p$i) 1 else 0"
+                else -> "_p$i"
+            }
+        }.joinToString(", ")
+
+        if (fnType.returnType == KneType.UNIT) {
+            appendLine("        _fnPtr.invoke($invokeArgs)")
+        } else if (fnType.returnType == KneType.BOOLEAN) {
+            appendLine("        _fnPtr.invoke($invokeArgs) != 0")
+        } else {
+            appendLine("        _fnPtr.invoke($invokeArgs)")
+        }
+        appendLine("    }")
+    }
+
+    /** Map a KneType to the corresponding C-ABI type for CFunction signatures. */
+    private fun cFunctionParamType(type: KneType): String = when (type) {
+        KneType.INT -> "Int"
+        KneType.LONG -> "Long"
+        KneType.DOUBLE -> "Double"
+        KneType.FLOAT -> "Float"
+        KneType.BOOLEAN -> "Int" // C uses int for bool
+        KneType.BYTE -> "Byte"
+        KneType.SHORT -> "Short"
+        else -> "Int" // fallback
+    }
+
+    private fun cFunctionReturnType(type: KneType): String = when (type) {
+        KneType.UNIT -> "Unit"
+        KneType.BOOLEAN -> "Int" // C uses int for bool
+        else -> cFunctionParamType(type)
     }
 
     /** Emit the return statement for a given expression and type. */

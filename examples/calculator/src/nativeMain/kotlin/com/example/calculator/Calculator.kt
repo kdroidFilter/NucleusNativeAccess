@@ -101,6 +101,26 @@ class Calculator(initial: Int = 0) {
 
     fun toDoubleOrNull(): Double? = if (accumulator != 0) accumulator.toDouble() else null
 
+    // ── Callback support ──────────────────────────────────────────────────
+
+    fun onValueChanged(callback: (Int) -> Unit) {
+        callback(accumulator)
+    }
+
+    fun transform(fn: (Int) -> Int): Int {
+        accumulator = fn(accumulator)
+        return accumulator
+    }
+
+    fun compute(a: Int, b: Int, op: (Int, Int) -> Int): Int {
+        accumulator = op(a, b)
+        return accumulator
+    }
+
+    fun checkWith(predicate: (Int) -> Boolean): Boolean {
+        return predicate(accumulator)
+    }
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {
