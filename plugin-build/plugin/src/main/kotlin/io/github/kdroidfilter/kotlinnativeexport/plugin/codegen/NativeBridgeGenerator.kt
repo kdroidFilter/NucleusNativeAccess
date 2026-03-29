@@ -68,6 +68,10 @@ class NativeBridgeGenerator {
         module.classes.forEach { cls -> appendClass(cls, module.libName) }
         module.enums.forEach { enum -> appendEnum(enum, module.libName) }
         module.functions.forEach { fn -> appendTopLevelFunction(fn, module.libName) }
+
+        // Generate list-of-DC accessor bridges for each DC used in collections
+        val dcTypesInLists = collectDcListTypes(module)
+        dcTypesInLists.forEach { dc -> appendListDcBridges(dc, module.libName) }
     }
 
     // ── Error query functions ────────────────────────────────────────────────
@@ -200,6 +204,13 @@ class NativeBridgeGenerator {
     private fun isDataClassReturn(type: KneType): Boolean =
         type is KneType.DATA_CLASS || (type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS)
 
+    /** Check if a collection return contains DC elements (uses opaque handle instead of flat array). */
+    private fun isDcCollectionReturn(type: KneType): Boolean {
+        val inner = type.unwrapCollection()
+        val elem = when (inner) { is KneType.LIST -> inner.elementType; is KneType.SET -> inner.elementType; else -> null }
+        return elem is KneType.DATA_CLASS
+    }
+
     private fun extractDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
         is KneType.DATA_CLASS -> type
         is KneType.NULLABLE -> type.inner as? KneType.DATA_CLASS
@@ -221,10 +232,11 @@ class NativeBridgeGenerator {
         val dcOutParams = if (returnDc != null) buildDataClassOutParams(returnDc) else ""
         val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams$dcOutParams$collectionOutParams"
 
-        // Nullable data class returns Int (0=null, 1=present). Plain data class returns void.
+        val dcCollection = returnsCollection && isDcCollectionReturn(fn.returnType)
         val returnDecl = when {
             returnsNullableDataClass -> ": Int"
             returnDc != null -> ""
+            dcCollection -> ": Long" // opaque handle to List<DC>
             returnsCollection -> ": Int" // element count
             else -> buildReturnDecl(fn.returnType)
         }
@@ -244,7 +256,7 @@ class NativeBridgeGenerator {
         } else {
             appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
         }
-        appendTryCatchEnd(if (returnsNullableDataClass) KneType.INT else if (returnDc != null) KneType.UNIT else if (returnsCollection) KneType.INT else fn.returnType)
+        appendTryCatchEnd(if (returnsNullableDataClass) KneType.INT else if (returnDc != null) KneType.UNIT else if (dcCollection) KneType.LONG else if (returnsCollection) KneType.INT else fn.returnType)
         appendLine("}")
         appendLine()
     }
@@ -359,12 +371,14 @@ class NativeBridgeGenerator {
         return when (inner) {
             is KneType.LIST -> {
                 val elem = inner.elementType
-                if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
+                if (elem is KneType.DATA_CLASS) "" // DC lists use opaque handle, no out-params
+                else if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
                 else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
             }
             is KneType.SET -> {
                 val elem = inner.elementType
-                if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
+                if (elem is KneType.DATA_CLASS) "" // DC sets use opaque handle
+                else if (elem == KneType.STRING) ", outBuf: CPointer<ByteVar>?, outBufLen: Int"
                 else ", outBuf: ${KneType.collectionPointerType(elem)}, outLen: Int"
             }
             is KneType.MAP -> {
@@ -381,6 +395,15 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendCollectionReturn(expr: String, type: KneType) {
         val isNullable = type is KneType.NULLABLE
         val inner = type.unwrapCollection()
+        // List<DataClass> uses opaque handle pattern (returns Long, not flat array)
+        val elemType = when (inner) { is KneType.LIST -> inner.elementType; is KneType.SET -> inner.elementType; else -> null }
+        if (elemType is KneType.DATA_CLASS) {
+            appendLine("    val _result = $expr")
+            if (isNullable) appendLine("    if (_result == null) return 0L")
+            val listExpr = if (inner is KneType.SET) "_result.toList()" else "_result"
+            appendLine("    return StableRef.create($listExpr).asCPointer().toLong()")
+            return
+        }
         appendLine("    val _result = $expr")
         if (isNullable) {
             appendLine("    if (_result == null) return -1")
@@ -1197,5 +1220,56 @@ class NativeBridgeGenerator {
         appendLine("    val writeLen = minOf(result.size, outLen)")
         appendLine("    result.forEachIndexed { i, b -> if (i < writeLen) outBuf?.set(i, b) }")
         appendLine("    return result.size")
+    }
+
+    // ── List<DataClass> opaque handle bridges ───────────────────────────────
+
+    /** Collect all DATA_CLASS types used as LIST elements across the module. */
+    private fun collectDcListTypes(module: KneModule): Set<KneType.DATA_CLASS> {
+        val result = mutableSetOf<KneType.DATA_CLASS>()
+        fun scan(type: KneType) {
+            when (type) {
+                is KneType.LIST -> if (type.elementType is KneType.DATA_CLASS) result.add(type.elementType)
+                is KneType.SET -> if (type.elementType is KneType.DATA_CLASS) result.add(type.elementType)
+                is KneType.NULLABLE -> scan(type.inner)
+                else -> {}
+            }
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> fn.params.forEach { scan(it.type) }; scan(fn.returnType) }
+            cls.companionMethods.forEach { fn -> fn.params.forEach { scan(it.type) }; scan(fn.returnType) }
+        }
+        module.functions.forEach { fn -> fn.params.forEach { scan(it.type) }; scan(fn.returnType) }
+        return result
+    }
+
+    /** Generate size/get/dispose bridges for List<DC>. */
+    private fun StringBuilder.appendListDcBridges(dc: KneType.DATA_CLASS, prefix: String) {
+        val n = dc.simpleName
+        val fq = dc.fqName
+
+        // size
+        appendLine("@CName(\"${prefix}_list_${n}_size\")")
+        appendLine("fun `${prefix}_list_${n}_size`(handle: Long): Int {")
+        appendLine("    return handle.toCPointer<COpaque>()!!.asStableRef<List<$fq>>().get().size")
+        appendLine("}")
+        appendLine()
+
+        // get — writes DC fields to out-params (same pattern as single DC return)
+        val outParams = buildDataClassOutParams(dc, "out")
+        appendLine("@CName(\"${prefix}_list_${n}_get\")")
+        appendLine("fun `${prefix}_list_${n}_get`(handle: Long, index: Int$outParams) {")
+        appendLine("    val _item = handle.toCPointer<COpaque>()!!.asStableRef<List<$fq>>().get()[index]")
+        writeDataClassFields("_item", dc, "out")
+        appendLine("}")
+        appendLine()
+
+        // dispose
+        appendLine("@CName(\"${prefix}_list_${n}_dispose\")")
+        appendLine("fun `${prefix}_list_${n}_dispose`(handle: Long) {")
+        appendLine("    if (handle == 0L) return")
+        appendLine("    try { handle.toCPointer<COpaque>()?.asStableRef<List<$fq>>()?.dispose() } catch (_: Throwable) {}")
+        appendLine("}")
+        appendLine()
     }
 }

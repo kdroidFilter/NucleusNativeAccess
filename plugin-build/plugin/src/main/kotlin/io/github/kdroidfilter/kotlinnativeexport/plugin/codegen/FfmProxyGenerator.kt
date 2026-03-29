@@ -684,6 +684,35 @@ class FfmProxyGenerator {
             }
         }
 
+        // List<DC> accessor handles
+        val dcListTypes = mutableSetOf<KneType.DATA_CLASS>()
+        fun scanForDcList(type: KneType) {
+            val inner = type.unwrapCollection()
+            val elem = when (inner) { is KneType.LIST -> inner.elementType; is KneType.SET -> inner.elementType; else -> null }
+            if (elem is KneType.DATA_CLASS) dcListTypes.add(elem)
+        }
+        cls.methods.forEach { m -> scanForDcList(m.returnType) }
+        cls.companionMethods.forEach { m -> scanForDcList(m.returnType) }
+        for (dc in dcListTypes) {
+            val dn = dc.simpleName.uppercase()
+            val flatFields = flattenDcFields(dc, "")
+            val getLayouts = buildList {
+                add("JAVA_LONG"); add("JAVA_INT") // handle, index
+                flatFields.forEach { (_, type) ->
+                    when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }; else -> add("ADDRESS") }
+                }
+            }.joinToString(", ")
+            appendLine("        private val LIST_${dn}_SIZE_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_list_${dc.simpleName}_size\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG))")
+            appendLine("        }")
+            appendLine("        private val LIST_${dn}_GET_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_list_${dc.simpleName}_get\", FunctionDescriptor.ofVoid($getLayouts))")
+            appendLine("        }")
+            appendLine("        private val LIST_${dn}_DISPOSE_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_list_${dc.simpleName}_dispose\", FunctionDescriptor.ofVoid(JAVA_LONG))")
+            appendLine("        }")
+        }
+
         // Factory
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
@@ -1149,7 +1178,10 @@ class FfmProxyGenerator {
             // Collection return out-params (unwrap nullable)
             if (fn.returnType.isCollection()) {
                 val collInner = fn.returnType.unwrapCollection()
-                when (collInner) {
+                val collElem = when (collInner) { is KneType.LIST -> collInner.elementType; is KneType.SET -> collInner.elementType; else -> null }
+                if (collElem is KneType.DATA_CLASS) {
+                    // DC list: no out-params, returns Long handle (handled in effectiveReturn below)
+                } else when (collInner) {
                     is KneType.LIST, is KneType.SET -> {
                         add("ADDRESS"); add("JAVA_INT") // outBuf + outLen/outBufLen
                     }
@@ -1164,9 +1196,15 @@ class FfmProxyGenerator {
                 }
             }
         }
+        val isDcColl = fn.returnType.isCollection() && run {
+            val ci = fn.returnType.unwrapCollection()
+            val ce = when (ci) { is KneType.LIST -> ci.elementType; is KneType.SET -> ci.elementType; else -> null }
+            ce is KneType.DATA_CLASS
+        }
         val effectiveReturn = when {
             returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
             returnDc != null -> KneType.UNIT
+            isDcColl -> KneType.LONG // opaque handle
             fn.returnType.isCollection() -> KneType.INT // element count
             else -> fn.returnType
         }
@@ -1422,6 +1460,43 @@ class FfmProxyGenerator {
     }
 
     private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String, nullable: Boolean = false) {
+        // List<DataClass> — opaque handle pattern
+        if (elemType is KneType.DATA_CLASS) {
+            val invokeArgs = buildClassInvokeArgsExpanded(fn)
+            appendLine("${indent}val _listHandle = $handleName.invoke($invokeArgs) as Long")
+            appendLine("${indent}KneRuntime.checkError()")
+            if (nullable) appendLine("${indent}if (_listHandle == 0L) return null")
+            appendLine("${indent}try {")
+            appendLine("${indent}    val _size = LIST_${elemType.simpleName.uppercase()}_SIZE_HANDLE.invoke(_listHandle) as Int")
+            appendLine("${indent}    val _list = ArrayList<${elemType.simpleName}>(_size)")
+            // Allocate out-params for one DC element
+            val flatFields = flattenDcFields(elemType, "out")
+            appendLine("${indent}    Arena.ofConfined().use { dcArena ->")
+            flatFields.forEach { (name, type) ->
+                when (type) {
+                    KneType.STRING, KneType.BYTE_ARRAY -> appendLine("${indent}        val $name = dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else -> appendLine("${indent}        val $name = dcArena.allocate(${type.ffmLayout})")
+                }
+            }
+            appendLine("${indent}        for (_i in 0 until _size) {")
+            // Build invoke args for get: handle, index, outParams
+            val getArgs = buildList {
+                add("_listHandle"); add("_i")
+                flatFields.forEach { (name, type) ->
+                    when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }; else -> add(name) }
+                }
+            }.joinToString(", ")
+            appendLine("${indent}            LIST_${elemType.simpleName.uppercase()}_GET_HANDLE.invoke($getArgs)")
+            appendLine("${indent}            _list.add(${buildDcCtorFromOutParams(elemType, "out")})")
+            appendLine("${indent}        }")
+            appendLine("${indent}    }")
+            if (collType == "Set") appendLine("${indent}    return _list.toSet()")
+            else appendLine("${indent}    return _list")
+            appendLine("${indent}} finally {")
+            appendLine("${indent}    LIST_${elemType.simpleName.uppercase()}_DISPOSE_HANDLE.invoke(_listHandle)")
+            appendLine("${indent}}")
+            return
+        }
         when (elemType) {
             KneType.STRING -> {
                 appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")

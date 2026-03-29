@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (648 end-to-end FFM tests)
+### Types — test coverage (663 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (160+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 648 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls) and concurrent stress tests (10 threads).
 
@@ -326,7 +326,7 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
-| `List<DataClass>` as collection element | Complex field decomposition | Use Object handles or primitive/String/Enum elements |
+| `List<DataClass>` as param | Requires native list creation bridge | Use `List<DC>` as return only |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 

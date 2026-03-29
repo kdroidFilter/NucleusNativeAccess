@@ -251,6 +251,26 @@ class Calculator(initial: Int = 0) {
         callback(label, found)
     }
 
+    // ── List<DataClass> support ────────────────────────────────────────────────
+
+    fun getPoints(): List<Point> = listOf(Point(accumulator, 0), Point(0, accumulator), Point(accumulator, accumulator))
+
+    fun getNamedValues(): List<NamedValue> = listOf(
+        NamedValue("first", accumulator),
+        NamedValue("second", accumulator * 2),
+    )
+
+    fun getTaggedPoints(): List<TaggedPoint> = listOf(
+        TaggedPoint(Point(accumulator, 0), lastOperation),
+        TaggedPoint(Point(0, accumulator), Operation.ADD),
+    )
+
+    fun getPointsOrNull(): List<Point>? = if (accumulator != 0) listOf(Point(accumulator, accumulator)) else null
+
+    fun getEmptyPoints(): List<Point> = emptyList()
+
+    fun getSinglePoint(): List<Point> = listOf(Point(accumulator, accumulator * 2))
+
     // ── Object in callbacks ────────────────────────────────────────────────────
 
     fun onSelfReady(callback: (Calculator) -> Unit) {

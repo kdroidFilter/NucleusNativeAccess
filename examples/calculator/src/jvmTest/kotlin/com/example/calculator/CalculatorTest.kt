@@ -5372,4 +5372,160 @@ class CalculatorTest {
         threads.forEach { it.start() }
         threads.forEach { it.join() }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // LIST<DATACLASS> RETURN
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `list dc - getPoints basic`() {
+        Calculator(5).use { calc ->
+            val points = calc.getPoints()
+            assertEquals(3, points.size)
+            assertEquals(Point(5, 0), points[0])
+            assertEquals(Point(0, 5), points[1])
+            assertEquals(Point(5, 5), points[2])
+        }
+    }
+
+    @Test fun `list dc - getPoints zero`() {
+        Calculator(0).use { calc ->
+            val points = calc.getPoints()
+            assertEquals(3, points.size)
+            assertEquals(Point(0, 0), points[0])
+            assertEquals(Point(0, 0), points[1])
+            assertEquals(Point(0, 0), points[2])
+        }
+    }
+
+    @Test fun `list dc - getPoints negative`() {
+        Calculator(-3).use { calc ->
+            val points = calc.getPoints()
+            assertEquals(Point(-3, 0), points[0])
+            assertEquals(Point(0, -3), points[1])
+            assertEquals(Point(-3, -3), points[2])
+        }
+    }
+
+    @Test fun `list dc - getNamedValues`() {
+        Calculator(10).use { calc ->
+            val nvs = calc.getNamedValues()
+            assertEquals(2, nvs.size)
+            assertEquals("first", nvs[0].name)
+            assertEquals(10, nvs[0].value)
+            assertEquals("second", nvs[1].name)
+            assertEquals(20, nvs[1].value)
+        }
+    }
+
+    @Test fun `list dc - getTaggedPoints`() {
+        Calculator(7).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 1)
+            val tps = calc.getTaggedPoints()
+            assertEquals(2, tps.size)
+            assertEquals(Point(7, 0), tps[0].point)
+            assertEquals(Operation.MULTIPLY, tps[0].tag)
+            assertEquals(Point(0, 7), tps[1].point)
+            assertEquals(Operation.ADD, tps[1].tag)
+        }
+    }
+
+    @Test fun `list dc - getEmptyPoints`() {
+        Calculator(0).use { calc ->
+            val points = calc.getEmptyPoints()
+            assertEquals(0, points.size)
+        }
+    }
+
+    @Test fun `list dc - getSinglePoint`() {
+        Calculator(42).use { calc ->
+            val points = calc.getSinglePoint()
+            assertEquals(1, points.size)
+            assertEquals(Point(42, 84), points[0])
+        }
+    }
+
+    @Test fun `list dc - getPointsOrNull non-null`() {
+        Calculator(5).use { calc ->
+            val points = calc.getPointsOrNull()
+            assertTrue(points != null)
+            assertEquals(1, points!!.size)
+            assertEquals(Point(5, 5), points[0])
+        }
+    }
+
+    @Test fun `list dc - getPointsOrNull null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getPointsOrNull())
+        }
+    }
+
+    @Test fun `list dc - getPoints after mutations`() {
+        Calculator(0).use { calc ->
+            calc.add(10)
+            val p1 = calc.getPoints()
+            assertEquals(Point(10, 0), p1[0])
+            calc.multiply(2)
+            val p2 = calc.getPoints()
+            assertEquals(Point(20, 0), p2[0])
+            assertEquals(Point(20, 20), p2[2])
+        }
+    }
+
+    @Test fun `list dc - getNamedValues with label`() {
+        Calculator(5).use { calc ->
+            calc.label = "test"
+            val nvs = calc.getNamedValues()
+            assertEquals("first", nvs[0].name) // getNamedValues uses hardcoded names
+            assertEquals(5, nvs[0].value)
+        }
+    }
+
+    @Test fun `list dc - getPoints 100 times`() {
+        Calculator(1).use { calc ->
+            repeat(100) {
+                val points = calc.getPoints()
+                assertEquals(3, points.size)
+                assertEquals(1, points[0].x)
+            }
+        }
+    }
+
+    @Test fun `list dc - concurrent getPoints`() {
+        val threads = (1..5).map { idx ->
+            Thread {
+                Calculator(idx).use { calc ->
+                    repeat(100) {
+                        val points = calc.getPoints()
+                        assertEquals(3, points.size)
+                        assertEquals(idx, points[0].x)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `list dc - getTaggedPoints all operations`() {
+        Calculator(1).use { calc ->
+            for (op in Operation.entries) {
+                calc.applyOp(op, 1)
+                val tps = calc.getTaggedPoints()
+                assertEquals(op, tps[0].tag)
+                assertEquals(Operation.ADD, tps[1].tag) // second is always ADD
+            }
+        }
+    }
+
+    @Test fun `list dc - nullable transition`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getPointsOrNull())
+            calc.add(1)
+            val pts = calc.getPointsOrNull()
+            assertTrue(pts != null)
+            assertEquals(Point(1, 1), pts!![0])
+            calc.reset()
+            assertNull(calc.getPointsOrNull())
+        }
+    }
 }
