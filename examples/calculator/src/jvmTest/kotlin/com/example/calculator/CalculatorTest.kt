@@ -813,6 +813,69 @@ class CalculatorTest {
         }
     }
 
+    // ── data class with enum field — edge cases ────────────────────────────
+
+    @Test
+    fun `TaggedPoint with ADD operation`() {
+        Calculator(0).use { calc ->
+            val tp = calc.getTaggedPoint()
+            assertEquals(Operation.ADD, tp.tag) // default lastOperation
+            assertEquals(Point(0, 0), tp.point)
+        }
+    }
+
+    @Test
+    fun `TaggedPoint roundtrip all operations`() {
+        Calculator(1).use { calc ->
+            for (op in Operation.entries) {
+                calc.setFromTagged(TaggedPoint(Point(10, 20), op))
+                assertEquals(30, calc.current)
+                assertEquals(op, calc.lastOperation)
+                val tp = calc.getTaggedPoint()
+                assertEquals(op, tp.tag)
+            }
+        }
+    }
+
+    @Test
+    fun `TaggedPoint param with negative point`() {
+        Calculator(0).use { calc ->
+            calc.setFromTagged(TaggedPoint(Point(-5, -3), Operation.SUBTRACT))
+            assertEquals(-8, calc.current)
+        }
+    }
+
+    // ── nested data class — edge cases ──────────────────────────────────────
+
+    @Test
+    fun `Rect with negative coordinates`() {
+        Calculator(-10).use { calc ->
+            val r = calc.getRect()
+            assertEquals(Point(0, 0), r.topLeft)
+            assertEquals(Point(-10, -10), r.bottomRight)
+        }
+    }
+
+    @Test
+    fun `Rect after operations`() {
+        Calculator(0).use { calc ->
+            calc.add(7)
+            val r = calc.getRect()
+            assertEquals(Point(7, 7), r.bottomRight)
+        }
+    }
+
+    @Test
+    fun `multiple Rect calls return independent values`() {
+        Calculator(3).use { calc ->
+            val r1 = calc.getRect()
+            calc.add(2)
+            val r2 = calc.getRect()
+            assertEquals(Point(3, 3), r1.bottomRight)
+            assertEquals(Point(5, 5), r2.bottomRight)
+        }
+    }
+
     // ── nullable data class ───────────────────────────────────────────────
 
     @Test
