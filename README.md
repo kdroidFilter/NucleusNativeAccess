@@ -117,9 +117,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (663 end-to-end FFM tests)
+### Types — test coverage (685 end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (180+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 663 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls) and concurrent stress tests (10 threads).
+Every test compiles Kotlin/Native → `libcalculator.so` (190+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 685 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), and 22 suspend function tests with cancellation.
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -162,8 +162,30 @@ Every test compiles Kotlin/Native → `libcalculator.so` (180+ exported symbols)
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
+| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
+
+### Suspend functions
+
+Kotlin/Native `suspend fun` is transparently mapped to JVM `suspend fun`. The developer writes coroutines on both sides — no callbacks, no `CompletableFuture`.
+
+```kotlin
+// Kotlin/Native
+suspend fun fetchData(query: String): String {
+    delay(100)
+    return "result for $query"
+}
+
+// JVM — transparent, just a suspend fun
+val result = calc.fetchData("test")  // suspends the coroutine
+```
+
+**How it works**: the native bridge launches a `CoroutineScope` with a `Job`, passes continuation + exception callbacks as FFM upcall stubs. The JVM proxy uses `suspendCancellableCoroutine` to suspend until the native coroutine completes.
+
+**Cancellation**: JVM coroutine cancel → `Job.cancel()` on native side. Native `CancellationException` → JVM `CancellationException`. Bidirectional, automatic.
+
+**Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`, `Object`, nullable variants.
 
 ### Callbacks & lambdas
 
@@ -326,7 +348,7 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
-| Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
+| `suspend` with DataClass return | DC field extraction from StableRef | Use primitive/String/Enum/Object returns |
 | `List<DataClass>` as param | Requires native list creation bridge | Use `List<DC>` as return only |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
