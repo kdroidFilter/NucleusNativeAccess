@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (378 end-to-end FFM tests)
+### Types — test coverage (408 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (130 exported symbols) → loads via FFM `MethodHandle` → verifies on JVM.
 

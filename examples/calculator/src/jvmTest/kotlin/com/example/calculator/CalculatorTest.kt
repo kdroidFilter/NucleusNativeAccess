@@ -3478,4 +3478,325 @@ class CalculatorTest {
             assertEquals(emptyMap<String, Int>(), result)
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // EDGE-CASE BATTERY: Callbacks with collections
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Map callback param edge cases ───────────────────────────────────────
+
+    @Test
+    fun `cb map param - negative values`() {
+        Calculator(-5).use { calc ->
+            var received = emptyMap<String, Int>()
+            calc.onMetadataReady { received = it }
+            assertEquals(-5, received["current"])
+            assertEquals(-10, received["doubled"])
+        }
+    }
+
+    @Test
+    fun `cb map param - large accumulator`() {
+        Calculator(100_000).use { calc ->
+            var received = emptyMap<String, Int>()
+            calc.onMetadataReady { received = it }
+            assertEquals(100_000, received["current"])
+            assertEquals(200_000, received["doubled"])
+        }
+    }
+
+    @Test
+    fun `cb map Int Int param - basic`() {
+        Calculator(5).use { calc ->
+            var received = emptyMap<Int, Int>()
+            calc.onMapIntIntReady { received = it }
+            assertEquals(25, received[5])
+        }
+    }
+
+    @Test
+    fun `cb map Int Int param - zero`() {
+        Calculator(0).use { calc ->
+            var received = emptyMap<Int, Int>()
+            calc.onMapIntIntReady { received = it }
+            assertEquals(0, received[0])
+        }
+    }
+
+    @Test
+    fun `cb map param - multiple invocations`() {
+        Calculator(1).use { calc ->
+            val all = mutableListOf<Map<String, Int>>()
+            calc.onMetadataReady { all.add(it) }
+            calc.add(9)
+            calc.onMetadataReady { all.add(it) }
+            assertEquals(2, all.size)
+            assertEquals(1, all[0]["current"])
+            assertEquals(10, all[1]["current"])
+        }
+    }
+
+    // ── Collection callback return edge cases ───────────────────────────────
+
+    @Test
+    fun `cb return List Int - large list`() {
+        Calculator(1).use { calc ->
+            val result = calc.getTransformedScores { v -> List(500) { v + it } }
+            assertEquals(500, result.size)
+            assertEquals(1, result[0])
+            assertEquals(500, result[499])
+        }
+    }
+
+    @Test
+    fun `cb return List Int - negative values`() {
+        Calculator(-3).use { calc ->
+            val result = calc.getTransformedScores { v -> listOf(v, v - 1, v - 2) }
+            assertEquals(listOf(-3, -4, -5), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Int - singleton`() {
+        Calculator(42).use { calc ->
+            val result = calc.getTransformedScores { listOf(it) }
+            assertEquals(listOf(42), result)
+        }
+    }
+
+    @Test
+    fun `cb return List String - long strings`() {
+        Calculator(0).use { calc ->
+            val longStr = "a".repeat(200)
+            val result = calc.getComputedLabels { listOf(longStr, "short") }
+            assertEquals(longStr, result[0])
+            assertEquals("short", result[1])
+        }
+    }
+
+    @Test
+    fun `cb return List String - unicode`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedLabels { listOf("café", "naïve", "über") }
+            assertEquals(listOf("café", "naïve", "über"), result)
+        }
+    }
+
+    @Test
+    fun `cb return List String - many items`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedLabels { v -> List(100) { "item_$it" } }
+            assertEquals(100, result.size)
+            assertEquals("item_0", result[0])
+            assertEquals("item_99", result[99])
+        }
+    }
+
+    @Test
+    fun `cb return List Enum - getComputedOps`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedOps { listOf(Operation.ADD, Operation.MULTIPLY) }
+            assertEquals(listOf(Operation.ADD, Operation.MULTIPLY), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Enum - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedOps { emptyList() }
+            assertEquals(emptyList<Operation>(), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Boolean - getComputedBools`() {
+        Calculator(5).use { calc ->
+            val result = calc.getComputedBools { v -> listOf(v > 0, v > 10, v == 5) }
+            assertEquals(listOf(true, false, true), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Boolean - all true`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedBools { listOf(true, true, true) }
+            assertEquals(listOf(true, true, true), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Boolean - all false`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedBools { listOf(false, false) }
+            assertEquals(listOf(false, false), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Long - getComputedLongs`() {
+        Calculator(5).use { calc ->
+            val result = calc.getComputedLongs { v -> listOf(v.toLong(), v.toLong() * 1_000_000L) }
+            assertEquals(listOf(5L, 5_000_000L), result)
+        }
+    }
+
+    @Test
+    fun `cb return List Long - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedLongs { emptyList() }
+            assertEquals(emptyList<Long>(), result)
+        }
+    }
+
+    @Test
+    fun `cb return Map String Int - large map`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedMap { v -> (0 until 50).associate { "key_$it" to it } }
+            assertEquals(50, result.size)
+            assertEquals(0, result["key_0"])
+            assertEquals(49, result["key_49"])
+        }
+    }
+
+    @Test
+    fun `cb return Map String Int - singleton`() {
+        Calculator(42).use { calc ->
+            val result = calc.getComputedMap { mapOf("answer" to it) }
+            assertEquals(mapOf("answer" to 42), result)
+        }
+    }
+
+    @Test
+    fun `cb return Map String Int - unicode keys`() {
+        Calculator(1).use { calc ->
+            val result = calc.getComputedMap { mapOf("café" to 1, "naïve" to 2) }
+            assertEquals(1, result["café"])
+            assertEquals(2, result["naïve"])
+        }
+    }
+
+    // ── Multi-param callback with collection ────────────────────────────────
+
+    @Test
+    fun `cb multi-param with List + String`() {
+        Calculator(0).use { calc ->
+            var receivedList = emptyList<Int>()
+            var receivedStr = ""
+            calc.computeWithScores(10) { list, str ->
+                receivedList = list
+                receivedStr = str
+            }
+            assertEquals(listOf(10, 20, 30), receivedList)
+            assertEquals("computed_10", receivedStr)
+        }
+    }
+
+    @Test
+    fun `cb multi-param with List + String - zero`() {
+        Calculator(0).use { calc ->
+            var receivedList = emptyList<Int>()
+            var receivedStr = ""
+            calc.computeWithScores(0) { list, str ->
+                receivedList = list
+                receivedStr = str
+            }
+            assertEquals(listOf(0, 0, 0), receivedList)
+            assertEquals("computed_0", receivedStr)
+        }
+    }
+
+    // ── Callback return + state mutation ─────────────────────────────────────
+
+    @Test
+    fun `cb return List Int - depends on accumulator`() {
+        Calculator(0).use { calc ->
+            calc.add(5)
+            val r1 = calc.getTransformedScores { listOf(it, it + 1) }
+            assertEquals(listOf(5, 6), r1)
+            calc.add(10)
+            val r2 = calc.getTransformedScores { listOf(it, it + 1) }
+            assertEquals(listOf(15, 16), r2)
+        }
+    }
+
+    @Test
+    fun `cb return Map - depends on accumulator`() {
+        Calculator(0).use { calc ->
+            calc.add(3)
+            val r1 = calc.getComputedMap { mapOf("val" to it) }
+            assertEquals(mapOf("val" to 3), r1)
+            calc.multiply(4)
+            val r2 = calc.getComputedMap { mapOf("val" to it) }
+            assertEquals(mapOf("val" to 12), r2)
+        }
+    }
+
+    // ── Callback List param + collection return roundtrip ────────────────────
+
+    @Test
+    fun `cb list param then collection return`() {
+        Calculator(10).use { calc ->
+            // First use callback with List param
+            var receivedScores = emptyList<Int>()
+            calc.onScoresReady { receivedScores = it }
+            assertEquals(listOf(10, 20, 30), receivedScores)
+
+            // Then use callback that returns collection
+            val transformed = calc.getTransformedScores { v -> receivedScores.map { it + v } }
+            assertEquals(listOf(20, 30, 40), transformed)
+        }
+    }
+
+    @Test
+    fun `cb map param then map return`() {
+        Calculator(5).use { calc ->
+            var meta = emptyMap<String, Int>()
+            calc.onMetadataReady { meta = it }
+
+            // Use the received map to build a new one
+            val computed = calc.getComputedMap { v ->
+                meta.mapValues { (_, mv) -> mv + v }
+            }
+            assertEquals(10, computed["current"]) // 5 + 5
+            assertEquals(15, computed["doubled"]) // 10 + 5
+        }
+    }
+
+    // ── Sequential callbacks stress test ─────────────────────────────────────
+
+    @Test
+    fun `stress - 20 sequential callback invocations`() {
+        Calculator(0).use { calc ->
+            repeat(20) { i ->
+                calc.add(1)
+                var received = emptyList<Int>()
+                calc.onScoresReady { received = it }
+                assertEquals(i + 1, received[0])
+            }
+        }
+    }
+
+    @Test
+    fun `stress - 20 sequential callback returns`() {
+        Calculator(0).use { calc ->
+            repeat(20) { i ->
+                calc.add(1)
+                val result = calc.getTransformedScores { listOf(it * 2) }
+                assertEquals(listOf((i + 1) * 2), result)
+            }
+        }
+    }
+
+    @Test
+    fun `stress - alternating param and return callbacks`() {
+        Calculator(1).use { calc ->
+            repeat(10) {
+                var received = emptyMap<String, Int>()
+                calc.onMetadataReady { received = it }
+                val computed = calc.getComputedMap { v -> mapOf("x" to v) }
+                assertEquals(received["current"], computed["x"])
+                calc.add(1)
+            }
+        }
+    }
 }

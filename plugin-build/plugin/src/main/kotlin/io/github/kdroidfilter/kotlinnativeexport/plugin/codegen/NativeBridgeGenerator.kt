@@ -943,13 +943,14 @@ class NativeBridgeGenerator {
         appendLine("    }")
     }
 
-    /** Read a collection from packed buffer returned by callback. Buffer: [count:Int32][elements...] */
+    /** Read a collection from packed buffer returned by callback. Buffer: [count:Int32][4-byte pad][elements...] */
     private fun StringBuilder.appendCollectionReturnFromPackedBuffer(elemType: KneType, isSet: Boolean) {
+        val H = 8 // 8-byte header: count(4) + padding(4) for alignment
         val varType = KneType.collectionElementVarType(elemType)
         when (elemType) {
             KneType.STRING -> {
                 appendLine("        val _list = mutableListOf<String>()")
-                appendLine("        var _sOff = 4")
+                appendLine("        var _sOff = $H")
                 appendLine("        for (i in 0 until _count) {")
                 appendLine("            val _s = (_retPtr + _sOff)!!.toKString()")
                 appendLine("            _list.add(_s)")
@@ -957,15 +958,15 @@ class NativeBridgeGenerator {
                 appendLine("        }")
             }
             KneType.BOOLEAN -> {
-                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<IntVar>()")
+                appendLine("        val _dataPtr = (_retPtr + $H)!!.reinterpret<IntVar>()")
                 appendLine("        val _list = List(_count) { _dataPtr[it] != 0 }")
             }
             is KneType.ENUM -> {
-                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<IntVar>()")
+                appendLine("        val _dataPtr = (_retPtr + $H)!!.reinterpret<IntVar>()")
                 appendLine("        val _list = List(_count) { ${elemType.fqName}.entries[_dataPtr[it]] }")
             }
             else -> {
-                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<$varType>()")
+                appendLine("        val _dataPtr = (_retPtr + $H)!!.reinterpret<$varType>()")
                 appendLine("        val _list = List(_count) { _dataPtr[it] }")
             }
         }
@@ -973,15 +974,14 @@ class NativeBridgeGenerator {
         else appendLine("        _list")
     }
 
-    /** Read a map from packed buffer returned by callback. Buffer: [count:Int32][keys...][values...] */
+    /** Read a map from packed buffer returned by callback. Buffer: [count:Int32][4-pad][keys...][values...] */
     private fun StringBuilder.appendMapReturnFromPackedBuffer(mapType: KneType.MAP) {
-        // For simplicity, encode as: [count:4][key_data][value_data]
-        // Fixed-size keys first, then fixed-size values. Strings use packed null-terminated.
+        val H = 8 // 8-byte header for alignment
         val kSize = if (mapType.keyType == KneType.STRING) 0 else fieldSize(mapType.keyType)
         val vSize = if (mapType.valueType == KneType.STRING) 0 else fieldSize(mapType.valueType)
-        appendReadPackedArrayFromBuffer("_keys", mapType.keyType, "4")
+        appendReadPackedArrayFromBuffer("_keys", mapType.keyType, "$H")
         val valOffset = if (kSize > 0) {
-            "4 + _count * $kSize"
+            "$H + _count * $kSize"
         } else if (vSize > 1) {
             "(_keysEndOff + ${vSize - 1}) / $vSize * $vSize" // align
         } else {

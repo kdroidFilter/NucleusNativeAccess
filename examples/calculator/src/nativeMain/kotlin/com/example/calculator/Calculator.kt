@@ -360,12 +360,29 @@ class Calculator(initial: Int = 0) {
         callback(mapOf("current" to accumulator, "doubled" to accumulator * 2))
     }
 
+    // Map in callbacks - extra
+    fun onMapIntIntReady(callback: (Map<Int, Int>) -> Unit) {
+        callback(mapOf(accumulator to accumulator * accumulator))
+    }
+
     // Collection as callback return
     fun getTransformedScores(fn: (Int) -> List<Int>): List<Int> = fn(accumulator)
 
     fun getComputedLabels(fn: (Int) -> List<String>): List<String> = fn(accumulator)
 
     fun getComputedMap(fn: (Int) -> Map<String, Int>): Map<String, Int> = fn(accumulator)
+
+    // Collection return callback - extra combinations
+    fun getComputedOps(fn: (Int) -> List<Operation>): List<Operation> = fn(accumulator)
+
+    fun getComputedBools(fn: (Int) -> List<Boolean>): List<Boolean> = fn(accumulator)
+
+    fun getComputedLongs(fn: (Int) -> List<Long>): List<Long> = fn(accumulator)
+
+    // Multi-param callback with collection
+    fun computeWithScores(base: Int, callback: (List<Int>, String) -> Unit) {
+        callback(listOf(base, base * 2, base * 3), "computed_$base")
+    }
 
     // ── Nullable collections ────────────────────────────────────────────────
 

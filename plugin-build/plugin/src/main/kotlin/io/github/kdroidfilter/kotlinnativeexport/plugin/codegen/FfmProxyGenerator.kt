@@ -408,57 +408,55 @@ class FfmProxyGenerator {
         appendLine("    }")
     }
 
-    /** Emit collection return as packed buffer [count:Int32][elements...] from upcall. */
+    /** Emit collection return as packed buffer [count:Int64][elements...] from upcall. 8-byte header for alignment. */
     private fun StringBuilder.appendUpcallCollectionReturn(elemType: KneType, srcExpr: String) {
+        val H = 8 // header: 8 bytes (Int at offset 0, 4 bytes padding) — ensures 8-byte alignment for all element types
         appendLine("        val _list = $srcExpr")
         appendLine("        val _arena = Arena.ofAuto()")
         when (elemType) {
             KneType.STRING -> {
-                appendLine("        val _totalBytes = 4 + _list.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
+                appendLine("        val _totalBytes = $H + _list.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
                 appendLine("        val _buf = _arena.allocate(_totalBytes.toLong())")
                 appendLine("        _buf.set(JAVA_INT, 0L, _list.size)")
-                appendLine("        var _off = 4L")
+                appendLine("        var _off = ${H}L")
                 appendLine("        for (_s in _list) { _buf.setString(_off, _s); _off += _s.toByteArray(Charsets.UTF_8).size + 1 }")
             }
             else -> {
                 val layout = KneType.collectionElementLayout(elemType)
                 val elemSize = fieldSize(elemType)
-                appendLine("        val _buf = _arena.allocate((4 + _list.size * $elemSize).toLong())")
+                appendLine("        val _buf = _arena.allocate(($H + _list.size * $elemSize).toLong())")
                 appendLine("        _buf.set(JAVA_INT, 0L, _list.size)")
                 when (elemType) {
-                    KneType.BOOLEAN -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, (4 + i * 4).toLong(), if (v) 1 else 0) }")
-                    is KneType.ENUM -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, (4 + i * 4).toLong(), v.ordinal) }")
-                    else -> appendLine("        _list.forEachIndexed { i, v -> _buf.set($layout, (4 + i * $elemSize).toLong(), v) }")
+                    KneType.BOOLEAN -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, ($H + i * 4).toLong(), if (v) 1 else 0) }")
+                    is KneType.ENUM -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, ($H + i * 4).toLong(), v.ordinal) }")
+                    else -> appendLine("        _list.forEachIndexed { i, v -> _buf.set($layout, ($H + i * $elemSize).toLong(), v) }")
                 }
             }
         }
         appendLine("        return _buf")
     }
 
-    /** Emit map return as packed buffer from upcall. */
+    /** Emit map return as packed buffer from upcall. 8-byte header for alignment. */
     private fun StringBuilder.appendUpcallMapReturn(mapType: KneType.MAP) {
+        val H = 8 // 8-byte header
         appendLine("        val _keys = _result.keys.toList()")
         appendLine("        val _values = _result.values.toList()")
         appendLine("        val _arena = Arena.ofAuto()")
         val kSize = if (mapType.keyType == KneType.STRING) 0 else fieldSize(mapType.keyType)
         val vSize = if (mapType.valueType == KneType.STRING) 0 else fieldSize(mapType.valueType)
-        // Calculate total buffer size
         if (kSize > 0 && vSize > 0) {
-            appendLine("        val _buf = _arena.allocate((4 + _keys.size * ${kSize + vSize}).toLong())")
+            appendLine("        val _buf = _arena.allocate(($H + _keys.size * ${kSize + vSize}).toLong())")
         } else {
-            appendLine("        val _totalBytes = 4 + ${if (kSize > 0) "_keys.size * $kSize" else "_keys.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} + ${if (vSize > 0) "_values.size * $vSize + ${vSize}" else "_values.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} // extra padding for alignment")
+            appendLine("        val _totalBytes = $H + ${if (kSize > 0) "_keys.size * $kSize" else "_keys.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} + ${if (vSize > 0) "_values.size * $vSize + $vSize" else "_values.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} // extra padding for alignment")
             appendLine("        val _buf = _arena.allocate(_totalBytes.toLong())")
         }
         appendLine("        _buf.set(JAVA_INT, 0L, _keys.size)")
-        // Write keys starting at offset 4
-        appendUpcallWriteArray("_keys", mapType.keyType, "4L")
-        // Write values after keys
+        appendUpcallWriteArray("_keys", mapType.keyType, "${H}L")
         if (kSize > 0) {
-            appendUpcallWriteArray("_values", mapType.valueType, "(4 + _keys.size * $kSize).toLong()")
+            appendUpcallWriteArray("_values", mapType.valueType, "($H + _keys.size * $kSize).toLong()")
         } else {
-            // Align offset for value element size
             if (vSize > 1) {
-                appendLine("        val _valStart = (_keysEndOff + ${vSize - 1}) / $vSize * $vSize // align to ${vSize}-byte boundary")
+                appendLine("        val _valStart = (_keysEndOff + ${vSize - 1}) / $vSize * $vSize")
                 appendUpcallWriteArray("_values", mapType.valueType, "_valStart")
             } else {
                 appendUpcallWriteArray("_values", mapType.valueType, "_keysEndOff")
