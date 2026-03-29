@@ -1,0 +1,498 @@
+compilerOpts.mingw_x64 = -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000000 -DUNICODE -D_UNICODE
+linkerOpts.mingw_x64 = -lshell32 -luser32 -lole32
+
+---
+
+#include <windows.h>
+#include <shellapi.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+/* ================================================================
+ * Constants
+ * ================================================================ */
+
+#define WM_TRAY_CB    (WM_USER + 1)
+#define WC_TRAY       L"KNETrayWnd"
+#define ID_TRAY       1
+#define ID_MENU_BASE  1000
+#define MAX_ITEMS     32
+#define TOAST_AUMID   L"KNE.SystemInfo"
+#define TOAST_LNK     L"SystemInfo"
+
+/* ================================================================
+ * Helpers
+ * ================================================================ */
+
+typedef enum { _AD_Default, _AD_AllowDark } _ADMode;
+static void _dark_mode(void) {
+    HMODULE h = LoadLibraryW(L"uxtheme.dll");
+    if (!h) return;
+    typedef _ADMode(WINAPI *Fn)(_ADMode);
+    Fn f = (Fn)GetProcAddress(h, MAKEINTRESOURCEA(135));
+    if (f) f(_AD_AllowDark);
+}
+
+static wchar_t* _wide(const char* s) {
+    if (!s) return NULL;
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t* w = (wchar_t*)malloc(n * sizeof(wchar_t));
+    if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+
+static wchar_t* _xesc(const wchar_t* s) {
+    if (!s) return NULL;
+    int n = 0;
+    for (const wchar_t* p = s; *p; p++) {
+        switch (*p) { case L'&': n += 5; break; case L'<': n += 4; break;
+                      case L'>': n += 4; break; default: n++; }
+    }
+    wchar_t* o = (wchar_t*)malloc((n + 1) * sizeof(wchar_t));
+    if (!o) return NULL;
+    wchar_t* q = o;
+    for (const wchar_t* p = s; *p; p++) {
+        switch (*p) {
+            case L'&': memcpy(q, L"&amp;", 10); q += 5; break;
+            case L'<': memcpy(q, L"&lt;",  8);  q += 4; break;
+            case L'>': memcpy(q, L"&gt;",  8);  q += 4; break;
+            default: *q++ = *p;
+        }
+    }
+    *q = 0;
+    return o;
+}
+
+static CRITICAL_SECTION g_cs;
+static BOOL g_cs_ok = FALSE;
+static void _ecs(void) { if (!g_cs_ok) { InitializeCriticalSection(&g_cs); g_cs_ok = TRUE; } }
+
+/* ================================================================
+ * WinRT Toast Notifications — pure C via raw COM vtables
+ *
+ * No WRL, no C++, no PowerShell.  Dynamically loads WinRT APIs
+ * from combase.dll and drives IToastNotificationManager /
+ * IToastNotifier / IXmlDocument through their COM vtables.
+ *
+ * Creates a Start Menu shortcut with AUMID so that toasts work
+ * from unpackaged (non-MSIX) desktop apps.
+ * ================================================================ */
+
+/* ---- HSTRING type (opaque WinRT string handle) ---- */
+typedef void* HSTRING;
+
+/* ---- WinRT function pointers loaded from combase.dll ---- */
+typedef HRESULT(WINAPI *pfn_RoInit)(int);
+typedef HRESULT(WINAPI *pfn_RoGetFactory)(HSTRING, const GUID*, void**);
+typedef HRESULT(WINAPI *pfn_RoActivate)(HSTRING, void**);
+typedef HRESULT(WINAPI *pfn_HSCreate)(LPCWSTR, UINT32, HSTRING*);
+typedef HRESULT(WINAPI *pfn_HSDelete)(HSTRING);
+
+static pfn_RoInit       _RoInit      = NULL;
+static pfn_RoGetFactory _RoGetFact   = NULL;
+static pfn_RoActivate   _RoActivate  = NULL;
+static pfn_HSCreate     _HSCreate    = NULL;
+static pfn_HSDelete     _HSDelete    = NULL;
+
+static int _load_winrt(void) {
+    HMODULE h = LoadLibraryW(L"combase.dll");
+    if (!h) return 0;
+    _RoInit     = (pfn_RoInit)      GetProcAddress(h, "RoInitialize");
+    _RoGetFact  = (pfn_RoGetFactory)GetProcAddress(h, "RoGetActivationFactory");
+    _RoActivate = (pfn_RoActivate)  GetProcAddress(h, "RoActivateInstance");
+    _HSCreate   = (pfn_HSCreate)    GetProcAddress(h, "WindowsCreateString");
+    _HSDelete   = (pfn_HSDelete)    GetProcAddress(h, "WindowsDeleteString");
+    return (_RoInit && _RoGetFact && _RoActivate && _HSCreate && _HSDelete);
+}
+
+static HSTRING _hs(const wchar_t* s) {
+    HSTRING h = NULL;
+    if (s && _HSCreate) _HSCreate(s, (UINT32)wcslen(s), &h);
+    return h;
+}
+static void _hsfree(HSTRING h) { if (h && _HSDelete) _HSDelete(h); }
+
+/* ---- COM vtable access macros ----
+ * All WinRT interfaces: IUnknown[0-2] + IInspectable[3-5] + methods[6+]
+ */
+#define VT(o)          (*(void***)(o))
+#define CRelease(o)    ((ULONG(STDMETHODCALLTYPE*)(void*))(VT(o)[2]))(o)
+#define CQI(o, id, pp) ((HRESULT(STDMETHODCALLTYPE*)(void*,const GUID*,void**))(VT(o)[0]))(o,id,pp)
+
+/* IToastNotificationManagerStatics [7] = CreateToastNotifierWithId */
+#define TMgr_NewNotifier(m, id, out) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,HSTRING,void**))(VT(m)[7]))(m, id, out)
+/* IToastNotificationFactory [6] = CreateToastNotification */
+#define TFac_New(f, xml, out) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,void*,void**))(VT(f)[6]))(f, xml, out)
+/* IToastNotifier [6] = Show */
+#define TNotifier_Show(n, t) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,void*))(VT(n)[6]))(n, t)
+/* IXmlDocumentIO [6] = LoadXml */
+#define XDocIO_Load(d, xml) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,HSTRING))(VT(d)[6]))(d, xml)
+
+/* IShellLinkW [9] = SetWorkingDirectory, [20] = SetPath */
+#define SL_SetPath(s, p) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,LPCWSTR))(VT(s)[20]))(s, p)
+#define SL_SetWD(s, d) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,LPCWSTR))(VT(s)[9]))(s, d)
+/* IPersistFile [6] = Save */
+#define PF_Save(p, f, r) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,LPCOLESTR,BOOL))(VT(p)[6]))(p, f, r)
+/* IPropertyStore [6] = SetValue, [7] = Commit */
+#define PS_Set(p, k, v) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*,const void*,const void*))(VT(p)[6]))(p, k, v)
+#define PS_Commit(p) \
+    ((HRESULT(STDMETHODCALLTYPE*)(void*))(VT(p)[7]))(p)
+
+/* ---- GUIDs ---- */
+
+/* WinRT interfaces */
+static const GUID G_ToastMgr =
+    {0x50AC103F,0xD235,0x4598,{0xBB,0xEF,0x98,0xFE,0x4D,0x1A,0x3A,0xD4}};
+static const GUID G_ToastFac =
+    {0x04124B20,0x82C6,0x4229,{0xB1,0x09,0xFD,0x9E,0xD4,0x66,0x2B,0x53}};
+static const GUID G_XmlDocIO =
+    {0x6CD0E74E,0xEE65,0x4489,{0x9E,0xBF,0xCA,0x43,0xE8,0x7B,0xA6,0x37}};
+
+/* Shell COM */
+static const GUID G_CLSID_SL =
+    {0x00021401,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+static const GUID G_IShellLk =
+    {0x000214F9,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+static const GUID G_IPersist =
+    {0x0000010B,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+static const GUID G_IPropSto =
+    {0x886D8EEB,0x8CF2,0x4446,{0x8D,0x02,0xCD,0xBA,0x1D,0xBD,0xCF,0x99}};
+
+/* PROPERTYKEY for AppUserModel.ID */
+typedef struct { GUID fmtid; DWORD pid; } _PROPKEY;
+static const _PROPKEY PK_AUMID =
+    {{0x9F4C2855,0x9F79,0x4B39,{0xA8,0xD0,0xE1,0xD4,0x2D,0xE1,0xD5,0xF3}}, 5};
+
+/* Minimal PROPVARIANT (only VT_LPWSTR = 31) */
+typedef struct { WORD vt; WORD r1, r2, r3; union { LPWSTR pwszVal; ULONGLONG _pad; }; } _PROPVAR;
+
+/* ---- Create Start Menu shortcut with AUMID (required for unpackaged apps) ---- */
+static void _make_shortcut(void) {
+    WCHAR exe[MAX_PATH] = {0};
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+
+    WCHAR appdata[MAX_PATH] = {0};
+    if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) return;
+
+    WCHAR lnk[MAX_PATH];
+    _snwprintf(lnk, MAX_PATH - 1,
+        L"%ls\\Microsoft\\Windows\\Start Menu\\Programs\\%ls.lnk",
+        appdata, TOAST_LNK);
+    lnk[MAX_PATH - 1] = 0;
+
+    if (GetFileAttributesW(lnk) != INVALID_FILE_ATTRIBUTES) return;
+
+    void* sl = NULL;
+    if (FAILED(CoCreateInstance(&G_CLSID_SL, NULL, CLSCTX_INPROC_SERVER,
+                                &G_IShellLk, &sl)) || !sl)
+        return;
+
+    SL_SetPath(sl, exe);
+
+    WCHAR dir[MAX_PATH];
+    wcscpy(dir, exe);
+    wchar_t* bs = wcsrchr(dir, L'\\');
+    if (bs) *bs = 0;
+    SL_SetWD(sl, dir);
+
+    /* Set AUMID property via IPropertyStore */
+    void* ps = NULL;
+    if (SUCCEEDED(CQI(sl, &G_IPropSto, &ps)) && ps) {
+        _PROPVAR pv;
+        memset(&pv, 0, sizeof(pv));
+        pv.vt = 31; /* VT_LPWSTR */
+        pv.pwszVal = (LPWSTR)CoTaskMemAlloc((wcslen(TOAST_AUMID) + 1) * sizeof(WCHAR));
+        if (pv.pwszVal) {
+            wcscpy(pv.pwszVal, TOAST_AUMID);
+            PS_Set(ps, &PK_AUMID, &pv);
+            CoTaskMemFree(pv.pwszVal);
+            PS_Commit(ps);
+        }
+        CRelease(ps);
+    }
+
+    void* pf = NULL;
+    if (SUCCEEDED(CQI(sl, &G_IPersist, &pf)) && pf) {
+        PF_Save(pf, lnk, TRUE);
+        CRelease(pf);
+    }
+    CRelease(sl);
+}
+
+/* ---- Toast notification state (lazily initialized) ---- */
+static int   g_toast_ok  = 0;
+static void* g_notifier  = NULL;  /* IToastNotifier  */
+static void* g_factory   = NULL;  /* IToastNotificationFactory */
+
+static int _toast_init(void) {
+    if (g_toast_ok) return 1;
+    if (!_load_winrt()) return 0;
+
+    HRESULT hr = _RoInit(1); /* RO_INIT_MULTITHREADED */
+    if (FAILED(hr) && hr != (HRESULT)0x80010106L /* RPC_E_CHANGED_MODE */)
+        return 0;
+
+    /* Set process-level AUMID */
+    typedef HRESULT(WINAPI *pfn_SetAUMID)(PCWSTR);
+    pfn_SetAUMID pSet = (pfn_SetAUMID)GetProcAddress(
+        GetModuleHandleW(L"shell32.dll"), "SetCurrentProcessExplicitAppUserModelID");
+    if (pSet) pSet(TOAST_AUMID);
+
+    _make_shortcut();
+
+    /* Get IToastNotificationManagerStatics */
+    HSTRING cls_mgr = _hs(L"Windows.UI.Notifications.ToastNotificationManager");
+    void* mgr = NULL;
+    hr = _RoGetFact(cls_mgr, &G_ToastMgr, &mgr);
+    _hsfree(cls_mgr);
+    if (FAILED(hr) || !mgr) return 0;
+
+    /* Create IToastNotifier bound to our AUMID */
+    HSTRING hs_aumid = _hs(TOAST_AUMID);
+    hr = TMgr_NewNotifier(mgr, hs_aumid, &g_notifier);
+    _hsfree(hs_aumid);
+    CRelease(mgr);
+    if (FAILED(hr) || !g_notifier) return 0;
+
+    /* Get IToastNotificationFactory */
+    HSTRING cls_fac = _hs(L"Windows.UI.Notifications.ToastNotification");
+    hr = _RoGetFact(cls_fac, &G_ToastFac, &g_factory);
+    _hsfree(cls_fac);
+    if (FAILED(hr) || !g_factory) {
+        CRelease(g_notifier); g_notifier = NULL;
+        return 0;
+    }
+
+    g_toast_ok = 1;
+    return 1;
+}
+
+static int _toast_show(const wchar_t* title, const wchar_t* body) {
+    if (!g_toast_ok && !_toast_init()) return 0;
+
+    wchar_t* et = _xesc(title);
+    wchar_t* eb = _xesc(body);
+    wchar_t xml[2048];
+    _snwprintf(xml, 2047,
+        L"<toast><visual><binding template=\"ToastGeneric\">"
+        L"<text>%ls</text><text>%ls</text>"
+        L"</binding></visual></toast>",
+        et ? et : L"", eb ? eb : L"");
+    xml[2047] = 0;
+    free(et); free(eb);
+
+    /* Activate XmlDocument and load toast XML */
+    HSTRING cls_xml = _hs(L"Windows.Data.Xml.Dom.XmlDocument");
+    void* xmlDoc = NULL;
+    HRESULT hr = _RoActivate(cls_xml, &xmlDoc);
+    _hsfree(cls_xml);
+    if (FAILED(hr) || !xmlDoc) return 0;
+
+    void* xmlIO = NULL;
+    hr = CQI(xmlDoc, &G_XmlDocIO, &xmlIO);
+    if (FAILED(hr) || !xmlIO) { CRelease(xmlDoc); return 0; }
+
+    HSTRING hs_xml = _hs(xml);
+    hr = XDocIO_Load(xmlIO, hs_xml);
+    _hsfree(hs_xml);
+    CRelease(xmlIO);
+    if (FAILED(hr)) { CRelease(xmlDoc); return 0; }
+
+    /* Create and show toast */
+    void* toast = NULL;
+    hr = TFac_New(g_factory, xmlDoc, &toast);
+    CRelease(xmlDoc);
+    if (FAILED(hr) || !toast) return 0;
+
+    hr = TNotifier_Show(g_notifier, toast);
+    CRelease(toast);
+    return SUCCEEDED(hr);
+}
+
+/* ================================================================
+ * System tray — invisible top-level window + Shell_NotifyIcon
+ *               + popup menu, on its own message-pump thread.
+ * ================================================================ */
+
+static HWND            g_hwnd   = NULL;
+static HMENU           g_menu   = NULL;
+static NOTIFYICONDATAW g_nid;
+static HANDLE          g_thread = NULL;
+static volatile LONG   g_ready  = 0;
+static void          (*g_cb)(int) = NULL;
+static int             g_cnt    = 0;
+static char*           g_lbl[MAX_ITEMS];
+static UINT            g_wm_taskbar = 0;
+
+static HMENU _build_menu(void) {
+    HMENU m = CreatePopupMenu();
+    if (!m) return NULL;
+    for (int i = 0; i < g_cnt; i++) {
+        wchar_t* w = _wide(g_lbl[i]);
+        if (!w) continue;
+        MENUITEMINFOW mi;
+        ZeroMemory(&mi, sizeof(mi));
+        mi.cbSize     = sizeof(mi);
+        mi.fMask      = MIIM_ID | MIIM_STRING | MIIM_STATE | MIIM_FTYPE;
+        mi.fType      = MFT_STRING;
+        mi.dwTypeData = w;
+        mi.cch        = (UINT)wcslen(w);
+        mi.wID        = ID_MENU_BASE + i;
+        mi.fState     = MFS_ENABLED;
+        InsertMenuItemW(m, (UINT)-1, TRUE, &mi);
+        free(w);
+    }
+    return m;
+}
+
+static LRESULT CALLBACK _tray_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_TRAY_CB:
+        if (lp == WM_LBUTTONUP || lp == WM_RBUTTONUP) {
+            POINT pt;
+            GetCursorPos(&pt);
+            SetForegroundWindow(h);
+            EnterCriticalSection(&g_cs);
+            if (g_menu) {
+                UINT cmd = (UINT)TrackPopupMenu(g_menu,
+                    TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                    pt.x, pt.y, 0, h, NULL);
+                if (cmd >= ID_MENU_BASE) {
+                    int idx = cmd - ID_MENU_BASE;
+                    if (g_cb && idx >= 0 && idx < g_cnt) g_cb(idx);
+                }
+            }
+            LeaveCriticalSection(&g_cs);
+        }
+        return 0;
+    case WM_CLOSE:
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        if (msg == g_wm_taskbar && g_wm_taskbar) {
+            Shell_NotifyIconW(NIM_ADD, &g_nid);
+            return 0;
+        }
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+static DWORD WINAPI _tray_loop(LPVOID p) {
+    _ecs();
+    _dark_mode();
+    g_wm_taskbar = RegisterWindowMessageW(L"TaskbarCreated");
+
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    WNDCLASSEXW wc = {0};
+    wc.cbSize       = sizeof(wc);
+    wc.lpfnWndProc  = _tray_proc;
+    wc.hInstance     = inst;
+    wc.lpszClassName = WC_TRAY;
+    RegisterClassExW(&wc);
+
+    g_hwnd = CreateWindowExW(0, WC_TRAY, NULL, 0, 0, 0, 0, 0, 0, 0, inst, NULL);
+
+    EnterCriticalSection(&g_cs);
+    g_menu = _build_menu();
+    for (int i = 0; i < g_cnt; i++) { free(g_lbl[i]); g_lbl[i] = NULL; }
+    LeaveCriticalSection(&g_cs);
+
+    ZeroMemory(&g_nid, sizeof(g_nid));
+    g_nid.cbSize           = sizeof(g_nid);
+    g_nid.hWnd             = g_hwnd;
+    g_nid.uID              = ID_TRAY;
+    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAY_CB;
+    g_nid.hIcon            = LoadIconW(NULL, IDI_INFORMATION);
+    lstrcpynW(g_nid.szTip, L"System Info", 128);
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+
+    InterlockedExchange(&g_ready, 1);
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+/* ================================================================
+ * Public C API (called from Kotlin via cinterop)
+ * ================================================================ */
+
+static int wintray_show(const char** labels, int count) {
+    if (g_hwnd) return 0;
+    _ecs();
+
+    EnterCriticalSection(&g_cs);
+    g_cnt = count < MAX_ITEMS ? count : MAX_ITEMS;
+    for (int i = 0; i < g_cnt; i++) g_lbl[i] = strdup(labels[i]);
+    LeaveCriticalSection(&g_cs);
+
+    g_thread = CreateThread(NULL, 0, _tray_loop, NULL, 0, NULL);
+    if (!g_thread) return 0;
+    while (!InterlockedCompareExchange(&g_ready, 1, 1)) Sleep(10);
+    return 1;
+}
+
+static int wintray_hide(void) {
+    if (!g_hwnd) return 0;
+    PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+    WaitForSingleObject(g_thread, 5000);
+    CloseHandle(g_thread);
+
+    EnterCriticalSection(&g_cs);
+    if (g_menu) { DestroyMenu(g_menu); g_menu = NULL; }
+    g_hwnd = NULL; g_thread = NULL;
+    InterlockedExchange(&g_ready, 0);
+    g_cnt = 0;
+    LeaveCriticalSection(&g_cs);
+    return 1;
+}
+
+static int wintray_update_label(int index, const char* label) {
+    _ecs();
+    EnterCriticalSection(&g_cs);
+    if (!g_menu || index < 0 || index >= g_cnt) { LeaveCriticalSection(&g_cs); return 0; }
+    wchar_t* w = _wide(label);
+    if (!w) { LeaveCriticalSection(&g_cs); return 0; }
+    MENUITEMINFOW mi = {0};
+    mi.cbSize = sizeof(mi);
+    mi.fMask = MIIM_STRING;
+    mi.dwTypeData = w;
+    mi.cch = (UINT)wcslen(w);
+    SetMenuItemInfoW(g_menu, ID_MENU_BASE + index, FALSE, &mi);
+    free(w);
+    LeaveCriticalSection(&g_cs);
+    return 1;
+}
+
+static void wintray_set_click_callback(void (*cb)(int)) {
+    _ecs();
+    EnterCriticalSection(&g_cs);
+    g_cb = cb;
+    LeaveCriticalSection(&g_cs);
+}
+
+static int wintray_notify(const char* title, const char* body) {
+    wchar_t* wt = _wide(title);
+    wchar_t* wb = _wide(body);
+    int ok = _toast_show(wt ? wt : L"", wb ? wb : L"");
+    free(wt); free(wb);
+    return ok;
+}
