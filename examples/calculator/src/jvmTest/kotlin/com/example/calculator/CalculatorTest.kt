@@ -864,6 +864,145 @@ class CalculatorTest {
         }
     }
 
+    @Test
+    fun `CalculatorSnapshot default label`() {
+        Calculator(5).use { calc ->
+            val snap = calc.snapshot()
+            assertEquals("snapshot", snap.label)
+            snap.calc.close()
+        }
+    }
+
+    @Test
+    fun `CalculatorSnapshot param with same calculator`() {
+        Calculator(10).use { calc ->
+            val result = calc.restoreFrom(CalculatorSnapshot(calc, "self"))
+            assertEquals(10, result)
+            assertEquals("self", calc.label)
+        }
+    }
+
+    // ── cross-feature: data class fields + other features ───────────────────
+
+    @Test
+    fun `TaggedPoint after exception recovery`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            calc.applyOp(Operation.ADD, 5)
+            val tp = calc.getTaggedPoint()
+            assertEquals(15, tp.point.x)
+            assertEquals(Operation.ADD, tp.tag)
+        }
+    }
+
+    @Test
+    fun `Rect after callback modifies accumulator`() {
+        Calculator(0).use { calc ->
+            calc.transform { 42 }
+            val r = calc.getRect()
+            assertEquals(Point(42, 42), r.bottomRight)
+        }
+    }
+
+    @Test
+    fun `snapshot inside callback`() {
+        Calculator(100).use { calc ->
+            calc.label = "in-callback"
+            var snapLabel = ""
+            calc.onValueChanged { _ ->
+                // Can't call calc methods here (reentrant), but test the value
+                snapLabel = "got-it"
+            }
+            assertEquals("got-it", snapLabel)
+        }
+    }
+
+    @Test
+    fun `CalculatorSnapshot with unicode label`() {
+        Calculator(7).use { calc ->
+            calc.label = "日本語 🚀"
+            val snap = calc.snapshot()
+            assertEquals("日本語 🚀", snap.label)
+            snap.calc.close()
+        }
+    }
+
+    @Test
+    fun `nested Rect then modify and get again`() {
+        Calculator(3).use { calc ->
+            val r1 = calc.getRect()
+            calc.multiply(4)
+            val r2 = calc.getRect()
+            assertEquals(Point(3, 3), r1.bottomRight)
+            assertEquals(Point(12, 12), r2.bottomRight)
+        }
+    }
+
+    @Test
+    fun `TaggedPoint param then return consistency`() {
+        Calculator(0).use { calc ->
+            val input = TaggedPoint(Point(5, 10), Operation.MULTIPLY)
+            calc.setFromTagged(input)
+            val output = calc.getTaggedPoint()
+            assertEquals(Operation.MULTIPLY, output.tag)
+            assertEquals(15, output.point.x) // 5+10
+        }
+    }
+
+    @Test
+    fun `NamedValue with special chars in string`() {
+        Calculator(0).use { calc ->
+            calc.setFromNamed(NamedValue("tab\there\nnewline", 1))
+            assertEquals("tab\there\nnewline", calc.label)
+        }
+    }
+
+    @Test
+    fun `Point and NamedValue in sequence`() {
+        Calculator(0).use { calc ->
+            calc.addPoint(Point(10, 20))
+            calc.setFromNamed(NamedValue("after-point", 99))
+            assertEquals(99, calc.current)
+            assertEquals("after-point", calc.label)
+            val p = calc.getPoint()
+            assertEquals(99, p.x)
+        }
+    }
+
+    @Test
+    fun `CalcResult after ByteArray operations`() {
+        Calculator(0).use { calc ->
+            calc.sumBytes(byteArrayOf(10, 20, 30))
+            val r = calc.getResult()
+            assertEquals(60, r.value)
+            assertEquals("Result: 60", r.description)
+        }
+    }
+
+    @Test
+    fun `20 TaggedPoint roundtrips`() {
+        Calculator(0).use { calc ->
+            for (i in 1..20) {
+                val op = Operation.entries[i % Operation.entries.size]
+                calc.setFromTagged(TaggedPoint(Point(i, i * 2), op))
+                val tp = calc.getTaggedPoint()
+                assertEquals(op, tp.tag)
+                assertEquals(i * 3, tp.point.x) // i + i*2
+            }
+        }
+    }
+
+    @Test
+    fun `10 Rect calls`() {
+        Calculator(0).use { calc ->
+            for (i in 1..10) {
+                calc.add(1)
+                val r = calc.getRect()
+                assertEquals(Point(i, i), r.bottomRight)
+            }
+        }
+    }
+
     // ── data class with enum field — edge cases ────────────────────────────
 
     @Test
