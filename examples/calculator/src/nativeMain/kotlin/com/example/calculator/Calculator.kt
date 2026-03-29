@@ -610,4 +610,60 @@ class MathSuite {
         val current: Int get() = product
         fun reset() { product = 1 }
     }
+
+    // Nested-nested: MathSuite.Advanced.PowerCalc
+    class Advanced {
+        class PowerCalc {
+            private var value = 1L
+            fun power(base: Int, exp: Int): Long {
+                var result = 1L
+                repeat(exp) { result *= base }
+                value = result
+                return result
+            }
+            val current: Long get() = value
+            fun reset() { value = 1L }
+        }
+
+        class ModCalc {
+            fun mod(a: Int, b: Int): Int = a % b
+            fun gcd(a: Int, b: Int): Int {
+                var x = if (a < 0) -a else a
+                var y = if (b < 0) -b else b
+                while (y != 0) { val tmp = y; y = x % y; x = tmp }
+                return x
+            }
+        }
+    }
+}
+
+// ── Object callback edge cases ──────────────────────────────────────────────
+
+class ObjectCallbackTest {
+    private val calculators = mutableListOf<Calculator>()
+
+    fun addCalc(calc: Calculator) { calculators.add(calc) }
+    fun count(): Int = calculators.size
+
+    fun forEachCalc(callback: (Calculator) -> Unit) {
+        calculators.forEach { callback(it) }
+    }
+
+    fun findCalc(predicate: (Calculator) -> Boolean): Calculator? {
+        return calculators.firstOrNull { predicate(it) }
+    }
+
+    fun mapCurrents(transform: (Calculator) -> Int): List<Int> {
+        return calculators.map { transform(it) }
+    }
+
+    fun reduceWith(initial: Int, fn: (Int, Calculator) -> Int): Int {
+        var acc = initial
+        calculators.forEach { acc = fn(acc, it) }
+        return acc
+    }
+
+    fun onEachWithIndex(callback: (Int, Calculator) -> Unit) {
+        calculators.forEachIndexed { i, c -> callback(i, c) }
+    }
 }
