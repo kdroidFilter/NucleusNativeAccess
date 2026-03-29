@@ -238,8 +238,7 @@ calc.add(5) // works normally after exception
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types |
 | Nested/inner classes | Parser limitation | Use top-level classes |
-| Data class fields: nested collections | Not yet implemented | Use flat fields or `ByteArray` |
-| Object (class) in callbacks | Not yet implemented | Use data class or primitives |
+| Object (class) directly in callbacks | Not yet implemented | Wrap in a data class |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | Collections (`List`, `Map`, `Set`) | Not yet implemented | Use `ByteArray` for binary, data class for structured |
