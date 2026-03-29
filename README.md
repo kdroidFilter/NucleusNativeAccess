@@ -133,7 +133,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `enum class` | ✅ | ✅ | ✅ | ❌ | ordinal mapping, auto-generates JVM enum |
 | Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
 | `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding |
-| `data class` | ✅ | ✅ | &mdash; | ❌ | field decomposition (primitive + String fields) |
+| `data class` | ✅ | ✅ | &mdash; | ✅ param only | field decomposition (primitive + String fields) |
 | `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
 
 ### Declarations
@@ -159,9 +159,10 @@ JVM lambdas cross the FFM boundary via upcall stubs. The plugin generates all th
 **Lifecycle**: each proxy object holds a persistent `Arena.ofShared()`. Upcall stubs live as long as the object &mdash; async callbacks (event handlers, listeners) work out of the box. The arena is freed on `close()` or GC.
 
 **Supported callback signatures**:
-- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`
+- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `data class`
 - Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`
 - Multi-param: `(T, U) -> R` with any supported types
+- Data class params are decomposed into individual fields at C ABI level
 
 ```kotlin
 // Kotlin/Native
@@ -237,7 +238,7 @@ calc.add(5) // works normally after exception
 | Generics | Complex type erasure at FFM boundary | Use concrete types |
 | Nested/inner classes | Parser limitation | Use top-level classes |
 | Data class fields: `Enum`, `Object`, other data classes | Not yet implemented | Use primitives + String fields |
-| Data class in callbacks | Not yet implemented | Pass individual fields |
+| Data class as callback return | Not yet implemented | Return individual fields or use out-param pattern |
 | Nullable data class (`DataClass?`) | Not yet implemented | Use non-null with sentinel values |
 | Enum/Object in callbacks | Not yet implemented | Use ordinal `Int` for enums |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
@@ -354,7 +355,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 156 tests
+./gradlew :examples:calculator:jvmTest    # 163 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
