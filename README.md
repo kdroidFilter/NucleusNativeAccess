@@ -44,7 +44,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     kotlin("multiplatform") version "2.3.20"
-    id("io.github.kdroidfilter.kotlinnativeexport") version "0.1.0"
+    id("io.github.kdroidfilter.nucleusnativeaccess") version "<version>"
 }
 ```
 
@@ -430,7 +430,7 @@ plugins {
     id("org.jetbrains.compose") version "1.10.2"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     id("io.github.kdroidfilter.nucleus") version "1.7.2"
-    id("io.github.kdroidfilter.kotlinnativeexport")
+    id("io.github.kdroidfilter.nucleusnativeaccess")
 }
 
 // Compose compiler only targets JVM (native sources have no @Composable)
@@ -516,7 +516,7 @@ The plugin is inspired by two projects:
 - **[swift-java](https://github.com/swiftlang/swift-java)** (Apple) &mdash; how Swift code is made callable from Java via FFM `MethodHandle` downcalls. We adapted the FFM binding generation: each method gets a `FunctionDescriptor` + `MethodHandle`, classes use `Cleaner` for GC safety.
 
 ```
-plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/plugin/
+plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/nucleusnativeaccess/plugin/
 ├── ir/                          # Intermediate representation (inspired by SirModule)
 │   └── KneIR.kt                 # KneModule, KneClass, KneFunction, KneType...
 ├── analysis/

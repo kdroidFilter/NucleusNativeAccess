@@ -1,8 +1,8 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin.analysis
+package io.github.kdroidfilter.nucleusnativeaccess.plugin.analysis
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.codegen.FfmProxyGenerator
-import io.github.kdroidfilter.kotlinnativeexport.plugin.codegen.NativeBridgeGenerator
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.FfmProxyGenerator
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.NativeBridgeGenerator
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.Property

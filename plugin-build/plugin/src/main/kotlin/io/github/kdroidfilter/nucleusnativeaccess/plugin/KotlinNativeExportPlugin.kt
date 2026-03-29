@@ -1,6 +1,6 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin
+package io.github.kdroidfilter.nucleusnativeaccess.plugin
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.tasks.GenerateNativeBridgesTask
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.tasks.GenerateNativeBridgesTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.tasks.testing.Test

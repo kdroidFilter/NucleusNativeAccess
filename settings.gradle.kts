@@ -32,7 +32,7 @@ develocity {
     }
 }
 
-rootProject.name = "NucleusNativeAccess"
+rootProject.name = "io.github.kdroidfilter.nucleusnativeaccess"
 
 include(":examples:calculator")
 include(":examples:systeminfo")

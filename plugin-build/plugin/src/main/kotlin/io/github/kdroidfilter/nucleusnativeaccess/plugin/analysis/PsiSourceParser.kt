@@ -1,14 +1,14 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin.analysis
+package io.github.kdroidfilter.nucleusnativeaccess.plugin.analysis
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneConstructor
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneDataClass
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneProperty
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneClass
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneConstructor
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneDataClass
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneEnum
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneFunction
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneParam
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneProperty
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneType
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreApplicationEnvironment
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreApplicationEnvironmentMode
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreProjectEnvironment

@@ -1,4 +1,4 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin.ir
+package io.github.kdroidfilter.nucleusnativeaccess.plugin.ir
 
 import java.io.Serializable
 

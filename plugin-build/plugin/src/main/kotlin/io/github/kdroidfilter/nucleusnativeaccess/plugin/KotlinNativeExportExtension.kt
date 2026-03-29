@@ -1,4 +1,4 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin
+package io.github.kdroidfilter.nucleusnativeaccess.plugin
 
 import org.gradle.api.provider.Property
 

@@ -5,7 +5,7 @@ plugins {
     id("org.jetbrains.compose") version "1.10.2"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     id("io.github.kdroidfilter.nucleus") version "1.7.2"
-    id("io.github.kdroidfilter.kotlinnativeexport")
+    id("io.github.kdroidfilter.nucleusnativeaccess")
 }
 
 kotlin {

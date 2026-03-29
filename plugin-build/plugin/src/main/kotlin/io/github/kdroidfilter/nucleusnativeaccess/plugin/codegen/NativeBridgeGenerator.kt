@@ -1,12 +1,12 @@
-package io.github.kdroidfilter.kotlinnativeexport.plugin.codegen
+package io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneProperty
-import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneClass
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneEnum
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneFunction
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneParam
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneProperty
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneType
 
 /**
  * Generates Kotlin/Native bridge code using @CName + StableRef.

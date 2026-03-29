@@ -31,6 +31,6 @@ develocity {
     }
 }
 
-rootProject.name = "io.github.kdroidfilter.kotlinnativeexport"
+rootProject.name = "io.github.kdroidfilter.nucleusnativeaccess"
 
 include(":plugin")
