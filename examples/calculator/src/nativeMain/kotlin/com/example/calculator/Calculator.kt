@@ -168,6 +168,15 @@ class Calculator(initial: Int = 0) {
         return label
     }
 
+    fun onOperation(callback: (Operation) -> Unit) {
+        callback(lastOperation)
+    }
+
+    fun chooseOp(chooser: (Int) -> Operation): Operation {
+        lastOperation = chooser(accumulator)
+        return lastOperation
+    }
+
     fun onPointComputed(callback: (Point) -> Unit) {
         callback(Point(accumulator, accumulator * 2))
     }

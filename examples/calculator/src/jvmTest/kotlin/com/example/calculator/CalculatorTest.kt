@@ -899,6 +899,57 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Enums in callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback (Operation) to Unit - receives enum`() {
+        Calculator(0).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 3)
+            var received: Operation? = null
+            calc.onOperation { op -> received = op }
+            assertEquals(Operation.MULTIPLY, received)
+        }
+    }
+
+    @Test
+    fun `callback (Operation) to Unit - all values`() {
+        Calculator(1).use { calc ->
+            for (expected in Operation.entries) {
+                calc.lastOperation = expected
+                var received: Operation? = null
+                calc.onOperation { op -> received = op }
+                assertEquals(expected, received)
+            }
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Operation - choose based on value`() {
+        Calculator(5).use { calc ->
+            val result = calc.chooseOp { v -> if (v > 0) Operation.ADD else Operation.SUBTRACT }
+            assertEquals(Operation.ADD, result)
+            assertEquals(Operation.ADD, calc.lastOperation)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Operation - negative triggers subtract`() {
+        Calculator(-3).use { calc ->
+            val result = calc.chooseOp { v -> if (v > 0) Operation.ADD else Operation.SUBTRACT }
+            assertEquals(Operation.SUBTRACT, result)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Operation - return MULTIPLY`() {
+        Calculator(0).use { calc ->
+            val result = calc.chooseOp { Operation.MULTIPLY }
+            assertEquals(Operation.MULTIPLY, result)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Edge cases: primitives at boundaries
     // ═══════════════════════════════════════════════════════════════════════════
 

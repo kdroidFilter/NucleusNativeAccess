@@ -462,11 +462,12 @@ class NativeBridgeGenerator {
         }
         appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
 
-        // Build invoke args — decompose DATA_CLASS into fields
+        // Build invoke args — decompose DATA_CLASS into fields, convert enum to ordinal
         val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
                 KneType.STRING -> "_p$i.cstr.ptr"
+                is KneType.ENUM -> "_p$i.ordinal"
                 is KneType.DATA_CLASS -> t.fields.joinToString(", ") { f ->
                     when (f.type) {
                         KneType.BOOLEAN -> "if (_p$i.${f.name}) 1 else 0"
@@ -484,6 +485,8 @@ class NativeBridgeGenerator {
             appendLine("        _fnPtr.invoke($invokeArgs) != 0")
         } else if (fnType.returnType == KneType.STRING) {
             appendLine("        _fnPtr.invoke($invokeArgs)?.toKString() ?: \"\"")
+        } else if (fnType.returnType is KneType.ENUM) {
+            appendLine("        ${fnType.returnType.fqName}.entries[_fnPtr.invoke($invokeArgs)]")
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }

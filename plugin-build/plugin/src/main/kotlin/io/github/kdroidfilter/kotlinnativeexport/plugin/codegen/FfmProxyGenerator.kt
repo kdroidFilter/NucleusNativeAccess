@@ -239,6 +239,7 @@ class FfmProxyGenerator {
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
                 KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
+                is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
                 is KneType.DATA_CLASS -> {
                     val fieldArgs = t.fields.joinToString(", ") { f ->
                         val pName = "p${i}_${f.name}"
@@ -260,6 +261,8 @@ class FfmProxyGenerator {
             appendLine("        return if (_fn.invoke($invokeConvertedArgs)) 1 else 0")
         } else if (sig.returnType == KneType.STRING) {
             appendLine("        return Arena.ofAuto().allocateFrom(_fn.invoke($invokeConvertedArgs))")
+        } else if (sig.returnType is KneType.ENUM) {
+            appendLine("        return _fn.invoke($invokeConvertedArgs).ordinal")
         } else {
             appendLine("        return _fn.invoke($invokeConvertedArgs)")
         }
