@@ -5881,9 +5881,11 @@ class CalculatorTest {
 
     @Test fun `suspend cancel - immediate cancel`() = runBlocking {
         Calculator(0).use { calc ->
-            val job = launch { calc.longDelay() }
-            job.cancelAndJoin() // cancel immediately, no delay
-            assertTrue(true) // reached = no hang
+            val start = System.currentTimeMillis()
+            val job = launch { calc.longDelay() } // 5s delay
+            job.cancelAndJoin()
+            val elapsed = System.currentTimeMillis() - start
+            assertTrue(elapsed < 3000, "Immediate cancel should not wait for longDelay, took ${elapsed}ms")
         }
     }
 
