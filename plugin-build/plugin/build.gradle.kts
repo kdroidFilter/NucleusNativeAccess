@@ -25,7 +25,7 @@ gradlePlugin {
         create(property("ID").toString()) {
             id = property("ID").toString()
             implementationClass = property("IMPLEMENTATION_CLASS").toString()
-            version = property("VERSION").toString()
+            version = project.version.toString()
             description = property("DESCRIPTION").toString()
             displayName = property("DISPLAY_NAME").toString()
             tags.set(listOf("kotlin", "native", "jvm", "ffm", "interop"))
@@ -38,7 +38,7 @@ gradlePlugin {
     vcsUrl.set(property("VCS_URL").toString())
 }
 
-tasks.create("setupPluginUploadFromEnvironment") {
+tasks.register("setupPluginUploadFromEnvironment") {
     doLast {
         val key = System.getenv("GRADLE_PUBLISH_KEY")
         val secret = System.getenv("GRADLE_PUBLISH_SECRET")

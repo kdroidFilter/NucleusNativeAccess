@@ -4,9 +4,16 @@ plugins {
     alias(libs.plugins.versionCheck)
 }
 
+val resolvedVersion =
+    providers
+        .environmentVariable("GITHUB_REF")
+        .orNull
+        ?.removePrefix("refs/tags/v")
+        ?: "0.1.0"
+
 allprojects {
     group = property("GROUP").toString()
-    version = property("VERSION").toString()
+    version = resolvedVersion
 }
 
 tasks.register("clean", Delete::class.java) {
