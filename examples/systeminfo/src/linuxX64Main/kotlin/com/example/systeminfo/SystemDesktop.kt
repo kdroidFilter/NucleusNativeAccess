@@ -7,6 +7,8 @@ import libnotify.*
 import platform.posix.*
 import systray.*
 
+private var _trayClickCallback: ((Int) -> Unit)? = null
+
 actual class SystemDesktop {
 
     private var notifyInitialized = false
@@ -90,6 +92,13 @@ actual class SystemDesktop {
 
     actual fun hideSystemTray(): Boolean {
         return systray_hide_dbus() != 0
+    }
+
+    actual fun setTrayClickCallback(callback: (Int) -> Unit) {
+        _trayClickCallback = callback
+        systray_set_click_callback(staticCFunction { index ->
+            _trayClickCallback?.invoke(index)
+        })
     }
 
     private fun formatUptime(seconds: Double): String {

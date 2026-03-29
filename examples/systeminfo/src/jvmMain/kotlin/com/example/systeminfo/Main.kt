@@ -121,13 +121,22 @@ fun SystemInfoScreen() {
         }
 
         var trayVisible by remember { mutableStateOf(false) }
+        var lastTrayClick by remember { mutableStateOf<String?>(null) }
+
+        val trayLabels = listOf("Hostname", "CPU", "Cores", "Memory", "Uptime", "Kernel")
 
         Button(
             onClick = {
                 if (trayVisible) {
                     desktop.hideSystemTray()
                     trayVisible = false
+                    lastTrayClick = null
                 } else {
+                    desktop.setTrayClickCallback { index ->
+                        val label = trayLabels.getOrElse(index) { "Item $index" }
+                        lastTrayClick = label
+                        println("[JVM] Tray item clicked: $label (index=$index)")
+                    }
                     desktop.showSystemTray()
                     trayVisible = true
                 }
@@ -138,6 +147,15 @@ fun SystemInfoScreen() {
             Text(
                 if (trayVisible) "Hide native menu bar item" else "Show native menu bar item",
                 color = Color.White,
+            )
+        }
+
+        if (lastTrayClick != null) {
+            Text(
+                "Last tray click: $lastTrayClick",
+                color = Color(0xFF81C784),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp),
             )
         }
 

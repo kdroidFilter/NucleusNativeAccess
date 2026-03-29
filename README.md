@@ -1,6 +1,6 @@
 # Kotlin Native Export
 
-A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation &mdash; everything is transparent to the JVM developer.
+A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation, callbacks &mdash; everything is transparent to the JVM developer.
 
 Under the hood, the plugin generates [FFM (Foreign Function & Memory API)](https://openjdk.org/jeps/454) bindings inspired by [swift-java](https://github.com/swiftlang/swift-java) and [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone).
 
@@ -132,6 +132,38 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | Enums | `JAVA_INT` | ordinal mapping |
 | Class references | `JAVA_LONG` | pass/return handles between classes |
 | `T?` (nullable) | widened | sentinel-based null encoding (see below) |
+| `(T) -> R` (lambda) | `JAVA_LONG` | FFM upcall stub address (see below) |
+
+### Callbacks & lambdas
+
+JVM lambdas cross the FFM boundary to Kotlin/Native via upcall stubs. The plugin generates all the FFM infrastructure automatically.
+
+**Lifecycle**: each proxy object holds a persistent `Arena.ofShared()`. Upcall stubs live as long as the object &mdash; async callbacks (event handlers, listeners) work out of the box. The arena is freed on `close()` or GC.
+
+```kotlin
+// Kotlin/Native side
+class Calculator(initial: Int = 0) {
+    fun onValueChanged(callback: (Int) -> Unit) {
+        callback(accumulator)
+    }
+    fun transform(fn: (Int) -> Int): Int {
+        accumulator = fn(accumulator)
+        return accumulator
+    }
+}
+
+// JVM side — lambdas are transparent
+val calc = Calculator(10)
+calc.onValueChanged { value -> println("Value: $value") }    // prints "Value: 10"
+val doubled = calc.transform { it * 2 }                       // 20
+
+// Async callbacks work too (e.g. native event listeners)
+desktop.setTrayClickCallback { index ->
+    println("Tray item clicked: $index")
+}
+```
+
+Supported callback signatures: primitive params (`Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`) and `Unit`/primitive returns.
 
 ### Exception propagation
 
@@ -285,7 +317,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 81 tests
+./gradlew :examples:calculator:jvmTest    # 95 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
@@ -315,7 +347,7 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 ## Roadmap
 
-The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, and exception propagation.
+The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, exception propagation, and callbacks/lambdas.
 
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
 
@@ -330,19 +362,9 @@ Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin
 - [x] Object composition (class as param/return, `StableRef` handle passing)
 - [x] Nullable types (sentinel-based encoding for all supported types)
 - [x] Exception propagation (`@ThreadLocal` error state, `KotlinNativeException` on JVM)
+- [x] Callbacks/lambdas (FFM upcall stubs, persistent `Arena.ofShared()`, async-safe)
 
-### Phase 3 &mdash; Callbacks & lambdas
-
-The only type that **cannot** live in `commonMain` and must cross the FFM boundary.
-
-- [ ] **Lambdas & callbacks** &mdash; FFM upcall handles for JVM &rarr; native callbacks
-  - [ ] IR: `KneType.FUNCTION(params, returnType)` &mdash; function type representation
-  - [ ] FFM proxy: accept `@FunctionalInterface` parameter, create upcall stub via `Linker.nativeLinker().upcallStub()` (swift-java pattern)
-  - [ ] Native bridge: receive `CPointer<CFunction<...>>`, invoke as C function pointer
-  - [ ] Lifetime: upcall stub tied to `Arena.ofConfined()`, freed after native call returns
-  - [ ] Support common signatures: `() -> Unit`, `(T) -> R`, `(T, U) -> R`
-
-### Phase 4 &mdash; Packaging & deployment
+### Next &mdash; Packaging & deployment
 
 Make the plugin production-ready with zero-config deployment.
 

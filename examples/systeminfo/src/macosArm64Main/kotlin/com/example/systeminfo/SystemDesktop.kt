@@ -105,6 +105,10 @@ actual class SystemDesktop {
         return true
     }
 
+    actual fun setTrayClickCallback(callback: (Int) -> Unit) {
+        // TODO: implement macOS tray click callback
+    }
+
     private fun formatUptime(seconds: Double): String {
         if (seconds < 0) return "N/A"
         val h = (seconds / 3600).toInt()

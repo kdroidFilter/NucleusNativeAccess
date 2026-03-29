@@ -38,9 +38,13 @@ class FfmProxyGenerator {
 
     private fun KneType.isFunctionType(): Boolean = this is KneType.FUNCTION
 
-    /** Check if a function needs an arena (for strings or callback upcalls). */
-    private fun needsArena(params: List<KneParam>, returnType: KneType): Boolean =
-        params.any { it.type.isStringLike() || it.type.isFunctionType() } || returnType.isStringLike()
+    /** Check if a function needs a confined arena (for string alloc only — callbacks use persistent arena). */
+    private fun needsConfinedArena(params: List<KneParam>, returnType: KneType): Boolean =
+        params.any { it.type.isStringLike() } || returnType.isStringLike()
+
+    private fun classHasCallbacks(cls: KneClass): Boolean =
+        cls.methods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } } ||
+        cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
 
     /**
      * Generates all proxy files for the module.
@@ -326,12 +330,22 @@ class FfmProxyGenerator {
         appendLine(" * Uses FFM MethodHandles to dispatch every call to the native shared library.")
         appendLine(" * Object lifecycle is managed via Java Cleaner (automatic GC) or explicit close().")
         appendLine(" */")
+        val hasCallbacks = classHasCallbacks(cls)
+
         appendLine("class $n private constructor(internal val handle: Long) : AutoCloseable {")
+        if (hasCallbacks) {
+            appendLine("    internal val _callbackArena: Arena = Arena.ofShared()")
+        }
         appendLine()
+
+        val companionHasCallbacks = cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
 
         // Companion: MethodHandles + factory
         appendLine("    companion object {")
         appendLine("        private val CLEANER = Cleaner.create()")
+        if (companionHasCallbacks) {
+            appendLine("        private val _companionCallbackArena: Arena = Arena.ofShared()")
+        }
         appendLine()
 
         val ctorLayouts = buildLayouts(cls.constructor.params.map { it.type })
@@ -421,7 +435,12 @@ class FfmProxyGenerator {
 
         appendLine("        internal fun fromNativeHandle(h: Long): $n {")
         appendLine("            val obj = $n(h)")
-        appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
+        if (hasCallbacks) {
+            appendLine("            val cbArena = obj._callbackArena")
+            appendLine("            CLEANER.register(obj) { runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } }")
+        } else {
+            appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
+        }
         appendLine("            return obj")
         appendLine("        }")
 
@@ -438,6 +457,9 @@ class FfmProxyGenerator {
 
         // close()
         appendLine("    override fun close() {")
+        if (hasCallbacks) {
+            appendLine("        runCatching { _callbackArena.close() }")
+        }
         appendLine("        runCatching { DISPOSE_HANDLE.invoke(handle) }")
         appendLine("    }")
         appendLine("}")
@@ -449,8 +471,11 @@ class FfmProxyGenerator {
 
         appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-        val needsArena = needsArena(fn.params, fn.returnType)
-        if (needsArena) {
+        // Allocate callback stubs in persistent arena (survives async calls)
+        appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
+
+        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType)
+        if (needsConfinedArena) {
             appendLine("        Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("            ", fn.params)
             val invokeArgs = buildClassInvokeArgs(fn)
@@ -510,7 +535,9 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("        fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-        val arenaNeeded = needsArena(fn.params, fn.returnType)
+        appendCallbackStubAlloc("            ", fn.params, "_companionCallbackArena")
+
+        val arenaNeeded = needsConfinedArena(fn.params, fn.returnType)
         if (arenaNeeded) {
             appendLine("            Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("                ", fn.params)
@@ -595,7 +622,12 @@ class FfmProxyGenerator {
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine()
 
+        val objectHasCallbacks = fns.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
+
         appendLine("object $objectName {")
+        if (objectHasCallbacks) {
+            appendLine("    private val _callbackArena: Arena = Arena.ofShared()")
+        }
         appendLine()
 
         fns.forEach { fn ->
@@ -612,7 +644,9 @@ class FfmProxyGenerator {
             val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
             appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
-            val arenaNeeded = needsArena(fn.params, fn.returnType)
+            appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
+
+            val arenaNeeded = needsConfinedArena(fn.params, fn.returnType)
             if (arenaNeeded) {
                 appendLine("        Arena.ofConfined().use { arena ->")
                 appendStringInvokeArgsAlloc("            ", fn.params)
@@ -754,10 +788,14 @@ class FfmProxyGenerator {
         params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}) else MemorySegment.NULL")
         }
+    }
+
+    /** Emit callback stub allocation using the persistent arena. */
+    private fun StringBuilder.appendCallbackStubAlloc(indent: String, params: List<KneParam>, arenaExpr: String) {
         params.filter { it.type is KneType.FUNCTION }.forEach { p ->
             val fnType = p.type as KneType.FUNCTION
             val id = callbackId(fnType)
-            appendLine("${indent}val ${p.name}Stub = KneRuntime.createUpcallStub_$id(${p.name}, arena)")
+            appendLine("${indent}val ${p.name}Stub = KneRuntime.createUpcallStub_$id(${p.name}, $arenaExpr)")
         }
     }
 
