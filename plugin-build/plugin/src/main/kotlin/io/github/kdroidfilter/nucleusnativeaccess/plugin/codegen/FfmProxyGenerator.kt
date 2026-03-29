@@ -568,7 +568,7 @@ class FfmProxyGenerator {
                     KneType.STRING -> {
                         appendLine("        val _list$i = mutableListOf<String>()")
                         appendLine("        var _off$i = 0L")
-                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(Long.MAX_VALUE)")
                         appendLine("        repeat(p${i}_size) { _list${i}.add(_seg${i}.getString(_off${i})); _off$i += _list${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
                     }
                     KneType.BOOLEAN -> {
@@ -594,7 +594,7 @@ class FfmProxyGenerator {
         val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
-                KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
+                KneType.STRING -> "p$i.reinterpret(Long.MAX_VALUE).getString(0)"
                 is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
                 is KneType.OBJECT -> "${t.simpleName}.fromNativeHandle(p$i)"
                 is KneType.DATA_CLASS -> {
@@ -602,7 +602,7 @@ class FfmProxyGenerator {
                         val pName = "p${i}_${f.name}"
                         when (f.type) {
                             KneType.BOOLEAN -> "${f.name} = $pName != 0"
-                            KneType.STRING -> "${f.name} = $pName.reinterpret(8192).getString(0)"
+                            KneType.STRING -> "${f.name} = $pName.reinterpret(Long.MAX_VALUE).getString(0)"
                             else -> "${f.name} = $pName"
                         }
                     }
@@ -785,7 +785,7 @@ class FfmProxyGenerator {
             KneType.STRING -> {
                 appendLine("        val _${role}${i} = mutableListOf<String>()")
                 appendLine("        var _${role}Off${i} = 0L")
-                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(Long.MAX_VALUE)")
                 appendLine("        repeat(p${i}_size) { _${role}${i}.add(_${role}Seg${i}.getString(_${role}Off${i})); _${role}Off$i += _${role}${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
             }
             KneType.BOOLEAN -> {
