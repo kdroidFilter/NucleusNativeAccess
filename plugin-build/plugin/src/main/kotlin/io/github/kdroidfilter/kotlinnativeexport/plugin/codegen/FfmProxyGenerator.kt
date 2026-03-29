@@ -1107,10 +1107,10 @@ class FfmProxyGenerator {
         when (elemType) {
             KneType.STRING -> {
                 // Pack strings as null-terminated sequence in a single buffer
-                appendLine("${indent}val ${name}TotalBytes = $srcExpr.sumOf { it.length + 1 }")
+                appendLine("${indent}val ${name}TotalBytes = $srcExpr.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
                 appendLine("${indent}val ${name}Seg = arena.allocate(${name}TotalBytes.toLong().coerceAtLeast(1))")
                 appendLine("${indent}var ${name}Off = 0L")
-                appendLine("${indent}for (_s in $srcExpr) { ${name}Seg.setString(${name}Off, _s); ${name}Off += _s.length + 1 }")
+                appendLine("${indent}for (_s in $srcExpr) { ${name}Seg.setString(${name}Off, _s); ${name}Off += _s.toByteArray(Charsets.UTF_8).size + 1 }")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")
@@ -1159,7 +1159,7 @@ class FfmProxyGenerator {
                 appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}val _list = mutableListOf<String>()")
                 appendLine("${indent}var _off = 0L")
-                appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().length + 1 }")
+                appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
                 if (collType == "Set") appendLine("${indent}return _list.toSet()")
                 else appendLine("${indent}return _list")
             }
@@ -1221,7 +1221,7 @@ class FfmProxyGenerator {
         if (isKeyString) {
             appendLine("${indent}val _keys = mutableListOf<String>()")
             appendLine("${indent}var _kOff = 0L")
-            appendLine("${indent}repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().length + 1 }")
+            appendLine("${indent}repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
         } else {
             appendMapElementRead(indent, "_keys", type.keyType, "_count", "_keysBuf")
         }
@@ -1229,7 +1229,7 @@ class FfmProxyGenerator {
         if (isValString) {
             appendLine("${indent}val _values = mutableListOf<String>()")
             appendLine("${indent}var _vOff = 0L")
-            appendLine("${indent}repeat(_count) { _values.add(_valuesBuf.getString(_vOff)); _vOff += _values.last().length + 1 }")
+            appendLine("${indent}repeat(_count) { _values.add(_valuesBuf.getString(_vOff)); _vOff += _values.last().toByteArray(Charsets.UTF_8).size + 1 }")
         } else {
             appendMapElementRead(indent, "_values", type.valueType, "_count", "_valuesBuf")
         }

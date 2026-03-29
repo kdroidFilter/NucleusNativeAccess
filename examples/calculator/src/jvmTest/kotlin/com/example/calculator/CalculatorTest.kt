@@ -2250,6 +2250,299 @@ class CalculatorTest {
         }
     }
 
+    // ── Collection: List<Long> ────────────────────────────────────────────
+
+    @Test
+    fun `List Long return - getLongScores`() {
+        Calculator(5).use { calc ->
+            val scores = calc.getLongScores()
+            assertEquals(listOf(5L, 500_000L), scores)
+        }
+    }
+
+    @Test
+    fun `List Long param - sumLongs`() {
+        Calculator(0).use { calc ->
+            assertEquals(300_000L, calc.sumLongs(listOf(100_000L, 200_000L)))
+        }
+    }
+
+    @Test
+    fun `List Long param - empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(0L, calc.sumLongs(emptyList()))
+        }
+    }
+
+    @Test
+    fun `List Long param - large values`() {
+        Calculator(0).use { calc ->
+            assertEquals(2_000_000_000L, calc.sumLongs(listOf(1_000_000_000L, 1_000_000_000L)))
+        }
+    }
+
+    // ── Collection: List<Float> ─────────────────────────────────────────────
+
+    @Test
+    fun `List Float return - getFloatWeights`() {
+        Calculator(10).use { calc ->
+            val weights = calc.getFloatWeights()
+            assertEquals(2, weights.size)
+            assertEquals(10.0f, weights[0], 0.001f)
+            assertEquals(5.0f, weights[1], 0.001f)
+        }
+    }
+
+    @Test
+    fun `List Float return - zero`() {
+        Calculator(0).use { calc ->
+            val weights = calc.getFloatWeights()
+            assertEquals(0.0f, weights[0], 0.001f)
+            assertEquals(0.0f, weights[1], 0.001f)
+        }
+    }
+
+    // ── Collection: List<Short> ─────────────────────────────────────────────
+
+    @Test
+    fun `List Short return - getShortValues`() {
+        Calculator(7).use { calc ->
+            val values = calc.getShortValues()
+            assertEquals(listOf(7.toShort(), 14.toShort()), values)
+        }
+    }
+
+    // ── Collection: List<Byte> ──────────────────────────────────────────────
+
+    @Test
+    fun `List Byte return - getByteValues`() {
+        Calculator(3).use { calc ->
+            val values = calc.getByteValues()
+            assertEquals(listOf(3.toByte(), 4.toByte()), values)
+        }
+    }
+
+    // ── Collection: List<Double> extended ───────────────────────────────────
+
+    @Test
+    fun `List Double return - zero accumulator`() {
+        Calculator(0).use { calc ->
+            val weights = calc.getWeights()
+            assertEquals(0.0, weights[0], 0.001)
+            assertEquals(0.0, weights[1], 0.001)
+        }
+    }
+
+    @Test
+    fun `List Double return - negative accumulator`() {
+        Calculator(-4).use { calc ->
+            val weights = calc.getWeights()
+            assertEquals(-4.0, weights[0], 0.001)
+            assertEquals(-6.0, weights[1], 0.001)
+        }
+    }
+
+    // ── Collection: List<Int> extended ──────────────────────────────────────
+
+    @Test
+    fun `List Int param - negative values`() {
+        Calculator(0).use { calc ->
+            assertEquals(-6, calc.sumAll(listOf(-1, -2, -3)))
+        }
+    }
+
+    @Test
+    fun `List Int param and return roundtrip`() {
+        Calculator(0).use { calc ->
+            calc.sumAll(listOf(10, 20, 30))
+            val scores = calc.getScores()
+            assertEquals(listOf(60, 120, 180), scores)
+        }
+    }
+
+    // ── Collection: List<String> extended ───────────────────────────────────
+
+    @Test
+    fun `List String param - unicode strings`() {
+        Calculator(0).use { calc ->
+            val result = calc.joinLabels(listOf("café", "naïve", "über"))
+            assertEquals("café, naïve, über", result)
+        }
+    }
+
+    @Test
+    fun `List String param - single element`() {
+        Calculator(0).use { calc ->
+            assertEquals("only", calc.joinLabels(listOf("only")))
+        }
+    }
+
+    @Test
+    fun `List String param - long strings`() {
+        Calculator(0).use { calc ->
+            val longStr = "a".repeat(200)
+            val result = calc.joinLabels(listOf(longStr, "b"))
+            assertEquals("$longStr, b", result)
+        }
+    }
+
+    // ── Collection: List<Boolean> extended ──────────────────────────────────
+
+    @Test
+    fun `List Boolean return - negative accumulator`() {
+        Calculator(-5).use { calc ->
+            val flags = calc.getFlags()
+            assertEquals(false, flags[0]) // not positive
+            assertEquals(false, flags[1]) // -5 is odd
+            assertEquals(false, flags[2]) // label is empty
+        }
+    }
+
+    // ── Collection: List<Enum> extended ─────────────────────────────────────
+
+    @Test
+    fun `List Enum param - all entries`() {
+        Calculator(0).use { calc ->
+            assertEquals(3, calc.countOps(listOf(Operation.ADD, Operation.SUBTRACT, Operation.MULTIPLY)))
+        }
+    }
+
+    @Test
+    fun `List Enum param - duplicates`() {
+        Calculator(0).use { calc ->
+            assertEquals(4, calc.countOps(listOf(Operation.ADD, Operation.ADD, Operation.ADD, Operation.MULTIPLY)))
+        }
+    }
+
+    @Test
+    fun `List Enum return and param roundtrip`() {
+        Calculator(0).use { calc ->
+            val ops = calc.getOperations()
+            assertEquals(3, calc.countOps(ops))
+        }
+    }
+
+    // ── Collection: Set<Int> extended ───────────────────────────────────────
+
+    @Test
+    fun `Set Int return - large number`() {
+        Calculator(9876).use { calc ->
+            val digits = calc.getUniqueDigits()
+            assertEquals(setOf(9, 8, 7, 6), digits)
+        }
+    }
+
+    @Test
+    fun `Set Int param - single element`() {
+        Calculator(0).use { calc ->
+            assertEquals(42, calc.sumUnique(setOf(42)))
+        }
+    }
+
+    @Test
+    fun `Set Int param and return roundtrip`() {
+        Calculator(321).use { calc ->
+            val digits = calc.getUniqueDigits()
+            calc.sumUnique(digits)
+            assertEquals(6, calc.current) // 1+2+3=6
+        }
+    }
+
+    // ── Collection: Set<String> ─────────────────────────────────────────────
+
+    @Test
+    fun `Set String return - getUniqueLabels`() {
+        Calculator(5).use { calc ->
+            calc.label = "test"
+            val labels = calc.getUniqueLabels()
+            assertTrue(labels.contains("test"))
+            assertTrue(labels.contains("item_5"))
+            // "test" appears twice in input → deduped in set
+            assertEquals(2, labels.size)
+        }
+    }
+
+    @Test
+    fun `Set String return - default label dedup`() {
+        Calculator(0).use { calc ->
+            val labels = calc.getUniqueLabels()
+            assertTrue(labels.contains("default"))
+            assertTrue(labels.contains("item_0"))
+        }
+    }
+
+    @Test
+    fun `Set String param - joinUniqueStrings`() {
+        Calculator(0).use { calc ->
+            val result = calc.joinUniqueStrings(setOf("c", "a", "b"))
+            assertEquals("a;b;c", result)
+        }
+    }
+
+    @Test
+    fun `Set String param - empty set`() {
+        Calculator(0).use { calc ->
+            assertEquals("", calc.joinUniqueStrings(emptySet()))
+        }
+    }
+
+    // ── Collection: Set<Enum> ───────────────────────────────────────────────
+
+    @Test
+    fun `Set Enum return - getUsedOps`() {
+        Calculator(0).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 5)
+            val ops = calc.getUsedOps()
+            assertTrue(ops.contains(Operation.MULTIPLY))
+            assertTrue(ops.contains(Operation.ADD))
+        }
+    }
+
+    @Test
+    fun `Set Enum return - dedup when same`() {
+        Calculator(0).use { calc ->
+            // lastOperation defaults to ADD, getUsedOps returns {lastOperation, ADD}
+            val ops = calc.getUsedOps()
+            assertEquals(setOf(Operation.ADD), ops)
+        }
+    }
+
+    // ── Collection: Map<String, Int> extended ───────────────────────────────
+
+    @Test
+    fun `Map String Int return - different scale`() {
+        Calculator(100).use { calc ->
+            calc.scale = 7.0
+            val meta = calc.getMetadata()
+            assertEquals(100, meta["current"])
+            assertEquals(7, meta["scale"])
+        }
+    }
+
+    @Test
+    fun `Map String Int param - single entry`() {
+        Calculator(0).use { calc ->
+            assertEquals(42, calc.sumMap(mapOf("x" to 42)))
+        }
+    }
+
+    @Test
+    fun `Map String Int param - negative values`() {
+        Calculator(0).use { calc ->
+            assertEquals(-10, calc.sumMap(mapOf("a" to -3, "b" to -7)))
+        }
+    }
+
+    @Test
+    fun `Map String Int roundtrip`() {
+        Calculator(50).use { calc ->
+            calc.scale = 2.0
+            val meta = calc.getMetadata()
+            calc.sumMap(meta) // sum of current(50) + scale(2) = 52
+            assertEquals(52, calc.current)
+        }
+    }
+
     // ── Collection: Map<Int, String> ────────────────────────────────────────
 
     @Test
@@ -2260,6 +2553,108 @@ class CalculatorTest {
             assertEquals("hello", labels[0])
             assertEquals("item_7", labels[1])
             assertEquals(2, labels.size)
+        }
+    }
+
+    @Test
+    fun `Map Int String return - default label`() {
+        Calculator(0).use { calc ->
+            val labels = calc.getIndexedLabels()
+            assertEquals("default", labels[0])
+            assertEquals("item_0", labels[1])
+        }
+    }
+
+    // ── Collection: Map<Int, Int> ───────────────────────────────────────────
+
+    @Test
+    fun `Map Int Int return - getSquares`() {
+        Calculator(5).use { calc ->
+            val squares = calc.getSquares()
+            assertEquals(1, squares[1])
+            assertEquals(4, squares[2])
+            assertEquals(9, squares[3])
+            assertEquals(25, squares[5])
+        }
+    }
+
+    @Test
+    fun `Map Int Int param - sumMapValues`() {
+        Calculator(0).use { calc ->
+            assertEquals(14, calc.sumMapValues(mapOf(1 to 4, 2 to 10)))
+        }
+    }
+
+    @Test
+    fun `Map Int Int param - empty`() {
+        Calculator(42).use { calc ->
+            assertEquals(0, calc.sumMapValues(emptyMap()))
+        }
+    }
+
+    @Test
+    fun `Map Int Int roundtrip`() {
+        Calculator(3).use { calc ->
+            val squares = calc.getSquares()
+            // getSquares: {1:1, 2:4, 3:9, 3:9} → key 3 = accumulator so deduped → {1:1, 2:4, 3:9}
+            calc.sumMapValues(squares)
+            assertEquals(14, calc.current) // 1 + 4 + 9
+        }
+    }
+
+    // ── Collection: Map<String, String> ─────────────────────────────────────
+
+    @Test
+    fun `Map String String return - getStringMap`() {
+        Calculator(42).use { calc ->
+            calc.label = "test"
+            val map = calc.getStringMap()
+            assertEquals("test", map["name"])
+            assertEquals("42", map["value"])
+        }
+    }
+
+    @Test
+    fun `Map String String return - unnamed`() {
+        Calculator(0).use { calc ->
+            val map = calc.getStringMap()
+            assertEquals("unnamed", map["name"])
+            assertEquals("0", map["value"])
+        }
+    }
+
+    @Test
+    fun `Map String String param - concatMapEntries`() {
+        Calculator(0).use { calc ->
+            // Note: map iteration order may vary, so use a sorted map
+            val result = calc.concatMapEntries(sortedMapOf("a" to "1", "b" to "2"))
+            assertEquals("a=1, b=2", result)
+        }
+    }
+
+    @Test
+    fun `Map String String param - empty`() {
+        Calculator(0).use { calc ->
+            assertEquals("", calc.concatMapEntries(emptyMap()))
+        }
+    }
+
+    @Test
+    fun `Map String String param - special chars`() {
+        Calculator(0).use { calc ->
+            val result = calc.concatMapEntries(sortedMapOf("key" to "hello world"))
+            assertEquals("key=hello world", result)
+        }
+    }
+
+    @Test
+    fun `Map String String roundtrip`() {
+        Calculator(99).use { calc ->
+            calc.label = "myCalc"
+            val map = calc.getStringMap()
+            val result = calc.concatMapEntries(map)
+            assertTrue(result.contains("name=myCalc"))
+            assertTrue(result.contains("value=99"))
         }
     }
 }

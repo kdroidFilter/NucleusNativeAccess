@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (217 tests)
+### Types — test coverage (287 tests)
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -135,9 +135,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
-| `List<T>` | ✅ 4t | ✅ 4t | &mdash; | &mdash; | &mdash; | pointer + size (flat array) |
-| `Set<T>` | ✅ 2t | ✅ 2t | &mdash; | &mdash; | &mdash; | same as List at C ABI |
-| `Map<K, V>` | ✅ 2t | ✅ 2t | &mdash; | &mdash; | &mdash; | parallel key/value arrays |
+| `List<T>` | ✅ 12t | ✅ 11t | &mdash; | &mdash; | &mdash; | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum |
+| `Set<T>` | ✅ 4t | ✅ 6t | &mdash; | &mdash; | &mdash; | Int, String, Enum |
+| `Map<K, V>` | ✅ 7t | ✅ 7t | &mdash; | &mdash; | &mdash; | String→Int, Int→String, Int→Int, String→String |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
 
 ### Declarations
@@ -265,12 +265,14 @@ calc.add(5) // works normally after exception
 | Interfaces | Can live in `commonMain` | Define in shared KMP code |
 | Inheritance / open classes | Can live in `commonMain` | Define in shared KMP code |
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
-| Generics | Complex type erasure at FFM boundary | Use concrete types |
+| Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
 | Nested/inner classes | Parser limitation | Use top-level classes |
 | Object (class) directly in callbacks | Not yet implemented | Wrap in a data class |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | Collections in callbacks | Not yet implemented | Use collections as direct params/returns |
+| `List<Object>` / `List<DataClass>` | Not yet implemented | Use primitive/String/Enum elements |
+| `List<T>?` / `Set<T>?` / `Map<K,V>?` | Not yet implemented | Return empty collection instead of null |
 | Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |

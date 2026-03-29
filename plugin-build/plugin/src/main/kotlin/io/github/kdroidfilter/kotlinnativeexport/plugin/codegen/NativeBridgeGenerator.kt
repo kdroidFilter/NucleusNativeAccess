@@ -690,7 +690,7 @@ class NativeBridgeGenerator {
                 appendLine("    for (i in 0 until ${paramName}_size) {")
                 appendLine("        val _s = ($paramName!! + _${paramName}Offset)!!.toKString()")
                 appendLine("        $listVar.add(_s)")
-                appendLine("        _${paramName}Offset += _s.length + 1")
+                appendLine("        _${paramName}Offset += _s.encodeToByteArray().size + 1")
                 appendLine("    }")
             }
             KneType.BOOLEAN -> {
@@ -720,7 +720,7 @@ class NativeBridgeGenerator {
             appendLine("    for (i in 0 until ${paramName}_size) {")
             appendLine("        val _s = (${paramName}_keys!! + _${paramName}KeysOff)!!.toKString()")
             appendLine("        _${paramName}Keys.add(_s)")
-            appendLine("        _${paramName}KeysOff += _s.length + 1")
+            appendLine("        _${paramName}KeysOff += _s.encodeToByteArray().size + 1")
             appendLine("    }")
         } else {
             appendLine("    val _${paramName}Keys = List(${paramName}_size) { ${buildCollectionElementRead("${paramName}_keys", type.keyType, "it")} }")
@@ -732,7 +732,7 @@ class NativeBridgeGenerator {
             appendLine("    for (i in 0 until ${paramName}_size) {")
             appendLine("        val _s = (${paramName}_values!! + _${paramName}ValuesOff)!!.toKString()")
             appendLine("        _${paramName}Values.add(_s)")
-            appendLine("        _${paramName}ValuesOff += _s.length + 1")
+            appendLine("        _${paramName}ValuesOff += _s.encodeToByteArray().size + 1")
             appendLine("    }")
         } else {
             appendLine("    val _${paramName}Values = List(${paramName}_size) { ${buildCollectionElementRead("${paramName}_values", type.valueType, "it")} }")

@@ -299,8 +299,43 @@ class Calculator(initial: Int = 0) {
         return accumulator
     }
 
+    // List<Long>
+    fun getLongScores(): List<Long> = listOf(accumulator.toLong(), accumulator.toLong() * 100_000L)
+
+    fun sumLongs(values: List<Long>): Long = values.sum()
+
+    // List<Float>
+    fun getFloatWeights(): List<Float> = listOf(accumulator.toFloat(), accumulator * 0.5f)
+
+    // List<Short>
+    fun getShortValues(): List<Short> = listOf(accumulator.toShort(), (accumulator * 2).toShort())
+
+    // List<Byte>
+    fun getByteValues(): List<Byte> = listOf(accumulator.toByte(), (accumulator + 1).toByte())
+
+    // Set<String>
+    fun getUniqueLabels(): Set<String> = setOf(label.ifEmpty { "default" }, "item_$accumulator", label.ifEmpty { "default" })
+
+    fun joinUniqueStrings(values: Set<String>): String = values.sorted().joinToString(";")
+
+    // Set<Enum>
+    fun getUsedOps(): Set<Operation> = setOf(lastOperation, Operation.ADD)
+
     // Map<Int, String>
     fun getIndexedLabels(): Map<Int, String> = mapOf(0 to label.ifEmpty { "default" }, 1 to "item_$accumulator")
+
+    // Map<Int, Int>
+    fun getSquares(): Map<Int, Int> = mapOf(1 to 1, 2 to 4, 3 to 9, accumulator to accumulator * accumulator)
+
+    fun sumMapValues(data: Map<Int, Int>): Int {
+        accumulator = data.values.sum()
+        return accumulator
+    }
+
+    // Map<String, String>
+    fun getStringMap(): Map<String, String> = mapOf("name" to label.ifEmpty { "unnamed" }, "value" to accumulator.toString())
+
+    fun concatMapEntries(data: Map<String, String>): String = data.entries.joinToString(", ") { "${it.key}=${it.value}" }
 
     // ── Companion object ────────────────────────────────────────────────────
 
