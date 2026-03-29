@@ -1,6 +1,6 @@
 # Kotlin Native Export
 
-A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, top-level functions &mdash; everything is transparent to the JVM developer.
+A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation &mdash; everything is transparent to the JVM developer.
 
 Under the hood, the plugin generates [FFM (Foreign Function & Memory API)](https://openjdk.org/jeps/454) bindings inspired by [swift-java](https://github.com/swiftlang/swift-java) and [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone).
 
@@ -133,6 +133,34 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | Class references | `JAVA_LONG` | pass/return handles between classes |
 | `T?` (nullable) | widened | sentinel-based null encoding (see below) |
 
+### Exception propagation
+
+All native bridge functions are wrapped in `try/catch`. When an exception occurs:
+
+1. The native side captures the error message in a `@ThreadLocal` variable
+2. The JVM proxy calls `kne_hasError()` after every downcall
+3. If an error is detected, `kne_getLastError()` retrieves the message
+4. A `KotlinNativeException(message)` is thrown on the JVM side
+
+Zero-allocation happy path: only 2 FFM calls per invocation (function + hasError check). The error path adds 1 extra call + Arena for the string buffer.
+
+```kotlin
+// Kotlin/Native side
+fun divide(divisor: Int): Int {
+    require(divisor != 0) { "Division by zero" }
+    return accumulator / divisor
+}
+
+// JVM side — transparent exception handling
+val calc = Calculator(10)
+try {
+    calc.divide(0)
+} catch (e: KotlinNativeException) {
+    println(e.message) // "Division by zero"
+}
+calc.add(5) // works normally after exception
+```
+
 ### Nullable type encoding
 
 All nullable types are supported. The encoding uses sentinel values to represent `null` at the FFM boundary:
@@ -257,7 +285,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 76 tests
+./gradlew :examples:calculator:jvmTest    # 81 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
@@ -287,7 +315,7 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 ## Roadmap
 
-The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, and nullable types. The roadmap extends the type system, improves analysis, and adds deployment features.
+The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, and exception propagation. The roadmap extends the type system, improves analysis, and adds deployment features.
 
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
 
@@ -356,10 +384,10 @@ Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin
 
 ### Phase 2d &mdash; Advanced type features
 
-- [ ] **Exceptions** &mdash; catch on native side, propagate to JVM
-  - [ ] Native bridge: wrap body in `try/catch`, write error code + message to out-params (inspired by swift-java's `throwAsException` / swift-export's `errorType` out-parameter)
-  - [ ] FFM proxy: check error code after downcall, throw `KotlinNativeException(message)` on JVM
-  - [ ] Only generate for functions annotated with `@Throws`
+- [x] **Exceptions** &mdash; catch on native side, propagate to JVM
+  - [x] Native bridge: wrap body in `try/catch`, store error in `@ThreadLocal` variable
+  - [x] FFM proxy: `kne_hasError()` + `kne_getLastError()` after every downcall, throw `KotlinNativeException(message)`
+  - [x] Zero-allocation happy path (2 FFM calls), error path adds 1 call + Arena
 
 - [ ] **Lambdas & callbacks** &mdash; FFM upcall handles for JVM &rarr; native callbacks
   - [ ] IR: `KneType.FUNCTION` with param/return types
@@ -391,9 +419,12 @@ Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin
   - [ ] Bundle each platform's shared lib under `META-INF/native/{os}-{arch}/`
   - [ ] `KneRuntime`: detect current OS/arch at startup, load correct variant
 
-### Won't do (out of scope)
+### Future considerations
 
-- Suspend functions / coroutines across FFM (fundamentally different runtimes)
+- **Suspend functions / coroutines** &mdash; swift-java maps `async` to `CompletableFuture`, kotlin-swift-export maps `suspend` to Swift `async/await`. A similar approach could map `suspend` to `CompletableFuture` on JVM, but this requires significant runtime support.
+
+### Out of scope
+
 - Full Kotlin Multiplatform expect/actual (that's KMP's job, not ours)
 
 ## Requirements
