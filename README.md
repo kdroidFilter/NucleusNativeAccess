@@ -117,7 +117,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (369 tests)
+### Types — test coverage (369 end-to-end FFM tests)
+
+Every test compiles Kotlin/Native → `libcalculator.so` (130 exported symbols) → loads via FFM `MethodHandle` → verifies on JVM.
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -135,12 +137,12 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
-| `List<T>` | ✅ 12t | ✅ 11t | &mdash; | ✅ 7t | &mdash; | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum, Object |
-| `List<T>?` | ✅ 3t | ✅ 3t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
-| `Set<T>` | ✅ 4t | ✅ 6t | &mdash; | &mdash; | &mdash; | Int, String, Enum |
-| `Set<T>?` | &mdash; | ✅ 2t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
-| `Map<K, V>` | ✅ 7t | ✅ 7t | &mdash; | &mdash; | &mdash; | String→Int, Int→String, Int→Int, String→String |
-| `Map<K, V>?` | &mdash; | ✅ 2t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
+| `List<T>` | ✅ 26t | ✅ 17t | &mdash; | ✅ 12t | &mdash; | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum, Object |
+| `List<T>?` | ✅ 7t | ✅ 8t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
+| `Set<T>` | ✅ 9t | ✅ 13t | &mdash; | &mdash; | &mdash; | Int, String, Enum + intersect/empty edge cases |
+| `Set<T>?` | &mdash; | ✅ 5t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
+| `Map<K, V>` | ✅ 12t | ✅ 12t | &mdash; | &mdash; | &mdash; | String→Int, Int→String, Int→Int, String→String + merge/empty |
+| `Map<K, V>?` | &mdash; | ✅ 4t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
 
 ### Declarations
