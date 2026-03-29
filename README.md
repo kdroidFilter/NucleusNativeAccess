@@ -412,6 +412,13 @@ The generated `KneRuntime` uses a three-tier loading strategy:
 2. **JAR extraction** &mdash; extracts from `kne/native/{os}-{arch}/` in the classpath to a persistent cache (`~/.cache/kne/`)
 3. **Loader lookup** &mdash; fallback for GraalVM native-image (native lib beside the executable)
 
+### Build performance & Gradle Cache
+
+Currently, the bridge generation task is marked as `@DisableCachingByDefault` because the Kotlin PSI source analysis is not yet fully cacheable.
+
+- **Status**: The plugin performs a full re-scan and code generation on every build if sources change.
+- **Future work**: Implement proper Gradle build caching and incremental compilation by mapping source files to specific IR outputs, allowing faster builds for large projects.
+
 ### GraalVM native-image support
 
 The plugin auto-generates GraalVM reachability metadata under `META-INF/native-image/kne/{libName}/`:
