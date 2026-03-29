@@ -3,6 +3,9 @@
 package com.example.systeminfo
 
 import kotlinx.cinterop.*
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import libnotify.*
 import platform.posix.*
 import systray.*
@@ -99,6 +102,17 @@ actual class SystemDesktop {
         systray_set_click_callback(staticCFunction { index ->
             _trayClickCallback?.invoke(index)
         })
+    }
+
+    actual fun trayClicks(): Flow<Int> = callbackFlow {
+        _trayClickCallback = { index -> trySend(index) }
+        systray_set_click_callback(staticCFunction { index ->
+            _trayClickCallback?.invoke(index)
+        })
+        awaitClose {
+            systray_set_click_callback(null)
+            _trayClickCallback = null
+        }
     }
 
     private fun formatUptime(seconds: Double): String {

@@ -85,7 +85,7 @@ class FfmProxyGenerator {
 
         val moduleSuspend = module.classes.any { cls -> cls.methods.any { it.isSuspend } } || module.functions.any { it.isSuspend }
         val moduleFlow = module.classes.any { cls -> cls.methods.any { it.returnType is KneType.FLOW } } || module.functions.any { it.returnType is KneType.FLOW }
-        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend, moduleFlow)
+        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend || moduleFlow, moduleFlow)
         files["KotlinNativeException.kt"] = generateException(jvmPackage)
 
         module.dataClasses.filter { !it.isCommon }.forEach { dc ->
@@ -671,7 +671,7 @@ class FfmProxyGenerator {
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine("import java.lang.ref.Cleaner")
-        val classHasSuspend = cls.methods.any { it.isSuspend } || cls.companionMethods.any { it.isSuspend }
+        val classHasSuspend = cls.methods.any { it.isSuspend || it.returnType is KneType.FLOW } || cls.companionMethods.any { it.isSuspend }
         val classHasFlow = cls.methods.any { it.returnType is KneType.FLOW }
         if (classHasSuspend) {
             appendLine("import kotlinx.coroutines.suspendCancellableCoroutine")

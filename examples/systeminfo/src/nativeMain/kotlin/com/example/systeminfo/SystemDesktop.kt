@@ -17,4 +17,5 @@ expect class SystemDesktop() {
     fun showSystemTray(): Boolean
     fun hideSystemTray(): Boolean
     fun setTrayClickCallback(callback: (Int) -> Unit)
+    fun trayClicks(): kotlinx.coroutines.flow.Flow<Int>
 }

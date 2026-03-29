@@ -125,6 +125,17 @@ fun SystemInfoScreen() {
 
         val trayLabels = listOf("Hostname", "CPU", "Cores", "Memory", "Uptime", "Kernel")
 
+        // Collect tray clicks via Flow (instead of callback)
+        if (trayVisible) {
+            LaunchedEffect(Unit) {
+                desktop.trayClicks().collect { index ->
+                    val label = trayLabels.getOrElse(index) { "Item $index" }
+                    lastTrayClick = label
+                    println("[JVM] Tray item clicked via Flow: $label (index=$index)")
+                }
+            }
+        }
+
         Button(
             onClick = {
                 if (trayVisible) {
@@ -132,11 +143,6 @@ fun SystemInfoScreen() {
                     trayVisible = false
                     lastTrayClick = null
                 } else {
-                    desktop.setTrayClickCallback { index ->
-                        val label = trayLabels.getOrElse(index) { "Item $index" }
-                        lastTrayClick = label
-                        println("[JVM] Tray item clicked: $label (index=$index)")
-                    }
                     desktop.showSystemTray()
                     trayVisible = true
                 }

@@ -61,7 +61,9 @@ class NativeBridgeGenerator {
             module.functions.any { it.returnType is KneType.FLOW }
         if (hasSuspend || hasFlow) {
             appendLine("import kotlinx.coroutines.*")
-            if (hasFlow) appendLine("import kotlinx.coroutines.flow.*")
+        }
+        if (hasFlow) {
+            appendLine("import kotlinx.coroutines.flow.*")
         }
 
         module.packages.forEach { pkg ->
@@ -75,8 +77,8 @@ class NativeBridgeGenerator {
 
         appendErrorFunctions(module.libName)
 
-        // Suspend helper bridges (once per module)
-        if (hasSuspend) {
+        // Suspend/Flow helper bridges (once per module)
+        if (hasSuspend || hasFlow) {
             appendSuspendHelpers(module.libName)
         }
 
