@@ -371,6 +371,52 @@ class Calculator(initial: Int = 0) {
 
     fun getMetadataOrNull(): Map<String, Int>? = if (accumulator != 0) mapOf("val" to accumulator) else null
 
+    // ── Extra collection edge-case methods ──────────────────────────────────
+
+    fun getSingletonList(): List<Int> = listOf(accumulator)
+
+    fun getEmptyList(): List<Int> = emptyList()
+
+    fun getLargeList(size: Int): List<Int> = List(size) { it * accumulator }
+
+    fun reverseList(values: List<Int>): List<Int> {
+        val reversed = values.reversed()
+        accumulator = reversed.firstOrNull() ?: 0
+        return reversed
+    }
+
+    fun filterPositive(values: List<Int>): List<Int> = values.filter { it > 0 }
+
+    fun getEmptyStringList(): List<String> = emptyList()
+
+    fun repeatLabel(count: Int): List<String> = List(count) { "${label.ifEmpty { "item" }}_$it" }
+
+    fun transformStrings(values: List<String>): List<String> = values.map { it.uppercase() }
+
+    fun getSingletonMap(): Map<String, Int> = mapOf("only" to accumulator)
+
+    fun getEmptyMap(): Map<String, Int> = emptyMap()
+
+    fun mergeMapValues(a: Map<String, Int>, b: Map<String, Int>): Map<String, Int> = a + b
+
+    fun getEmptySet(): Set<Int> = emptySet()
+
+    fun intersectSets(a: Set<Int>, b: Set<Int>): Set<Int> = a.intersect(b)
+
+    fun onLargeListReady(size: Int, callback: (List<Int>) -> Unit) {
+        callback(List(size) { it })
+    }
+
+    fun onEmptyListReady(callback: (List<Int>) -> Unit) {
+        callback(emptyList())
+    }
+
+    fun getScoresOrNullByLabel(): List<String>? = if (label.isEmpty()) null else listOf(label)
+
+    fun getNullableSetByAccum(): Set<Int>? = if (accumulator < 0) null else setOf(accumulator, accumulator + 1)
+
+    fun getNullableMapByLabel(): Map<String, String>? = if (label.isEmpty()) null else mapOf("label" to label)
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {

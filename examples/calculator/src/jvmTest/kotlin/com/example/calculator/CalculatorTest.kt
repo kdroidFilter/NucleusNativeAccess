@@ -2892,4 +2892,509 @@ class CalculatorTest {
             assertEquals(listOf(false, true), received) // 0 > 0 = false, 0 % 2 == 0 = true
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // EDGE-CASE BATTERY: Collections
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Singleton / Empty List ───────────────────────────────────────────────
+
+    @Test
+    fun `edge - singleton list return`() {
+        Calculator(42).use { calc ->
+            assertEquals(listOf(42), calc.getSingletonList())
+        }
+    }
+
+    @Test
+    fun `edge - empty list return`() {
+        Calculator(99).use { calc ->
+            assertEquals(emptyList<Int>(), calc.getEmptyList())
+        }
+    }
+
+    @Test
+    fun `edge - large list 500 elements`() {
+        Calculator(2).use { calc ->
+            val result = calc.getLargeList(500)
+            assertEquals(500, result.size)
+            assertEquals(0, result[0])
+            assertEquals(2, result[1])
+            assertEquals(998, result[499])
+        }
+    }
+
+    @Test
+    fun `edge - large list 2000 elements`() {
+        Calculator(1).use { calc ->
+            val result = calc.getLargeList(2000)
+            assertEquals(2000, result.size)
+            assertEquals(1999, result[1999])
+        }
+    }
+
+    @Test
+    fun `edge - getLargeList zero accumulator`() {
+        Calculator(0).use { calc ->
+            val result = calc.getLargeList(100)
+            assertTrue(result.all { it == 0 })
+        }
+    }
+
+    @Test
+    fun `edge - getLargeList size 1`() {
+        Calculator(7).use { calc ->
+            assertEquals(listOf(0), calc.getLargeList(1))
+        }
+    }
+
+    @Test
+    fun `edge - getLargeList size 0`() {
+        Calculator(7).use { calc ->
+            assertEquals(emptyList<Int>(), calc.getLargeList(0))
+        }
+    }
+
+    // ── List reversal / transform ───────────────────────────────────────────
+
+    @Test
+    fun `edge - reverseList basic`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(3, 2, 1), calc.reverseList(listOf(1, 2, 3)))
+            assertEquals(3, calc.current) // first of reversed
+        }
+    }
+
+    @Test
+    fun `edge - reverseList single`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(42), calc.reverseList(listOf(42)))
+        }
+    }
+
+    @Test
+    fun `edge - reverseList empty`() {
+        Calculator(99).use { calc ->
+            assertEquals(emptyList<Int>(), calc.reverseList(emptyList()))
+            assertEquals(0, calc.current) // firstOrNull = null → 0
+        }
+    }
+
+    @Test
+    fun `edge - reverseList preserves all elements`() {
+        Calculator(0).use { calc ->
+            val input = List(100) { it }
+            val result = calc.reverseList(input)
+            assertEquals(input.reversed(), result)
+        }
+    }
+
+    @Test
+    fun `edge - filterPositive mixed`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(1, 3, 5), calc.filterPositive(listOf(-2, 1, -4, 3, 0, 5)))
+        }
+    }
+
+    @Test
+    fun `edge - filterPositive all negative`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyList<Int>(), calc.filterPositive(listOf(-1, -2, -3)))
+        }
+    }
+
+    @Test
+    fun `edge - filterPositive all positive`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(1, 2, 3), calc.filterPositive(listOf(1, 2, 3)))
+        }
+    }
+
+    @Test
+    fun `edge - filterPositive empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyList<Int>(), calc.filterPositive(emptyList()))
+        }
+    }
+
+    // ── String list edge cases ──────────────────────────────────────────────
+
+    @Test
+    fun `edge - empty string list return`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyList<String>(), calc.getEmptyStringList())
+        }
+    }
+
+    @Test
+    fun `edge - repeatLabel generates correct count`() {
+        Calculator(0).use { calc ->
+            calc.label = "test"
+            val result = calc.repeatLabel(5)
+            assertEquals(5, result.size)
+            assertEquals("test_0", result[0])
+            assertEquals("test_4", result[4])
+        }
+    }
+
+    @Test
+    fun `edge - repeatLabel zero count`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyList<String>(), calc.repeatLabel(0))
+        }
+    }
+
+    @Test
+    fun `edge - repeatLabel one count`() {
+        Calculator(0).use { calc ->
+            calc.label = "x"
+            assertEquals(listOf("x_0"), calc.repeatLabel(1))
+        }
+    }
+
+    @Test
+    fun `edge - repeatLabel large count`() {
+        Calculator(0).use { calc ->
+            calc.label = "item"
+            val result = calc.repeatLabel(200)
+            assertEquals(200, result.size)
+            assertEquals("item_199", result[199])
+        }
+    }
+
+    @Test
+    fun `edge - transformStrings uppercase`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf("HELLO", "WORLD"), calc.transformStrings(listOf("hello", "world")))
+        }
+    }
+
+    @Test
+    fun `edge - transformStrings empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyList<String>(), calc.transformStrings(emptyList()))
+        }
+    }
+
+    @Test
+    fun `edge - transformStrings unicode`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf("CAFÉ", "NAÏVE"), calc.transformStrings(listOf("café", "naïve")))
+        }
+    }
+
+    @Test
+    fun `edge - transformStrings single char`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf("A"), calc.transformStrings(listOf("a")))
+        }
+    }
+
+    @Test
+    fun `edge - joinLabels many items`() {
+        Calculator(0).use { calc ->
+            val items = List(50) { "item$it" }
+            val result = calc.joinLabels(items)
+            assertEquals(items.joinToString(", "), result)
+        }
+    }
+
+    // ── Map edge cases ──────────────────────────────────────────────────────
+
+    @Test
+    fun `edge - singleton map return`() {
+        Calculator(42).use { calc ->
+            val map = calc.getSingletonMap()
+            assertEquals(1, map.size)
+            assertEquals(42, map["only"])
+        }
+    }
+
+    @Test
+    fun `edge - empty map return`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyMap<String, Int>(), calc.getEmptyMap())
+        }
+    }
+
+    @Test
+    fun `edge - mergeMapValues basic`() {
+        Calculator(0).use { calc ->
+            val result = calc.mergeMapValues(mapOf("a" to 1), mapOf("b" to 2))
+            assertEquals(mapOf("a" to 1, "b" to 2), result)
+        }
+    }
+
+    @Test
+    fun `edge - mergeMapValues overlap`() {
+        Calculator(0).use { calc ->
+            val result = calc.mergeMapValues(mapOf("a" to 1, "b" to 2), mapOf("b" to 99, "c" to 3))
+            assertEquals(3, result.size)
+            assertEquals(99, result["b"]) // second map wins
+            assertEquals(3, result["c"])
+        }
+    }
+
+    @Test
+    fun `edge - mergeMapValues both empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptyMap<String, Int>(), calc.mergeMapValues(emptyMap(), emptyMap()))
+        }
+    }
+
+    @Test
+    fun `edge - mergeMapValues one empty`() {
+        Calculator(0).use { calc ->
+            val a = mapOf("x" to 42)
+            assertEquals(a, calc.mergeMapValues(a, emptyMap()))
+            assertEquals(a, calc.mergeMapValues(emptyMap(), a))
+        }
+    }
+
+    // ── Set edge cases ──────────────────────────────────────────────────────
+
+    @Test
+    fun `edge - empty set return`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptySet<Int>(), calc.getEmptySet())
+        }
+    }
+
+    @Test
+    fun `edge - intersectSets overlap`() {
+        Calculator(0).use { calc ->
+            assertEquals(setOf(2, 3), calc.intersectSets(setOf(1, 2, 3), setOf(2, 3, 4)))
+        }
+    }
+
+    @Test
+    fun `edge - intersectSets no overlap`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptySet<Int>(), calc.intersectSets(setOf(1, 2), setOf(3, 4)))
+        }
+    }
+
+    @Test
+    fun `edge - intersectSets same`() {
+        Calculator(0).use { calc ->
+            assertEquals(setOf(1, 2, 3), calc.intersectSets(setOf(1, 2, 3), setOf(1, 2, 3)))
+        }
+    }
+
+    @Test
+    fun `edge - intersectSets one empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptySet<Int>(), calc.intersectSets(setOf(1, 2), emptySet()))
+        }
+    }
+
+    @Test
+    fun `edge - intersectSets both empty`() {
+        Calculator(0).use { calc ->
+            assertEquals(emptySet<Int>(), calc.intersectSets(emptySet(), emptySet()))
+        }
+    }
+
+    // ── Callback edge cases ─────────────────────────────────────────────────
+
+    @Test
+    fun `edge - callback large list 500`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<Int>()
+            calc.onLargeListReady(500) { received = it }
+            assertEquals(500, received.size)
+            assertEquals(0, received[0])
+            assertEquals(499, received[499])
+        }
+    }
+
+    @Test
+    fun `edge - callback large list 1000`() {
+        Calculator(0).use { calc ->
+            var received = emptyList<Int>()
+            calc.onLargeListReady(1000) { received = it }
+            assertEquals(1000, received.size)
+        }
+    }
+
+    @Test
+    fun `edge - callback empty list`() {
+        Calculator(0).use { calc ->
+            var received: List<Int>? = null
+            calc.onEmptyListReady { received = it }
+            assertEquals(emptyList<Int>(), received)
+        }
+    }
+
+    @Test
+    fun `edge - callback list int negative accumulator`() {
+        Calculator(-7).use { calc ->
+            var received = emptyList<Int>()
+            calc.onScoresReady { received = it }
+            assertEquals(listOf(-7, -14, -21), received)
+        }
+    }
+
+    @Test
+    fun `edge - multiple callback invocations`() {
+        Calculator(1).use { calc ->
+            val all = mutableListOf<List<Int>>()
+            calc.onScoresReady { all.add(it) }
+            calc.add(9)
+            calc.onScoresReady { all.add(it) }
+            assertEquals(2, all.size)
+            assertEquals(listOf(1, 2, 3), all[0])
+            assertEquals(listOf(10, 20, 30), all[1])
+        }
+    }
+
+    // ── Nullable collection edge cases ──────────────────────────────────────
+
+    @Test
+    fun `edge - nullable List String return - non-null then null`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello"
+            val r1 = calc.getScoresOrNullByLabel()
+            assertEquals(listOf("hello"), r1)
+            calc.label = ""
+            assertNull(calc.getScoresOrNullByLabel())
+        }
+    }
+
+    @Test
+    fun `edge - nullable Set Int return - non-null`() {
+        Calculator(5).use { calc ->
+            val result = calc.getNullableSetByAccum()
+            assertEquals(setOf(5, 6), result)
+        }
+    }
+
+    @Test
+    fun `edge - nullable Set Int return - null`() {
+        Calculator(-1).use { calc ->
+            assertNull(calc.getNullableSetByAccum())
+        }
+    }
+
+    @Test
+    fun `edge - nullable Set Int return - zero is non-null`() {
+        Calculator(0).use { calc ->
+            val result = calc.getNullableSetByAccum()
+            assertEquals(setOf(0, 1), result)
+        }
+    }
+
+    @Test
+    fun `edge - nullable Map String String return - non-null`() {
+        Calculator(0).use { calc ->
+            calc.label = "test"
+            val result = calc.getNullableMapByLabel()
+            assertEquals(mapOf("label" to "test"), result)
+        }
+    }
+
+    @Test
+    fun `edge - nullable Map String String return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getNullableMapByLabel())
+        }
+    }
+
+    @Test
+    fun `edge - nullable List Int param - large list`() {
+        Calculator(0).use { calc ->
+            val result = calc.sumAllOrNull(List(500) { 1 })
+            assertEquals(500, result)
+        }
+    }
+
+    @Test
+    fun `edge - nullable List Int param - alternating null and non-null`() {
+        Calculator(0).use { calc ->
+            assertEquals(-1, calc.sumAllOrNull(null))
+            assertEquals(10, calc.sumAllOrNull(listOf(10)))
+            assertEquals(-1, calc.sumAllOrNull(null))
+            assertEquals(5, calc.sumAllOrNull(listOf(2, 3)))
+        }
+    }
+
+    // ── Cross-feature: collection after state mutation ───────────────────────
+
+    @Test
+    fun `cross - collection return reflects state changes`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(0, 0, 0), calc.getScores())
+            calc.add(10)
+            assertEquals(listOf(10, 20, 30), calc.getScores())
+            calc.multiply(2)
+            assertEquals(listOf(20, 40, 60), calc.getScores())
+        }
+    }
+
+    @Test
+    fun `cross - collection param mutates state then return`() {
+        Calculator(0).use { calc ->
+            calc.sumAll(listOf(5, 10, 15))
+            assertEquals(30, calc.current)
+            val weights = calc.getWeights()
+            assertEquals(30.0, weights[0], 0.001)
+        }
+    }
+
+    @Test
+    fun `cross - map return after label and scale change`() {
+        Calculator(0).use { calc ->
+            calc.add(100)
+            calc.scale = 5.0
+            val meta = calc.getMetadata()
+            assertEquals(100, meta["current"])
+            assertEquals(5, meta["scale"])
+        }
+    }
+
+    @Test
+    fun `cross - set return after multiple operations`() {
+        Calculator(0).use { calc ->
+            calc.add(12345)
+            val digits = calc.getUniqueDigits()
+            assertEquals(setOf(1, 2, 3, 4, 5), digits)
+        }
+    }
+
+    @Test
+    fun `cross - callback list after state change`() {
+        Calculator(0).use { calc ->
+            calc.add(7)
+            var received = emptyList<Int>()
+            calc.onScoresReady { received = it }
+            assertEquals(listOf(7, 14, 21), received)
+        }
+    }
+
+    @Test
+    fun `cross - List Object with state mutation`() {
+        CalculatorManager().use { mgr ->
+            val c1 = mgr.create("a", 10)
+            val c2 = mgr.create("b", 20)
+            c1.add(5) // c1 now 15
+            val all = mgr.getAll()
+            val currents = all.map { it.current }.sorted()
+            assertEquals(listOf(15, 20), currents)
+            all.forEach { it.close() }
+        }
+    }
+
+    @Test
+    fun `cross - nullable collection transition`() {
+        Calculator(0).use { calc ->
+            // accumulator = 0 → null
+            assertNull(calc.getScoresOrNull())
+            calc.add(5)
+            // accumulator = 5 → non-null
+            assertEquals(listOf(5, 10), calc.getScoresOrNull())
+            calc.subtract(5)
+            // back to 0 → null again
+            assertNull(calc.getScoresOrNull())
+        }
+    }
 }
