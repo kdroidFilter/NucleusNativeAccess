@@ -2,6 +2,7 @@ package io.github.kdroidfilter.kotlinnativeexport.plugin.analysis
 
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneConstructor
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneDataClass
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
@@ -53,15 +54,17 @@ class KotlinSourceParser {
     fun parse(files: Collection<File>, libName: String): KneModule {
         val ktFiles = files.filter { it.extension == "kt" }
 
-        // Pre-scan: collect all class and enum names for type resolution
-        val knownClasses = mutableMapOf<String, String>() // simpleName -> fqName
-        val knownEnums = mutableMapOf<String, String>() // simpleName -> fqName
+        // Pre-scan: collect all class, enum, and data class names for type resolution
+        val knownClasses = mutableMapOf<String, String>()
+        val knownEnums = mutableMapOf<String, String>()
+        val knownDataClasses = mutableMapOf<String, Pair<String, List<KneParam>>>()
         for (file in ktFiles) {
-            prescanTypes(file, knownClasses, knownEnums)
+            prescanTypes(file, knownClasses, knownEnums, knownDataClasses)
         }
-        val knownTypes = TypeMaps(knownClasses, knownEnums)
+        val knownTypes = TypeMaps(knownClasses, knownEnums, knownDataClasses)
 
         val classes = mutableListOf<KneClass>()
+        val dataClasses = mutableListOf<KneDataClass>()
         val enums = mutableListOf<KneEnum>()
         val functions = mutableListOf<KneFunction>()
         val packages = mutableSetOf<String>()
@@ -69,45 +72,97 @@ class KotlinSourceParser {
         for (file in ktFiles) {
             val result = parseFile(file, knownTypes)
             classes.addAll(result.classes)
+            dataClasses.addAll(result.dataClasses)
             enums.addAll(result.enums)
             functions.addAll(result.functions)
             result.packageName?.let { packages.add(it) }
         }
 
-        return KneModule(libName = libName, packages = packages, classes = classes, enums = enums, functions = functions)
+        return KneModule(libName = libName, packages = packages, classes = classes, dataClasses = dataClasses, enums = enums, functions = functions)
     }
 
     internal data class TypeMaps(
         val classes: Map<String, String>,
         val enums: Map<String, String>,
+        val dataClasses: Map<String, Pair<String, List<KneParam>>> = emptyMap(),
     )
 
     /**
-     * Lightweight first pass: collects class and enum simple names with their fqNames.
+     * Lightweight first pass: collects class, enum, and data class names with their fqNames.
      */
-    private fun prescanTypes(file: File, knownClasses: MutableMap<String, String>, knownEnums: MutableMap<String, String>) {
+    private fun prescanTypes(
+        file: File,
+        knownClasses: MutableMap<String, String>,
+        knownEnums: MutableMap<String, String>,
+        knownDataClasses: MutableMap<String, Pair<String, List<KneParam>>>,
+    ) {
         var packageName = ""
         for (rawLine in file.readLines()) {
             val line = rawLine.substringBefore("//").trim()
             PACKAGE_RE.find(line)?.let { packageName = it.groupValues[1] }
-            CLASS_RE.find(line)?.let { match ->
-                // Skip enum classes here (they match CLASS_RE too if preceded by `enum`)
-                if (!rawLine.trimStart().let { it.startsWith("enum ") || it.contains(" enum ") }) {
+
+            val isEnum = rawLine.trimStart().let { it.startsWith("enum ") || it.contains(" enum ") }
+            val isDataClass = line.startsWith("data class ") || line.contains(" data class ")
+
+            if (isEnum) {
+                ENUM_CLASS_RE.find(line)?.let { match ->
+                    val name = match.groupValues[1]
+                    val fq = if (packageName.isNotEmpty()) "$packageName.$name" else name
+                    knownEnums[name] = fq
+                }
+            } else if (isDataClass) {
+                CLASS_RE.find(line)?.let { match ->
+                    val name = match.groupValues[1]
+                    val fq = if (packageName.isNotEmpty()) "$packageName.$name" else name
+                    val ctorMatch = Regex("""class\s+\w+\s*\(([^)]*)\)""").find(line)
+                    val fields = ctorMatch?.let { prescanDataClassFields(it.groupValues[1]) }
+                    if (fields != null) {
+                        knownDataClasses[name] = Pair(fq, fields)
+                    } else {
+                        knownClasses[name] = fq
+                    }
+                }
+            } else {
+                CLASS_RE.find(line)?.let { match ->
                     val name = match.groupValues[1]
                     val fq = if (packageName.isNotEmpty()) "$packageName.$name" else name
                     knownClasses[name] = fq
                 }
             }
-            ENUM_CLASS_RE.find(line)?.let { match ->
-                val name = match.groupValues[1]
-                val fq = if (packageName.isNotEmpty()) "$packageName.$name" else name
-                knownEnums[name] = fq
-            }
         }
+    }
+
+    /** Extract data class fields from constructor params. Returns null if any field has unsupported type. */
+    private fun prescanDataClassFields(paramsStr: String): List<KneParam>? {
+        if (paramsStr.isBlank()) return null
+        val fields = mutableListOf<KneParam>()
+        for (raw in paramsStr.split(",")) {
+            val s = raw.trim()
+            if (!s.contains(Regex("""\bval\b|\bvar\b"""))) continue
+            val colonIdx = s.indexOf(':')
+            if (colonIdx < 0) return null
+            val name = s.substring(0, colonIdx).trim()
+                .substringAfterLast(' ').trim()
+            val typeStr = s.substring(colonIdx + 1).substringBefore('=').trim()
+            val type = when (typeStr) {
+                "Int" -> KneType.INT
+                "Long" -> KneType.LONG
+                "Double" -> KneType.DOUBLE
+                "Float" -> KneType.FLOAT
+                "Boolean" -> KneType.BOOLEAN
+                "Byte" -> KneType.BYTE
+                "Short" -> KneType.SHORT
+                "String" -> KneType.STRING
+                else -> return null
+            }
+            fields.add(KneParam(name = name, type = type))
+        }
+        return if (fields.isNotEmpty()) fields else null
     }
 
     private data class ParseResult(
         val classes: List<KneClass>,
+        val dataClasses: List<KneDataClass>,
         val enums: List<KneEnum>,
         val functions: List<KneFunction>,
         val packageName: String?,
@@ -115,6 +170,7 @@ class KotlinSourceParser {
 
     private fun parseFile(file: File, knownTypes: TypeMaps): ParseResult {
         val classes = mutableListOf<KneClass>()
+        val dataClasses = mutableListOf<KneDataClass>()
         val enums = mutableListOf<KneEnum>()
         val topLevelFunctions = mutableListOf<KneFunction>()
 
@@ -200,12 +256,20 @@ class KotlinSourceParser {
                 }
             }
 
-            // Class declaration (skip expect classes and enum classes)
+            val isDataClass = line.startsWith("data class ") || line.contains(" data class ")
+
+            // Class declaration (skip expect classes, enum classes, and data classes)
             if (!isPrivate && !isExpect && !isEnum) {
                 CLASS_RE.find(line)?.let { match ->
                     val name = match.groupValues[1]
                     // Only top-level classes (braceDepth == 0)
-                    if (braceDepth == 0) {
+                    if (braceDepth == 0 && isDataClass) {
+                        // Data class: add to dataClasses, skip body parsing
+                        val dcInfo = knownTypes.dataClasses[name]
+                        if (dcInfo != null) {
+                            dataClasses.add(KneDataClass(simpleName = name, fqName = dcInfo.first, fields = dcInfo.second))
+                        }
+                    } else if (braceDepth == 0 && !isDataClass) {
                         currentClassName = name
                         currentClassFqName = if (packageName.isNotEmpty()) "$packageName.$name" else name
                         currentClassBraceDepth = braceDepth
@@ -322,7 +386,7 @@ class KotlinSourceParser {
             }
         }
 
-        return ParseResult(classes, enums, topLevelFunctions, packageName.takeIf { it.isNotEmpty() })
+        return ParseResult(classes, dataClasses, enums, topLevelFunctions, packageName.takeIf { it.isNotEmpty() })
     }
 
     /**
@@ -419,6 +483,8 @@ class KotlinSourceParser {
             else -> {
                 val enumFq = knownTypes.enums[clean]
                 if (enumFq != null) return KneType.ENUM(enumFq, clean)
+                val dcInfo = knownTypes.dataClasses[clean]
+                if (dcInfo != null) return KneType.DATA_CLASS(dcInfo.first, clean, dcInfo.second)
                 val classFq = knownTypes.classes[clean]
                 if (classFq != null) return KneType.OBJECT(classFq, clean)
                 KneType.UNIT // Unsupported types are silently skipped for now

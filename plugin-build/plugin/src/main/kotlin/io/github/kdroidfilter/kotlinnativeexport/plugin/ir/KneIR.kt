@@ -6,8 +6,15 @@ data class KneModule(
     val libName: String,
     val packages: Set<String>,
     val classes: List<KneClass>,
+    val dataClasses: List<KneDataClass>,
     val enums: List<KneEnum>,
     val functions: List<KneFunction>,
+) : Serializable
+
+data class KneDataClass(
+    val simpleName: String,
+    val fqName: String,
+    val fields: List<KneParam>,
 ) : Serializable
 
 data class KneClass(
@@ -61,6 +68,7 @@ sealed class KneType : Serializable {
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
     data class NULLABLE(val inner: KneType) : KneType()
     data class FUNCTION(val paramTypes: List<KneType>, val returnType: KneType) : KneType()
+    data class DATA_CLASS(val fqName: String, val simpleName: String, val fields: List<KneParam>) : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -85,6 +93,7 @@ sealed class KneType : Serializable {
                 else -> inner.ffmLayout
             }
             is FUNCTION -> "JAVA_LONG" // function pointer address
+            is DATA_CLASS -> "ADDRESS" // fields are expanded, not used directly
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -103,6 +112,7 @@ sealed class KneType : Serializable {
             is ENUM -> simpleName
             is NULLABLE -> "${inner.jvmTypeName}?"
             is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
+            is DATA_CLASS -> simpleName
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -129,5 +139,19 @@ sealed class KneType : Serializable {
                 else -> inner.nativeBridgeType
             }
             is FUNCTION -> "Long" // function pointer address
+            is DATA_CLASS -> "Long" // fields are expanded, not used directly
+        }
+
+    /** The native pointer type for out-param usage (e.g. IntVar for Int). */
+    val nativePointerType: String
+        get() = when (this) {
+            INT -> "IntVar"
+            LONG -> "LongVar"
+            DOUBLE -> "DoubleVar"
+            FLOAT -> "FloatVar"
+            BOOLEAN -> "IntVar"
+            BYTE -> "ByteVar"
+            SHORT -> "ShortVar"
+            else -> "ByteVar"
         }
 }

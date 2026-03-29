@@ -696,6 +696,83 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Data classes (value marshalling across FFM boundary)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `data class return - Point with primitive fields`() {
+        Calculator(5).use { calc ->
+            val p = calc.getPoint()
+            assertEquals(5, p.x)
+            assertEquals(10, p.y)
+        }
+    }
+
+    @Test
+    fun `data class return - Point with zero`() {
+        Calculator(0).use { calc ->
+            val p = calc.getPoint()
+            assertEquals(0, p.x)
+            assertEquals(0, p.y)
+        }
+    }
+
+    @Test
+    fun `data class param - Point`() {
+        Calculator(0).use { calc ->
+            val result = calc.addPoint(Point(3, 7))
+            assertEquals(10, result)
+            assertEquals(10, calc.current)
+        }
+    }
+
+    @Test
+    fun `data class param - Point negative`() {
+        Calculator(10).use { calc ->
+            val result = calc.addPoint(Point(-3, -2))
+            assertEquals(5, result)
+        }
+    }
+
+    @Test
+    fun `data class return - NamedValue with String field`() {
+        Calculator(42).use { calc ->
+            calc.label = "test"
+            val nv = calc.getNamedValue()
+            assertEquals("test", nv.name)
+            assertEquals(42, nv.value)
+        }
+    }
+
+    @Test
+    fun `data class return - NamedValue default label`() {
+        Calculator(7).use { calc ->
+            val nv = calc.getNamedValue()
+            assertEquals("default", nv.name)
+            assertEquals(7, nv.value)
+        }
+    }
+
+    @Test
+    fun `data class param - NamedValue with String field`() {
+        Calculator(0).use { calc ->
+            calc.setFromNamed(NamedValue("hello", 99))
+            assertEquals("hello", calc.label)
+            assertEquals(99, calc.current)
+        }
+    }
+
+    @Test
+    fun `data class roundtrip - set and get`() {
+        Calculator(0).use { calc ->
+            calc.setFromNamed(NamedValue("roundtrip", 42))
+            val nv = calc.getNamedValue()
+            assertEquals("roundtrip", nv.name)
+            assertEquals(42, nv.value)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Phase 4: Callbacks / Lambdas (FFM upcall stubs)
     // ═══════════════════════════════════════════════════════════════════════════
 

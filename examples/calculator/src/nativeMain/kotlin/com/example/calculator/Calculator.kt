@@ -1,5 +1,11 @@
 package com.example.calculator
 
+// ── Data classes ────────────────────────────────────────────────────────────
+
+data class Point(val x: Int, val y: Int)
+
+data class NamedValue(val name: String, val value: Int)
+
 // ── Enum ────────────────────────────────────────────────────────────────────
 
 enum class Operation {
@@ -120,6 +126,24 @@ class Calculator(initial: Int = 0) {
     fun checkWith(predicate: (Int) -> Boolean): Boolean {
         return predicate(accumulator)
     }
+
+    // ── Data class support ────────────────────────────────────────────────
+
+    fun getPoint(): Point = Point(accumulator, accumulator * 2)
+
+    fun addPoint(p: Point): Int {
+        accumulator += p.x + p.y
+        return accumulator
+    }
+
+    fun getNamedValue(): NamedValue = NamedValue(label.ifEmpty { "default" }, accumulator)
+
+    fun setFromNamed(nv: NamedValue) {
+        label = nv.name
+        accumulator = nv.value
+    }
+
+    // ── Callback support ────────────────────────────────────────────────────
 
     fun withDescription(callback: (String) -> Unit) {
         callback("Calculator(current=$accumulator)")

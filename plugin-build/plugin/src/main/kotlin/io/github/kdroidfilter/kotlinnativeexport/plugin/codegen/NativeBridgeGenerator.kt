@@ -4,6 +4,7 @@ import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneParam
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneProperty
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
 
@@ -107,6 +108,7 @@ class NativeBridgeGenerator {
             else -> "0"
         }
         is KneType.FUNCTION -> "0" // callbacks never return error values
+        is KneType.DATA_CLASS -> "" // data class returns via out-params
     }
 
     // ── Classes ──────────────────────────────────────────────────────────────
@@ -156,12 +158,15 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
         val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
         val returnsViaBuffer = fn.returnType.returnsViaBuffer()
+        val returnsDataClass = fn.returnType is KneType.DATA_CLASS
 
+        // Build param list — expand DATA_CLASS params into flat fields
         val extraParams = if (returnsViaBuffer) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
-        val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
-        val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams"
+        val paramList = buildExpandedParamList(fn.params)
+        val dcOutParams = if (returnsDataClass) buildDataClassOutParams(fn.returnType as KneType.DATA_CLASS) else ""
+        val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams$dcOutParams"
 
-        val returnDecl = buildReturnDecl(fn.returnType)
+        val returnDecl = if (returnsDataClass) "" else buildReturnDecl(fn.returnType)
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
@@ -169,10 +174,51 @@ class NativeBridgeGenerator {
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
         appendObjectParamConversions(fn)
         val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
-        appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
-        appendTryCatchEnd(fn.returnType)
+        if (returnsDataClass) {
+            appendDataClassReturn("obj.${fn.name}($callArgs)", fn.returnType as KneType.DATA_CLASS)
+        } else {
+            appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
+        }
+        appendTryCatchEnd(if (returnsDataClass) KneType.UNIT else fn.returnType)
         appendLine("}")
         appendLine()
+    }
+
+    /** Expand params: DATA_CLASS becomes individual field params. */
+    private fun buildExpandedParamList(params: List<KneParam>): String =
+        params.flatMap { p ->
+            if (p.type is KneType.DATA_CLASS) {
+                p.type.fields.map { f -> "${p.name}_${f.name}: ${f.type.nativeBridgeType}" }
+            } else {
+                listOf("${p.name}: ${p.type.nativeBridgeType}")
+            }
+        }.joinToString(", ")
+
+    /** Build out-params for DATA_CLASS return (one per field). */
+    private fun buildDataClassOutParams(dc: KneType.DATA_CLASS): String =
+        dc.fields.joinToString("") { f ->
+            if (f.type == KneType.STRING) {
+                ", out_${f.name}: CPointer<ByteVar>?, out_${f.name}_len: Int"
+            } else {
+                ", out_${f.name}: CPointer<${f.type.nativePointerType}>?"
+            }
+        }
+
+    /** Write data class fields to out-params. */
+    private fun StringBuilder.appendDataClassReturn(expr: String, dc: KneType.DATA_CLASS) {
+        appendLine("    val _result = $expr")
+        dc.fields.forEach { f ->
+            if (f.type == KneType.STRING) {
+                appendLine("    val _${f.name}_bytes = _result.${f.name}.encodeToByteArray()")
+                appendLine("    val _${f.name}_writeLen = minOf(_${f.name}_bytes.size, out_${f.name}_len - 1)")
+                appendLine("    _${f.name}_bytes.forEachIndexed { i, b -> if (i < _${f.name}_writeLen) out_${f.name}?.set(i, b) }")
+                appendLine("    out_${f.name}?.set(_${f.name}_writeLen, 0)")
+            } else if (f.type == KneType.BOOLEAN) {
+                appendLine("    out_${f.name}!![0] = if (_result.${f.name}) 1 else 0")
+            } else {
+                appendLine("    out_${f.name}!![0] = _result.${f.name}")
+            }
+        }
     }
 
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
@@ -318,6 +364,7 @@ class NativeBridgeGenerator {
         is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         is KneType.NULLABLE -> buildNullableParamConversion(paramName, type)
         is KneType.FUNCTION -> "${paramName}Fn"
+        is KneType.DATA_CLASS -> "${paramName}Obj"
         else -> paramName
     }
 
@@ -343,6 +390,7 @@ class NativeBridgeGenerator {
         is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         is KneType.NULLABLE -> buildNullableCallArg(paramName, type)
         is KneType.FUNCTION -> "${paramName}Fn"
+        is KneType.DATA_CLASS -> "${paramName}Obj"
         else -> paramName
     }
 
@@ -379,6 +427,19 @@ class NativeBridgeGenerator {
         fn.params.filter { it.type is KneType.FUNCTION }.forEach { p ->
             val fnType = p.type as KneType.FUNCTION
             appendFunctionParamConversion(p.name, fnType)
+        }
+        // Reconstruct data classes from flattened fields
+        fn.params.filter { it.type is KneType.DATA_CLASS }.forEach { p ->
+            val dc = p.type as KneType.DATA_CLASS
+            val fieldArgs = dc.fields.joinToString(", ") { f ->
+                val fieldParam = "${p.name}_${f.name}"
+                when (f.type) {
+                    KneType.BOOLEAN -> "${f.name} = $fieldParam != 0"
+                    KneType.STRING -> "${f.name} = $fieldParam?.toKString() ?: \"\""
+                    else -> "${f.name} = $fieldParam"
+                }
+            }
+            appendLine("    val ${p.name}Obj = ${dc.fqName}($fieldArgs)")
         }
     }
 

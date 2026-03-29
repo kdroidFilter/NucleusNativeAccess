@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin.codegen
 
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneClass
+import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneDataClass
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneEnum
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneFunction
 import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneModule
@@ -58,6 +59,10 @@ class FfmProxyGenerator {
 
         files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures)
         files["KotlinNativeException.kt"] = generateException(jvmPackage)
+
+        module.dataClasses.forEach { dc ->
+            files["${dc.simpleName}.kt"] = generateDataClassFile(dc, jvmPackage)
+        }
 
         module.classes.forEach { cls ->
             files["${cls.simpleName}.kt"] = generateClassProxy(cls, module, jvmPackage)
@@ -482,20 +487,98 @@ class FfmProxyGenerator {
         // Allocate callback stubs in persistent arena (survives async calls)
         appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
 
-        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType)
-        if (needsConfinedArena) {
+        val returnsDataClass = fn.returnType is KneType.DATA_CLASS
+        val hasDataClassParams = fn.params.any { it.type is KneType.DATA_CLASS }
+        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType) || returnsDataClass ||
+            hasDataClassParams && fn.params.any { it.type is KneType.DATA_CLASS && it.type.fields.any { f -> f.type == KneType.STRING } }
+
+        if (needsConfinedArena || returnsDataClass) {
             appendLine("        Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("            ", fn.params)
-            val invokeArgs = buildClassInvokeArgs(fn)
-            appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
+            if (returnsDataClass) {
+                appendDataClassReturnProxy("            ", fn, handleName)
+            } else {
+                val invokeArgs = buildClassInvokeArgsExpanded(fn)
+                appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
+            }
             appendLine("        }")
         } else {
-            val invokeArgs = buildClassInvokeArgsDirect(fn)
+            val invokeArgs = buildClassInvokeArgsExpandedDirect(fn)
             appendCallAndReturn("        ", fn.returnType, handleName, invokeArgs)
         }
 
         appendLine("    }")
         appendLine()
+    }
+
+    /** Generate the return-via-out-params pattern for DATA_CLASS return types. */
+    private fun StringBuilder.appendDataClassReturnProxy(indent: String, fn: KneFunction, handleName: String) {
+        val dc = fn.returnType as KneType.DATA_CLASS
+
+        // Allocate out-params for each field
+        dc.fields.forEach { f ->
+            if (f.type == KneType.STRING) {
+                appendLine("${indent}val out_${f.name} = arena.allocate($STRING_BUF_SIZE.toLong())")
+            } else {
+                appendLine("${indent}val out_${f.name} = arena.allocate(${f.type.ffmLayout})")
+            }
+        }
+
+        // Build invoke args: handle + expanded params + out-params
+        val paramArgs = buildList {
+            add("handle")
+            fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            dc.fields.forEach { f ->
+                if (f.type == KneType.STRING) {
+                    add("out_${f.name}"); add("$STRING_BUF_SIZE")
+                } else {
+                    add("out_${f.name}")
+                }
+            }
+        }.joinToString(", ")
+
+        appendLine("${indent}$handleName.invoke($paramArgs)")
+        appendLine("${indent}KneRuntime.checkError()")
+
+        // Read fields and construct data class
+        val ctorArgs = dc.fields.joinToString(", ") { f ->
+            when (f.type) {
+                KneType.STRING -> "${f.name} = out_${f.name}.getString(0)"
+                KneType.BOOLEAN -> "${f.name} = out_${f.name}.get(JAVA_INT, 0) != 0"
+                else -> "${f.name} = out_${f.name}.get(${f.type.ffmLayout}, 0) as ${f.type.jvmTypeName}"
+            }
+        }
+        appendLine("${indent}return ${dc.simpleName}($ctorArgs)")
+    }
+
+    /** Build invoke args with DATA_CLASS params expanded into individual fields. */
+    private fun buildClassInvokeArgsExpanded(fn: KneFunction): String {
+        val args = buildList {
+            add("handle")
+            fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
+        }
+        return args.joinToString(", ")
+    }
+
+    private fun buildClassInvokeArgsExpandedDirect(fn: KneFunction): String {
+        val args = buildList {
+            add("handle")
+            fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+        }
+        return args.joinToString(", ")
+    }
+
+    /** Expand a single param into invoke args. DATA_CLASS becomes N args (one per field). */
+    private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
+        if (p.type !is KneType.DATA_CLASS) return listOf(buildJvmInvokeArg(p.name, p.type))
+        return p.type.fields.map { f ->
+            when (f.type) {
+                KneType.STRING -> "${p.name}_${f.name}Seg" // allocated in appendStringInvokeArgsAlloc
+                KneType.BOOLEAN -> "if (${p.name}.${f.name}) 1 else 0"
+                else -> "${p.name}.${f.name}"
+            }
+        }
     }
 
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
@@ -596,6 +679,16 @@ class FfmProxyGenerator {
         }
     }
 
+    // ── Data class file ───────────────────────────────────────────────────────
+
+    private fun generateDataClassFile(dc: KneDataClass, pkg: String): String = buildString {
+        appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
+        appendLine("package $pkg")
+        appendLine()
+        val fields = dc.fields.joinToString(", ") { "val ${it.name}: ${it.type.jvmTypeName}" }
+        appendLine("data class ${dc.simpleName}($fields)")
+    }
+
     // ── Enum proxy ───────────────────────────────────────────────────────────
 
     private fun generateEnumProxy(enum: KneEnum, module: KneModule, pkg: String): String = buildString {
@@ -680,12 +773,28 @@ class FfmProxyGenerator {
     private fun buildMethodDescriptor(fn: KneFunction): String {
         val paramLayouts = buildList {
             add("JAVA_LONG") // handle
-            fn.params.forEach { p -> add(p.type.ffmLayout) }
+            fn.params.forEach { p ->
+                if (p.type is KneType.DATA_CLASS) {
+                    p.type.fields.forEach { f -> add(f.type.ffmLayout) }
+                } else {
+                    add(p.type.ffmLayout)
+                }
+            }
             if (fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
+            if (fn.returnType is KneType.DATA_CLASS) {
+                (fn.returnType as KneType.DATA_CLASS).fields.forEach { f ->
+                    if (f.type == KneType.STRING) {
+                        add("ADDRESS"); add("JAVA_INT")
+                    } else {
+                        add("ADDRESS")
+                    }
+                }
+            }
         }
-        return buildDescriptor(fn.returnType, paramLayouts)
+        val effectiveReturn = if (fn.returnType is KneType.DATA_CLASS) KneType.UNIT else fn.returnType
+        return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
     private fun buildGetterDescriptor(prop: KneProperty): String {
@@ -796,6 +905,12 @@ class FfmProxyGenerator {
         params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}) else MemorySegment.NULL")
         }
+        // Allocate String fields from data class params
+        params.filter { it.type is KneType.DATA_CLASS }.forEach { p ->
+            (p.type as KneType.DATA_CLASS).fields.filter { it.type == KneType.STRING }.forEach { f ->
+                appendLine("${indent}val ${p.name}_${f.name}Seg = arena.allocateFrom(${p.name}.${f.name})")
+            }
+        }
     }
 
     /** Emit callback stub allocation using the persistent arena. */
@@ -875,7 +990,11 @@ class FfmProxyGenerator {
             }
             is KneType.NULLABLE -> appendNullableCallAndReturn(indent, returnType, handleName, invokeArgs)
             is KneType.FUNCTION -> {
-                // FUNCTION as return type is not supported; treat as Unit
+                appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
+            is KneType.DATA_CLASS -> {
+                // DATA_CLASS returns are handled separately in appendMethodProxy
                 appendLine("${indent}$handleName.invoke($invokeArgs)")
                 appendLine("${indent}KneRuntime.checkError()")
             }
