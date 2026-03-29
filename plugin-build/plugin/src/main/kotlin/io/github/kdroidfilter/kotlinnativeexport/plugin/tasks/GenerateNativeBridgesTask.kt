@@ -13,9 +13,11 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.SkipWhenEmpty
 import org.gradle.api.tasks.TaskAction
+import org.gradle.work.DisableCachingByDefault
 import org.gradle.workers.WorkerExecutor
 import javax.inject.Inject
 
+@DisableCachingByDefault(because = "Bridge generation depends on source analysis that is not yet cacheable")
 abstract class GenerateNativeBridgesTask : DefaultTask() {
 
     @get:Inject abstract val workerExecutor: WorkerExecutor
