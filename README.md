@@ -115,55 +115,88 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 ./gradlew run        # if using Compose Desktop / Nucleus
 ```
 
-## Supported types
+## What's supported
 
-| Kotlin type | FFM layout | Notes |
-|-------------|-----------|-------|
-| `Int` | `JAVA_INT` | direct pass-through |
-| `Long` | `JAVA_LONG` | direct pass-through |
-| `Double` | `JAVA_DOUBLE` | direct pass-through |
-| `Float` | `JAVA_FLOAT` | direct pass-through |
-| `Boolean` | `JAVA_INT` | 0/1 convention |
-| `Byte` | `JAVA_BYTE` | direct pass-through |
-| `Short` | `JAVA_SHORT` | direct pass-through |
-| `String` | `ADDRESS` | output-buffer pattern for returns |
-| `Unit` | void | `FunctionDescriptor.ofVoid(...)` |
-| Classes | `JAVA_LONG` | opaque handle via `StableRef` |
-| Enums | `JAVA_INT` | ordinal mapping |
-| Class references | `JAVA_LONG` | pass/return handles between classes |
-| `T?` (nullable) | widened | sentinel-based null encoding (see below) |
-| `(T) -> R` (lambda) | `JAVA_LONG` | FFM upcall stub address (see below) |
+### Types
+
+| Feature | As param | As return | As property | In callbacks | Notes |
+|---------|----------|-----------|-------------|--------------|-------|
+| `Int` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `Long` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `Double` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `Float` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `Boolean` | ✅ | ✅ | ✅ | ✅ param + return | 0/1 convention over FFM |
+| `Byte` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `Short` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
+| `String` | ✅ | ✅ | ✅ | ✅ param + return | output-buffer pattern for returns |
+| `Unit` | &mdash; | ✅ | &mdash; | ✅ return only | `FunctionDescriptor.ofVoid(...)` |
+| `enum class` | ✅ | ✅ | ✅ | ❌ | ordinal mapping, auto-generates JVM enum |
+| Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
+| `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding |
+| `data class` | ✅ | ✅ | &mdash; | ❌ | field decomposition (primitive + String fields) |
+| `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
+
+### Declarations
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| Top-level classes | ✅ | `StableRef` lifecycle, `AutoCloseable` on JVM |
+| Methods (fun) | ✅ | instance methods with any supported param/return types |
+| Properties (val/var) | ✅ | getters + setters, all supported types |
+| Constructors | ✅ | primary constructor with supported param types |
+| Companion objects | ✅ | static methods and properties on JVM proxy |
+| Top-level functions | ✅ | grouped into a singleton `object` on JVM |
+| Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
+| Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
+| Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
+| Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
+| Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
 
 ### Callbacks & lambdas
 
-JVM lambdas cross the FFM boundary to Kotlin/Native via upcall stubs. The plugin generates all the FFM infrastructure automatically.
+JVM lambdas cross the FFM boundary via upcall stubs. The plugin generates all the FFM infrastructure automatically.
 
 **Lifecycle**: each proxy object holds a persistent `Arena.ofShared()`. Upcall stubs live as long as the object &mdash; async callbacks (event handlers, listeners) work out of the box. The arena is freed on `close()` or GC.
 
+**Supported callback signatures**:
+- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`
+- Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`
+- Multi-param: `(T, U) -> R` with any supported types
+
 ```kotlin
-// Kotlin/Native side
-class Calculator(initial: Int = 0) {
-    fun onValueChanged(callback: (Int) -> Unit) {
-        callback(accumulator)
-    }
-    fun transform(fn: (Int) -> Int): Int {
-        accumulator = fn(accumulator)
-        return accumulator
-    }
-}
+// Kotlin/Native
+fun onValueChanged(callback: (Int) -> Unit) { callback(accumulator) }
+fun transform(fn: (Int) -> Int): Int { accumulator = fn(accumulator); return accumulator }
+fun formatWith(formatter: (Int) -> String): String = formatter(accumulator)
 
-// JVM side — lambdas are transparent
-val calc = Calculator(10)
-calc.onValueChanged { value -> println("Value: $value") }    // prints "Value: 10"
-val doubled = calc.transform { it * 2 }                       // 20
+// JVM — transparent
+calc.onValueChanged { value -> println("Value: $value") }
+calc.transform { it * 2 }
+calc.formatWith { "Result: $it" }
 
-// Async callbacks work too (e.g. native event listeners)
-desktop.setTrayClickCallback { index ->
-    println("Tray item clicked: $index")
-}
+// Async callbacks work (e.g. native event listeners)
+desktop.setTrayClickCallback { index -> println("Clicked: $index") }
 ```
 
-Supported callback signatures: primitive params (`Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`) and `Unit`/primitive returns.
+### Data classes
+
+Data classes are marshalled **by value** (field decomposition) &mdash; each field becomes a separate C ABI argument. Supported field types: all primitives + `String`.
+
+```kotlin
+// Can be in commonMain or nativeMain
+data class Point(val x: Int, val y: Int)
+
+// nativeMain
+fun getPoint(): Point = Point(accumulator, accumulator * 2)
+fun addPoint(p: Point): Int { accumulator += p.x + p.y; return accumulator }
+
+// JVM — uses the real data class (not an opaque handle)
+val p = calc.getPoint()          // Point(x=5, y=10)
+calc.addPoint(Point(3, 7))       // 10
+```
+
+- **commonMain data classes**: the JVM already has the type &mdash; no proxy generated, field marshalling only
+- **nativeMain data classes**: the plugin generates the JVM `data class` file automatically
 
 ### Exception propagation
 
@@ -174,28 +207,12 @@ All native bridge functions are wrapped in `try/catch`. When an exception occurs
 3. If an error is detected, `kne_getLastError()` retrieves the message
 4. A `KotlinNativeException(message)` is thrown on the JVM side
 
-Zero-allocation happy path: only 2 FFM calls per invocation (function + hasError check). The error path adds 1 extra call + Arena for the string buffer.
-
 ```kotlin
-// Kotlin/Native side
-fun divide(divisor: Int): Int {
-    require(divisor != 0) { "Division by zero" }
-    return accumulator / divisor
-}
-
-// JVM side — transparent exception handling
-val calc = Calculator(10)
-try {
-    calc.divide(0)
-} catch (e: KotlinNativeException) {
-    println(e.message) // "Division by zero"
-}
+try { calc.divide(0) } catch (e: KotlinNativeException) { println(e.message) }
 calc.add(5) // works normally after exception
 ```
 
 ### Nullable type encoding
-
-All nullable types are supported. The encoding uses sentinel values to represent `null` at the FFM boundary:
 
 | Nullable type | Wire type | Null sentinel |
 |---------------|-----------|---------------|
@@ -209,6 +226,26 @@ All nullable types are supported. The encoding uses sentinel values to represent
 | `Byte?` | `JAVA_INT` | `Int.MIN_VALUE` = null |
 | `Float?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
 | `Double?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
+
+## What's NOT supported
+
+| Feature | Reason | Alternative |
+|---------|--------|-------------|
+| Interfaces | Can live in `commonMain` | Define in shared KMP code |
+| Inheritance / open classes | Can live in `commonMain` | Define in shared KMP code |
+| Sealed classes | Can live in `commonMain` | Define in shared KMP code |
+| Generics | Complex type erasure at FFM boundary | Use concrete types |
+| Nested/inner classes | Parser limitation | Use top-level classes |
+| Data class fields: `Enum`, `Object`, other data classes | Not yet implemented | Use primitives + String fields |
+| Data class in callbacks | Not yet implemented | Pass individual fields |
+| Nullable data class (`DataClass?`) | Not yet implemented | Use non-null with sentinel values |
+| Enum/Object in callbacks | Not yet implemented | Use ordinal `Int` for enums |
+| Lambda as return type | Callback param only, not return | Return a class with methods instead |
+| Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
+| `ByteArray` / collections | Not yet implemented | Use individual elements or C buffers |
+| Constructor default parameters | Parser limitation | Define overloads manually |
+| Private/internal members | By design | Only public API is exported |
+| Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 
 ## Configuration reference
 
@@ -317,7 +354,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 95 tests
+./gradlew :examples:calculator:jvmTest    # 156 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
@@ -347,22 +384,7 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 ## Roadmap
 
-The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, exception propagation, and callbacks/lambdas.
-
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
-
-### What's done
-
-- [x] Classes, methods, properties, constructors
-- [x] All primitive types (`Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`)
-- [x] `String` (output-buffer pattern for returns, `CPointer<ByteVar>` for params)
-- [x] `Unit` / void functions
-- [x] Enums (ordinal mapping, enum as param/return, mutable enum properties)
-- [x] Companion objects (static methods and properties, factory functions)
-- [x] Object composition (class as param/return, `StableRef` handle passing)
-- [x] Nullable types (sentinel-based encoding for all supported types)
-- [x] Exception propagation (`@ThreadLocal` error state, `KotlinNativeException` on JVM)
-- [x] Callbacks/lambdas (FFM upcall stubs, persistent `Arena.ofShared()`, async-safe)
 
 ### Next &mdash; Packaging & deployment
 
@@ -399,12 +421,7 @@ Make the plugin production-ready with zero-config deployment.
 
 This plugin binds **only what must cross the native boundary** &mdash; platform-specific APIs (cinterop, POSIX, C libraries), performance-critical native code, and types that cannot exist in common Kotlin.
 
-Features like interfaces, inheritance, sealed classes, generics, and data classes belong in `commonMain` (shared KMP code) and do not need FFM bridges. If it can be written in common Kotlin, it should be.
-
-### Out of scope
-
-- Interfaces, inheritance, sealed classes, generics (use `commonMain`)
-- Full Kotlin Multiplatform expect/actual (that's KMP's job)
+Features like interfaces, inheritance, sealed classes, and generics belong in `commonMain` (shared KMP code) and do not need FFM bridges. Data classes are supported as value types (field marshalling) to enable natural APIs, and `commonMain` data classes are reused directly without generating duplicates.
 
 ## Requirements
 
