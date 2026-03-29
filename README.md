@@ -117,9 +117,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (616 end-to-end FFM tests)
+### Types — test coverage (648 end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all tests cross the real native boundary.
+Every test compiles Kotlin/Native → `libcalculator.so` (160+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 648 tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls) and concurrent stress tests (10 threads).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -133,7 +133,8 @@ Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols)
 | `String` | ✅ 4t | ✅ 4t | ✅ 3t | ✅ 4t | ✅ 3t | output-buffer pattern |
 | `Unit` | &mdash; | ✅ 1t | &mdash; | &mdash; | ✅ 3t | `FunctionDescriptor.ofVoid(...)` |
 | `enum class` | ✅ 3t | ✅ 2t | ✅ 2t | ✅ 2t | ✅ 3t | ordinal mapping |
-| Classes | ✅ 3t | ✅ 4t | &mdash; | ✅ 7t | ✅ 2t | opaque handle via `StableRef` |
+| Classes | ✅ 3t | ✅ 4t | &mdash; | ✅ 19t | ✅ 2t | opaque handle via `StableRef` (incl. Object in callbacks) |
+| Nested classes | ✅ | ✅ | ✅ | &mdash; | &mdash; | exported as `Outer_Inner`, supports 3+ levels |
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
