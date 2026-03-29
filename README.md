@@ -132,7 +132,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `Unit` | &mdash; | ✅ | &mdash; | ✅ return only | `FunctionDescriptor.ofVoid(...)` |
 | `enum class` | ✅ | ✅ | ✅ | ✅ param + return | ordinal mapping, auto-generates JVM enum |
 | Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
-| `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding |
+| `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ | ✅ | &mdash; | ✅ param only | field decomposition (primitive + String fields) |
 | `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
 
@@ -239,7 +239,7 @@ calc.add(5) // works normally after exception
 | Nested/inner classes | Parser limitation | Use top-level classes |
 | Data class fields: `Enum`, `Object`, other data classes | Not yet implemented | Use primitives + String fields |
 | Data class as callback return | Not yet implemented | Return individual fields or use out-param pattern |
-| Nullable data class (`DataClass?`) | Not yet implemented | Use non-null with sentinel values |
+| Nullable data class (`DataClass?`) | ✅ **Supported** | &mdash; |
 | Object (class) in callbacks | Not yet implemented | Use data class or primitives |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
@@ -355,7 +355,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 168 tests
+./gradlew :examples:calculator:jvmTest    # 174 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
