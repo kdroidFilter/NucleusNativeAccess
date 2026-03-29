@@ -605,10 +605,10 @@ class FfmProxyGenerator {
         }
         appendLine()
 
-        val ctorLayouts = buildLayouts(cls.constructor.params.map { it.type })
+        val ctorDescriptor = buildCtorDescriptor(cls.constructor.params)
         appendLine("        private val NEW_HANDLE: MethodHandle by lazy {")
         appendLine("            KneRuntime.handle(\"${p}_${n}_new\",")
-        appendLine("                FunctionDescriptor.of(JAVA_LONG$ctorLayouts))")
+        appendLine("                $ctorDescriptor)")
         appendLine("        }")
 
         // Handles for constructor overloads (trailing default params dropped)
@@ -616,10 +616,10 @@ class FfmProxyGenerator {
         for (drop in 1..trailingDefaults) {
             val requiredParams = cls.constructor.params.dropLast(drop)
             val suffix = requiredParams.size.toString()
-            val overloadLayouts = buildLayouts(requiredParams.map { it.type })
+            val overloadDescriptor = buildCtorDescriptor(requiredParams)
             appendLine("        private val NEW_HANDLE_$suffix: MethodHandle by lazy {")
             appendLine("            KneRuntime.handle(\"${p}_${n}_new$suffix\",")
-            appendLine("                FunctionDescriptor.of(JAVA_LONG$overloadLayouts))")
+            appendLine("                $overloadDescriptor)")
             appendLine("        }")
         }
         appendLine("        private val DISPOSE_HANDLE: MethodHandle by lazy {")
@@ -680,25 +680,8 @@ class FfmProxyGenerator {
         // Factory
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
-        appendLine("        /**")
-        appendLine("         * Creates a new [$n] backed by a Kotlin/Native object.")
-        appendLine("         * The native object is automatically released when GC'd or close() is called.")
-        appendLine("         */")
         appendLine("        operator fun invoke($ctorParams): $n {")
-        if (cls.constructor.params.any { it.type.isStringLike() || it.type.isFunctionType() }) {
-            appendLine("            Arena.ofConfined().use { arena ->")
-            appendStringInvokeArgsAlloc("                ", cls.constructor.params)
-            val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
-            appendLine("                val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
-            appendLine("                KneRuntime.checkError()")
-            appendLine("                return fromNativeHandle(h)")
-            appendLine("            }")
-        } else {
-            val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
-            appendLine("            val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
-            appendLine("            KneRuntime.checkError()")
-            appendLine("            return fromNativeHandle(h)")
-        }
+        appendCtorInvokeBody("            ", cls.constructor.params, "NEW_HANDLE")
         appendLine("        }")
         appendLine()
 
@@ -709,20 +692,7 @@ class FfmProxyGenerator {
             val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
             appendLine()
             appendLine("        operator fun invoke($overloadParams): $n {")
-            if (requiredParams.any { it.type.isStringLike() || it.type.isFunctionType() }) {
-                appendLine("            Arena.ofConfined().use { arena ->")
-                appendStringInvokeArgsAlloc("                ", requiredParams)
-                val args = buildCtorInvokeArgs(requiredParams)
-                appendLine("                val h = NEW_HANDLE_$suffix.invoke($args) as Long")
-                appendLine("                KneRuntime.checkError()")
-                appendLine("                return fromNativeHandle(h)")
-                appendLine("            }")
-            } else {
-                val args = buildCtorInvokeArgs(requiredParams)
-                appendLine("            val h = NEW_HANDLE_$suffix.invoke($args) as Long")
-                appendLine("            KneRuntime.checkError()")
-                appendLine("            return fromNativeHandle(h)")
-            }
+            appendCtorInvokeBody("            ", requiredParams, "NEW_HANDLE_$suffix")
             appendLine("        }")
         }
         appendLine()
@@ -757,6 +727,28 @@ class FfmProxyGenerator {
         appendLine("        runCatching { DISPOSE_HANDLE.invoke(handle) }")
         appendLine("    }")
         appendLine("}")
+    }
+
+    /** Generate the invoke body for a constructor (handles DC/String/ByteArray/collection params). */
+    private fun StringBuilder.appendCtorInvokeBody(indent: String, params: List<KneParam>, handleName: String) {
+        val hasDc = params.any { extractDataClass(it.type) != null }
+        val hasCollection = params.any { it.type.isCollection() }
+        val needsArena = params.any { it.type.isStringLike() || it.type.isByteArrayType() || it.type.isFunctionType() } || hasDc || hasCollection
+        if (needsArena) {
+            appendLine("${indent}Arena.ofConfined().use { arena ->")
+            appendStringInvokeArgsAlloc("$indent    ", params)
+            appendCollectionParamAlloc("$indent    ", params)
+            val args = buildList { params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) } }.joinToString(", ")
+            appendLine("$indent    val h = $handleName.invoke($args) as Long")
+            appendLine("$indent    KneRuntime.checkError()")
+            appendLine("$indent    return fromNativeHandle(h)")
+            appendLine("${indent}}")
+        } else {
+            val args = params.joinToString(", ") { buildJvmInvokeArg(it.name, it.type) }
+            appendLine("${indent}val h = $handleName.invoke($args) as Long")
+            appendLine("${indent}KneRuntime.checkError()")
+            appendLine("${indent}return fromNativeHandle(h)")
+        }
     }
 
     private fun StringBuilder.appendMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
@@ -1214,6 +1206,30 @@ class FfmProxyGenerator {
 
     private fun buildLayouts(types: List<KneType>): String =
         types.filter { it.ffmLayout.isNotEmpty() }.joinToString("") { ", ${it.ffmLayout}" }
+
+    /** Build a FunctionDescriptor for a constructor, expanding DC/ByteArray/collection params. */
+    private fun buildCtorDescriptor(params: List<KneParam>): String {
+        val layouts = buildList {
+            params.forEach { p ->
+                val dc = extractDataClass(p.type)
+                if (dc != null) {
+                    if (p.type is KneType.NULLABLE) add("JAVA_INT")
+                    flattenDcFields(dc, "").forEach { (_, type) ->
+                        when (type) { KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }; else -> add(type.ffmLayout) }
+                    }
+                } else if (p.type == KneType.BYTE_ARRAY) { add("ADDRESS"); add("JAVA_INT") }
+                else if (p.type.isCollection()) {
+                    val inner = p.type.unwrapCollection()
+                    when (inner) {
+                        is KneType.LIST, is KneType.SET -> { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
+                        else -> add(p.type.ffmLayout)
+                    }
+                } else add(p.type.ffmLayout)
+            }
+        }
+        return buildDescriptor(KneType.LONG, layouts) // constructor returns Long handle
+    }
 
     // ── Invoke arg builders ──────────────────────────────────────────────────
 

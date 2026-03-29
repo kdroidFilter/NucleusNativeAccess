@@ -4172,4 +4172,129 @@ class CalculatorTest {
             assertEquals(listOf(5, 10), calc.getScoresOrNull())
         }
     }
+
+    // ── Constructor default: nested DC (StyledCalculator) ───────────────────
+
+    @Test fun `styled - no-arg uses all defaults`() {
+        StyledCalculator().use { calc ->
+            assertEquals(0, calc.current)
+            assertEquals("default", calc.getTag())
+            assertEquals(Operation.ADD, calc.getMode())
+            val config = calc.getConfig()
+            assertEquals(0, config.origin.x)
+            assertEquals(0, config.origin.y)
+            assertEquals(1, config.scale)
+        }
+    }
+
+    @Test fun `styled - partial initial only`() {
+        StyledCalculator(42).use { calc ->
+            assertEquals(42, calc.current)
+            assertEquals("default", calc.getTag()) // default
+            assertEquals(Operation.ADD, calc.getMode()) // default
+        }
+    }
+
+    @Test fun `styled - partial initial + config`() {
+        StyledCalculator(10, Config(Point(5, 5), 3)).use { calc ->
+            assertEquals(10, calc.current)
+            val config = calc.getConfig()
+            assertEquals(5, config.origin.x)
+            assertEquals(5, config.origin.y)
+            assertEquals(3, config.scale)
+            assertEquals("default", calc.getTag()) // still default
+        }
+    }
+
+    @Test fun `styled - partial initial + config + mode`() {
+        StyledCalculator(1, Config(Point(1, 2), 10), Operation.MULTIPLY).use { calc ->
+            assertEquals(1, calc.current)
+            assertEquals(Operation.MULTIPLY, calc.getMode())
+            assertEquals("default", calc.getTag()) // still default
+        }
+    }
+
+    @Test fun `styled - full all params`() {
+        StyledCalculator(99, Config(Point(10, 20), 5), Operation.SUBTRACT, "custom").use { calc ->
+            assertEquals(99, calc.current)
+            assertEquals("custom", calc.getTag())
+            assertEquals(Operation.SUBTRACT, calc.getMode())
+            val config = calc.getConfig()
+            assertEquals(10, config.origin.x)
+            assertEquals(20, config.origin.y)
+            assertEquals(5, config.scale)
+        }
+    }
+
+    @Test fun `styled - methods work after construction`() {
+        StyledCalculator().use { calc ->
+            calc.add(10)
+            assertEquals(10, calc.current)
+            assertEquals("StyledCalculator(current=10, tag=default, mode=ADD)", calc.describe())
+        }
+    }
+
+    @Test fun `styled - full then add`() {
+        StyledCalculator(5, Config(Point(1, 1), 2), Operation.MULTIPLY, "test").use { calc ->
+            calc.add(15)
+            assertEquals(20, calc.current)
+            assertEquals("StyledCalculator(current=20, tag=test, mode=MULTIPLY)", calc.describe())
+        }
+    }
+
+    // ── Constructor default: deeply nested DC (FramedCalculator) ─────────────
+
+    @Test fun `framed - no-arg uses all defaults`() {
+        FramedCalculator().use { calc ->
+            assertEquals(0, calc.current)
+            assertEquals("framed", calc.getLabel())
+            val frame = calc.getFrame()
+            assertEquals(0, frame.topLeft.x)
+            assertEquals(0, frame.topLeft.y)
+            assertEquals(100, frame.bottomRight.x)
+            assertEquals(100, frame.bottomRight.y)
+        }
+    }
+
+    @Test fun `framed - partial initial only`() {
+        FramedCalculator(42).use { calc ->
+            assertEquals(42, calc.current)
+            assertEquals("framed", calc.getLabel()) // default
+            assertEquals(100, calc.getFrame().bottomRight.x) // default
+        }
+    }
+
+    @Test fun `framed - partial initial + frame`() {
+        FramedCalculator(10, Rect(Point(1, 2), Point(3, 4))).use { calc ->
+            assertEquals(10, calc.current)
+            val frame = calc.getFrame()
+            assertEquals(1, frame.topLeft.x)
+            assertEquals(2, frame.topLeft.y)
+            assertEquals(3, frame.bottomRight.x)
+            assertEquals(4, frame.bottomRight.y)
+            assertEquals("framed", calc.getLabel()) // still default
+        }
+    }
+
+    @Test fun `framed - full all params`() {
+        FramedCalculator(7, Rect(Point(10, 20), Point(30, 40)), "custom").use { calc ->
+            assertEquals(7, calc.current)
+            assertEquals("custom", calc.getLabel())
+            assertEquals(10, calc.getFrame().topLeft.x)
+            assertEquals(40, calc.getFrame().bottomRight.y)
+        }
+    }
+
+    @Test fun `framed - methods work`() {
+        FramedCalculator().use { calc ->
+            calc.add(25)
+            assertEquals(25, calc.current)
+        }
+    }
+
+    @Test fun `framed - negative initial`() {
+        FramedCalculator(-10).use { calc ->
+            assertEquals(-10, calc.current)
+        }
+    }
 }

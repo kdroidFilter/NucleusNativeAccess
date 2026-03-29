@@ -139,18 +139,16 @@ class NativeBridgeGenerator {
         val n = cls.simpleName
         val fq = cls.fqName
 
-        // Constructor (full — all params)
-        val ctorArgs = cls.constructor.params.joinToString(", ") { param ->
-            "${param.name}: ${param.type.nativeBridgeType}"
-        }
-        val ctorCall = cls.constructor.params.joinToString(", ") { param ->
-            buildParamConversion(param.name, param.type)
-        }
+        // Constructor (full — all params, expanded for DC/ByteArray/collections)
+        val ctorArgs = buildExpandedParamList(cls.constructor.params)
         appendLine("@CName(\"${p}_${n}_new\")")
         appendLine("fun `${p}_${n}_new`($ctorArgs): Long {")
         appendTryCatchStart()
+        val dummyCtorFn = KneFunction("_ctor", cls.constructor.params, KneType.UNIT)
+        appendObjectParamConversions(dummyCtorFn)
+        val ctorCall = cls.constructor.params.joinToString(", ") { buildCallArg(it.name, it.type) }
         appendLine("    return StableRef.create($fq($ctorCall)).asCPointer().toLong()")
-        appendTryCatchEnd(KneType.LONG) // Long handle
+        appendTryCatchEnd(KneType.LONG)
         appendLine("}")
         appendLine()
 
@@ -159,11 +157,15 @@ class NativeBridgeGenerator {
         for (drop in 1..trailingDefaults) {
             val requiredParams = cls.constructor.params.dropLast(drop)
             val suffix = requiredParams.size.toString()
-            val oArgs = requiredParams.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
-            val oCall = requiredParams.joinToString(", ") { "${it.name} = ${buildParamConversion(it.name, it.type)}" }
+            // Expand DC/ByteArray/collection params into flat native args
+            val oArgs = buildExpandedParamList(requiredParams)
             appendLine("@CName(\"${p}_${n}_new$suffix\")")
             appendLine("fun `${p}_${n}_new$suffix`($oArgs): Long {")
             appendTryCatchStart()
+            // Reconstruct complex types from flat params (String, ByteArray, Object, DC, collections)
+            val dummyFn = KneFunction("_ctor", requiredParams, KneType.UNIT)
+            appendObjectParamConversions(dummyFn)
+            val oCall = requiredParams.joinToString(", ") { "${it.name} = ${buildCallArg(it.name, it.type)}" }
             appendLine("    return StableRef.create($fq($oCall)).asCPointer().toLong()")
             appendTryCatchEnd(KneType.LONG)
             appendLine("}")

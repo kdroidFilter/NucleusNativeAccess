@@ -487,3 +487,34 @@ class CalculatorManager {
 
     fun getAllOrNull(): List<Calculator>? = if (calculators.isEmpty()) null else calculators.values.toList()
 }
+
+// ── Classes with complex default parameters ─────────────────────────────────
+
+data class Config(val origin: Point, val scale: Int)
+
+class StyledCalculator(
+    initial: Int = 0,
+    val config: Config = Config(Point(0, 0), 1),
+    val mode: Operation = Operation.ADD,
+    val tag: String = "default",
+) {
+    private var accumulator: Int = initial
+    val current: Int get() = accumulator
+    fun getConfig(): Config = config
+    fun getMode(): Operation = mode
+    fun getTag(): String = tag
+    fun add(value: Int): Int { accumulator += value; return accumulator }
+    fun describe(): String = "StyledCalculator(current=$accumulator, tag=$tag, mode=$mode)"
+}
+
+class FramedCalculator(
+    initial: Int = 0,
+    val frame: Rect = Rect(Point(0, 0), Point(100, 100)),
+    val label: String = "framed",
+) {
+    private var accumulator: Int = initial
+    val current: Int get() = accumulator
+    fun getFrame(): Rect = frame
+    fun getLabel(): String = label
+    fun add(value: Int): Int { accumulator += value; return accumulator }
+}
