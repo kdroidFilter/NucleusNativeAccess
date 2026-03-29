@@ -122,16 +122,22 @@ fun SystemInfoScreen() {
 
         var trayVisible by remember { mutableStateOf(false) }
         var lastTrayClick by remember { mutableStateOf<String?>(null) }
+        var clickCounts by remember { mutableStateOf(mapOf<Int, Int>()) }
 
         val trayLabels = listOf("Hostname", "CPU", "Cores", "Memory", "Uptime", "Kernel")
 
-        // Collect tray clicks via Flow (instead of callback)
+        // Collect tray clicks via Flow — updates label with click count
         if (trayVisible) {
             LaunchedEffect(Unit) {
                 desktop.trayClicks().collect { index ->
-                    val label = trayLabels.getOrElse(index) { "Item $index" }
-                    lastTrayClick = label
-                    println("[JVM] Tray item clicked via Flow: $label (index=$index)")
+                    val baseLabel = trayLabels.getOrElse(index) { "Item $index" }
+                    val count = (clickCounts[index] ?: 0) + 1
+                    clickCounts = clickCounts + (index to count)
+                    lastTrayClick = "$baseLabel (clicked $count×)"
+
+                    // Update the native tray label dynamically
+                    desktop.updateTrayLabel(index, "$baseLabel [$count clicks]")
+                    println("[JVM] Tray: $baseLabel clicked $count time(s)")
                 }
             }
         }

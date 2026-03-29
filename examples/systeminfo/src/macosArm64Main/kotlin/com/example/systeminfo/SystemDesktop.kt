@@ -105,6 +105,8 @@ actual class SystemDesktop {
         return true
     }
 
+    actual fun updateTrayLabel(index: Int, label: String): Boolean = false
+
     actual fun trayClicks(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.emptyFlow()
 
     private fun formatUptime(seconds: Double): String {

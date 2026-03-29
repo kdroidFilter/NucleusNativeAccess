@@ -132,6 +132,10 @@ static void _sni_name_acquired(GDBusConnection *conn, const gchar *name, gpointe
     if (err) g_error_free(err);
 }
 
+#define SNI_MAX_ITEMS 32
+static DbusmenuMenuitem *_sni_items[SNI_MAX_ITEMS];
+static int _sni_item_count = 0;
+
 static void _sni_item_activated(DbusmenuMenuitem *item, guint timestamp, gpointer data) {
     int index = GPOINTER_TO_INT(data);
     if (_sni_click_fn) _sni_click_fn(index);
@@ -156,14 +160,16 @@ static int systray_show_dbus(const char* title, const char** labels, int count) 
     if (!_sni_intro) return 0;
 
     /* Build dbusmenu */
+    _sni_item_count = count < SNI_MAX_ITEMS ? count : SNI_MAX_ITEMS;
     DbusmenuMenuitem *root = dbusmenu_menuitem_new();
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < _sni_item_count; i++) {
         DbusmenuMenuitem *item = dbusmenu_menuitem_new();
         dbusmenu_menuitem_property_set(item, DBUSMENU_MENUITEM_PROP_LABEL, labels[i]);
         dbusmenu_menuitem_property_set_bool(item, DBUSMENU_MENUITEM_PROP_ENABLED, TRUE);
         g_signal_connect(item, DBUSMENU_MENUITEM_SIGNAL_ITEM_ACTIVATED,
             G_CALLBACK(_sni_item_activated), GINT_TO_POINTER(i));
         dbusmenu_menuitem_child_append(root, item);
+        _sni_items[i] = item;
     }
     _sni_menu_server = dbusmenu_server_new("/MenuBar");
     dbusmenu_server_set_root(_sni_menu_server, root);
@@ -180,6 +186,12 @@ static int systray_show_dbus(const char* title, const char** labels, int count) 
         NULL, NULL, NULL);
 
     _sni_thread = g_thread_new("sni", _sni_run, _sni_loop);
+    return 1;
+}
+
+static int systray_update_label(int index, const char* label) {
+    if (index < 0 || index >= _sni_item_count || !_sni_items[index]) return 0;
+    dbusmenu_menuitem_property_set(_sni_items[index], DBUSMENU_MENUITEM_PROP_LABEL, label);
     return 1;
 }
 
@@ -209,6 +221,8 @@ static int systray_hide_dbus(void) {
     _sni_intro = NULL;
     g_free(_sni_title);  _sni_title = NULL;
     g_free(_sni_body);   _sni_body = NULL;
+    for (int i = 0; i < _sni_item_count; i++) _sni_items[i] = NULL;
+    _sni_item_count = 0;
 
     return 1;
 }

@@ -98,6 +98,10 @@ actual class SystemDesktop {
         return systray_hide_dbus() != 0
     }
 
+    actual fun updateTrayLabel(index: Int, label: String): Boolean {
+        return systray_update_label(index, label) != 0
+    }
+
     actual fun trayClicks(): Flow<Int> = callbackFlow {
         trayClickEmitter = { index -> trySend(index) }
         systray_set_click_callback(staticCFunction { index ->

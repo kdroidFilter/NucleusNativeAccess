@@ -16,5 +16,6 @@ expect class SystemDesktop() {
     fun getKernelVersion(): String
     fun showSystemTray(): Boolean
     fun hideSystemTray(): Boolean
+    fun updateTrayLabel(index: Int, label: String): Boolean
     fun trayClicks(): kotlinx.coroutines.flow.Flow<Int>
 }
