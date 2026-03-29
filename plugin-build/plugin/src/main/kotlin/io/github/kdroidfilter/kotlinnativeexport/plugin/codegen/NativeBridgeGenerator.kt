@@ -445,24 +445,35 @@ class NativeBridgeGenerator {
 
     /** Generate a Kotlin lambda wrapper that calls through the native CFunction pointer. */
     private fun StringBuilder.appendFunctionParamConversion(paramName: String, fnType: KneType.FUNCTION) {
-        val cFuncParams = fnType.paramTypes.joinToString(", ") { cFunctionParamType(it) }
+        // Expand DATA_CLASS params into individual fields at C ABI level
+        val cFuncParams = fnType.paramTypes.flatMap { expandCFuncParamTypes(it) }.joinToString(", ")
         val cFuncReturn = cFunctionReturnType(fnType.returnType)
         val cFuncType = "CFunction<($cFuncParams) -> $cFuncReturn>"
 
         val lambdaParams = fnType.paramTypes.mapIndexed { i, t -> "_p$i: ${t.jvmTypeName}" }
         val lambdaParamsStr = lambdaParams.joinToString(", ")
-        val hasStringParams = fnType.paramTypes.any { it == KneType.STRING }
+        val hasStringInvoke = fnType.paramTypes.any {
+            it == KneType.STRING || (it is KneType.DATA_CLASS && it.fields.any { f -> f.type == KneType.STRING })
+        }
 
         appendLine("    val ${paramName}Fn: ${fnType.jvmTypeName} = { $lambdaParamsStr ->")
-        if (hasStringParams) {
+        if (hasStringInvoke) {
             appendLine("        memScoped {")
         }
         appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
 
+        // Build invoke args — decompose DATA_CLASS into fields
         val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
                 KneType.STRING -> "_p$i.cstr.ptr"
+                is KneType.DATA_CLASS -> t.fields.joinToString(", ") { f ->
+                    when (f.type) {
+                        KneType.BOOLEAN -> "if (_p$i.${f.name}) 1 else 0"
+                        KneType.STRING -> "_p$i.${f.name}.cstr.ptr"
+                        else -> "_p$i.${f.name}"
+                    }
+                }
                 else -> "_p$i"
             }
         }.joinToString(", ")
@@ -476,10 +487,16 @@ class NativeBridgeGenerator {
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }
-        if (hasStringParams) {
+        if (hasStringInvoke) {
             appendLine("        }")
         }
         appendLine("    }")
+    }
+
+    /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. */
+    private fun expandCFuncParamTypes(type: KneType): List<String> = when (type) {
+        is KneType.DATA_CLASS -> type.fields.map { cFunctionParamType(it.type) }
+        else -> listOf(cFunctionParamType(type))
     }
 
     /** Map a KneType to the corresponding C-ABI type for CFunction signatures. */

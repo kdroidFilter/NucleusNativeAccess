@@ -538,7 +538,7 @@ class KotlinSourceParser {
         val paramTypes = if (paramsStr.isEmpty()) emptyList()
         else paramsStr.split(",").map { parseType(it.trim(), knownTypes) }
 
-        val supportedCallbackParams = setOf(
+        val supportedCallbackPrimitive = setOf(
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING,
         )
@@ -548,7 +548,8 @@ class KotlinSourceParser {
             KneType.STRING,
         )
         val returnType = parseType(returnStr, knownTypes)
-        if (paramTypes.any { it !in supportedCallbackParams } || returnType !in supportedCallbackReturns) return null
+        val unsupportedParam = paramTypes.any { it !in supportedCallbackPrimitive && it !is KneType.DATA_CLASS }
+        if (unsupportedParam || returnType !in supportedCallbackReturns) return null
 
         return KneType.FUNCTION(paramTypes, returnType)
     }

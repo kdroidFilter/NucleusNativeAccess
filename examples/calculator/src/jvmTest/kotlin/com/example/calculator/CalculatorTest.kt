@@ -834,6 +834,71 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Data classes in callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback (Point) to Unit - receives point`() {
+        Calculator(5).use { calc ->
+            var received: Point? = null
+            calc.onPointComputed { p -> received = p }
+            assertEquals(Point(5, 10), received)
+        }
+    }
+
+    @Test
+    fun `callback (Point) to Unit - zero values`() {
+        Calculator(0).use { calc ->
+            var received: Point? = null
+            calc.onPointComputed { p -> received = p }
+            assertEquals(Point(0, 0), received)
+        }
+    }
+
+    @Test
+    fun `callback (Point) to Unit - negative values`() {
+        Calculator(-3).use { calc ->
+            var received: Point? = null
+            calc.onPointComputed { p -> received = p }
+            assertEquals(Point(-3, -6), received)
+        }
+    }
+
+    @Test
+    fun `callback (CalcResult) to Unit - common data class`() {
+        Calculator(42).use { calc ->
+            var received: CalcResult? = null
+            calc.onResultReady { r -> received = r }
+            assertEquals(CalcResult(42, "Result: 42"), received)
+        }
+    }
+
+    @Test
+    fun `callback (CalcResult) to Unit - String field preserved`() {
+        Calculator(7).use { calc ->
+            var receivedDesc = ""
+            calc.onResultReady { r -> receivedDesc = r.description }
+            assertEquals("Result: 7", receivedDesc)
+        }
+    }
+
+    @Test
+    fun `callback (Point) to Int - transform point`() {
+        Calculator(5).use { calc ->
+            val result = calc.transformPoint { p -> p.x + p.y }
+            assertEquals(15, result) // 5 + 10
+        }
+    }
+
+    @Test
+    fun `callback (Point) to Int - use only x`() {
+        Calculator(7).use { calc ->
+            val result = calc.transformPoint { p -> p.x * 3 }
+            assertEquals(21, result)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Edge cases: primitives at boundaries
     // ═══════════════════════════════════════════════════════════════════════════
 

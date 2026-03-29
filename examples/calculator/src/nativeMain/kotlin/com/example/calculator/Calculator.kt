@@ -168,6 +168,19 @@ class Calculator(initial: Int = 0) {
         return label
     }
 
+    fun onPointComputed(callback: (Point) -> Unit) {
+        callback(Point(accumulator, accumulator * 2))
+    }
+
+    fun onResultReady(callback: (CalcResult) -> Unit) {
+        callback(CalcResult(accumulator, "Result: $accumulator"))
+    }
+
+    fun transformPoint(fn: (Point) -> Int): Int {
+        accumulator = fn(Point(accumulator, accumulator * 2))
+        return accumulator
+    }
+
     fun findAndReport(keyword: String, callback: (String, Int) -> Unit) {
         val found = if (label.contains(keyword)) 1 else 0
         callback(label, found)

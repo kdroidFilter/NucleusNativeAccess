@@ -208,9 +208,20 @@ class FfmProxyGenerator {
         val paramCount = sig.paramTypes.size
 
         // Static upcall target method
+        // Expand DATA_CLASS params into individual field params at C ABI level
+        data class FlatParam(val name: String, val type: KneType)
+        val flatParams = mutableListOf<FlatParam>()
+        sig.paramTypes.forEachIndexed { i, t ->
+            if (t is KneType.DATA_CLASS) {
+                t.fields.forEach { f -> flatParams.add(FlatParam("p${i}_${f.name}", f.type)) }
+            } else {
+                flatParams.add(FlatParam("p$i", t))
+            }
+        }
+
         val targetParams = buildList {
             add("fn: Any")
-            sig.paramTypes.forEachIndexed { i, t -> add("p$i: ${upcallJvmType(t)}") }
+            flatParams.forEach { add("${it.name}: ${upcallJvmType(it.type)}") }
         }.joinToString(", ")
 
         val returnJvmType = upcallJvmType(sig.returnType)
@@ -220,23 +231,25 @@ class FfmProxyGenerator {
         appendLine("    @JvmStatic")
         appendLine("    fun _upcall_$id($targetParams)$returnDecl {")
 
-        // Build the lambda invocation with type conversions
-        val fnTypeStr = sig.jvmTypeName
-        val invokeArgs = sig.paramTypes.mapIndexed { i, t ->
-            when (t) {
-                KneType.BOOLEAN -> "p$i != 0"
-                else -> "p$i"
-            }
-        }.joinToString(", ")
-
         appendLine("        @Suppress(\"UNCHECKED_CAST\")")
-        appendLine("        val _fn = fn as $fnTypeStr")
+        appendLine("        val _fn = fn as ${sig.jvmTypeName}")
 
-        // Convert C ABI values to Kotlin types
+        // Reconstruct DATA_CLASS params from flat fields, convert others
         val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
                 KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
+                is KneType.DATA_CLASS -> {
+                    val fieldArgs = t.fields.joinToString(", ") { f ->
+                        val pName = "p${i}_${f.name}"
+                        when (f.type) {
+                            KneType.BOOLEAN -> "${f.name} = $pName != 0"
+                            KneType.STRING -> "${f.name} = $pName.reinterpret(8192).getString(0)"
+                            else -> "${f.name} = $pName"
+                        }
+                    }
+                    "${t.simpleName}($fieldArgs)"
+                }
                 else -> "p$i"
             }
         }.joinToString(", ")
@@ -256,7 +269,7 @@ class FfmProxyGenerator {
         val methodTypeArgs = buildList {
             add(upcallMethodTypeArg(sig.returnType))
             add("Any::class.java")
-            sig.paramTypes.forEach { t -> add(upcallMethodTypeArg(t)) }
+            flatParams.forEach { add(upcallMethodTypeArg(it.type)) }
         }.joinToString(", ")
 
         appendLine()
@@ -267,8 +280,8 @@ class FfmProxyGenerator {
         appendLine("        )")
         appendLine("    }")
 
-        // FunctionDescriptor for the callback's C ABI
-        val descLayouts = sig.paramTypes.joinToString(", ") { upcallLayout(it) }
+        // FunctionDescriptor for the callback's C ABI (DATA_CLASS expanded to fields)
+        val descLayouts = flatParams.joinToString(", ") { upcallLayout(it.type) }
         val descExpr = if (sig.returnType == KneType.UNIT) {
             if (descLayouts.isEmpty()) "FunctionDescriptor.ofVoid()"
             else "FunctionDescriptor.ofVoid($descLayouts)"
@@ -281,7 +294,7 @@ class FfmProxyGenerator {
 
         // Factory method to create upcall stubs
         appendLine()
-        appendLine("    fun createUpcallStub_$id(fn: $fnTypeStr, arena: Arena): Long {")
+        appendLine("    fun createUpcallStub_$id(fn: ${sig.jvmTypeName}, arena: Arena): Long {")
         appendLine("        val bound = UPCALL_MH_$id.bindTo(fn)")
         appendLine("        return linker.upcallStub(bound, UPCALL_DESC_$id, arena).address()")
         appendLine("    }")
