@@ -6,6 +6,14 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitAll
 
 /**
  * Comprehensive test suite for the Kotlin Native Export plugin.
@@ -5526,6 +5534,190 @@ class CalculatorTest {
             assertEquals(Point(1, 1), pts!![0])
             calc.reset()
             assertNull(calc.getPointsOrNull())
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SUSPEND FUNCTIONS — BATTLE TESTED
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Basic suspend return types ──────────────────────────────────────────
+
+    @Test fun `suspend - delayedAdd Int return`() = runBlocking {
+        Calculator(0).use { calc -> assertEquals(7, calc.delayedAdd(3, 4)) }
+    }
+
+    @Test fun `suspend - delayedAdd updates accumulator`() = runBlocking {
+        Calculator(0).use { calc ->
+            calc.delayedAdd(10, 20)
+            assertEquals(30, calc.current)
+        }
+    }
+
+    @Test fun `suspend - delayedDescribe String return`() = runBlocking {
+        Calculator(42).use { calc ->
+            assertEquals("Calculator(current=42)", calc.delayedDescribe())
+        }
+    }
+
+    @Test fun `suspend - instantReturn no delay`() = runBlocking {
+        Calculator(99).use { calc -> assertEquals(99, calc.instantReturn()) }
+    }
+
+    @Test fun `suspend - delayedIsPositive Boolean return true`() = runBlocking {
+        Calculator(5).use { calc -> assertTrue(calc.delayedIsPositive()) }
+    }
+
+    @Test fun `suspend - delayedIsPositive Boolean return false`() = runBlocking {
+        Calculator(-1).use { calc -> assertFalse(calc.delayedIsPositive()) }
+    }
+
+    @Test fun `suspend - delayedGetOp Enum return`() = runBlocking {
+        Calculator(0).use { calc ->
+            calc.applyOp(Operation.MULTIPLY, 5)
+            assertEquals(Operation.MULTIPLY, calc.delayedGetOp())
+        }
+    }
+
+    @Test fun `suspend - delayedNullable non-null`() = runBlocking {
+        Calculator(5).use { calc ->
+            assertEquals("positive(5)", calc.delayedNullable())
+        }
+    }
+
+    @Test fun `suspend - delayedNullable null`() = runBlocking {
+        Calculator(0).use { calc ->
+            assertNull(calc.delayedNullable())
+        }
+    }
+
+    @Test fun `suspend - delayedNullable negative`() = runBlocking {
+        Calculator(-1).use { calc ->
+            assertNull(calc.delayedNullable())
+        }
+    }
+
+    // ── Error propagation ───────────────────────────────────────────────────
+
+    @Test fun `suspend - failAfterDelay throws`() = runBlocking {
+        Calculator(0).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.failAfterDelay() }
+        }
+    }
+
+    @Test fun `suspend - failAfterDelay message`() = runBlocking {
+        Calculator(0).use { calc ->
+            val e = assertFailsWith<KotlinNativeException> { calc.failAfterDelay() }
+            assertTrue(e.message!!.contains("intentional suspend error"))
+        }
+    }
+
+    @Test fun `suspend - error then success`() = runBlocking {
+        Calculator(0).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.failAfterDelay() }
+            assertEquals(10, calc.delayedAdd(4, 6)) // still works
+        }
+    }
+
+    // ── Cancellation ────────────────────────────────────────────────────────
+
+    @Test fun `suspend - JVM cancel propagates to native`() = runBlocking {
+        Calculator(0).use { calc ->
+            val start = System.currentTimeMillis()
+            val job = launch { calc.longDelay() }
+            delay(200)
+            job.cancelAndJoin()
+            val elapsed = System.currentTimeMillis() - start
+            assertTrue(elapsed < 2000, "Should cancel fast, took ${elapsed}ms")
+        }
+    }
+
+    @Test fun `suspend - cancel throws CancellationException`() = runBlocking {
+        Calculator(0).use { calc ->
+            val deferred = async { calc.longDelay() }
+            delay(200)
+            deferred.cancel()
+            assertFailsWith<CancellationException> { deferred.await() }
+        }
+    }
+
+    // ── Concurrency ─────────────────────────────────────────────────────────
+
+    @Test fun `suspend - 50 concurrent delayedAdd`() = runBlocking {
+        Calculator(0).use { calc ->
+            val results = (1..50).map { i ->
+                async(Dispatchers.Default) { calc.delayedAdd(i, 0) }
+            }.awaitAll()
+            assertEquals(50, results.size)
+        }
+    }
+
+    @Test fun `suspend - 100 concurrent on separate instances`() = runBlocking {
+        val results = (1..100).map { i ->
+            async(Dispatchers.Default) {
+                Calculator(i).use { calc -> calc.delayedAdd(0, i) }
+            }
+        }.awaitAll()
+        assertEquals((1..100).toList(), results)
+    }
+
+    @Test fun `suspend - 10 concurrent with different return types`() = runBlocking {
+        Calculator(5).use { calc ->
+            val jobs = listOf(
+                async { calc.delayedAdd(1, 2) },
+                async { calc.delayedDescribe() },
+                async { calc.delayedIsPositive() },
+                async { calc.delayedGetOp() },
+                async { calc.delayedNullable() },
+                async { calc.instantReturn() },
+            )
+            jobs.forEach { it.await() }
+        }
+    }
+
+    // ── Load / stress ───────────────────────────────────────────────────────
+
+    @Test fun `suspend - 1K sequential calls`() = runBlocking {
+        Calculator(0).use { calc ->
+            repeat(1_000) {
+                calc.delayedAdd(1, 0)
+            }
+            // accumulator was overwritten each time to 1
+            assertEquals(1, calc.current)
+        }
+    }
+
+    @Test fun `suspend - 500 instant returns`() = runBlocking {
+        Calculator(42).use { calc ->
+            repeat(500) {
+                assertEquals(42, calc.instantReturn())
+            }
+        }
+    }
+
+    @Test fun `suspend - repeated cancel cycles`() = runBlocking {
+        Calculator(0).use { calc ->
+            repeat(100) {
+                val job = launch { calc.longDelay() }
+                delay(5)
+                job.cancelAndJoin()
+            }
+        }
+    }
+
+    @Test fun `suspend - mixed success cancel error`() = runBlocking {
+        Calculator(0).use { calc ->
+            repeat(50) { i ->
+                when (i % 3) {
+                    0 -> assertEquals(3, calc.delayedAdd(1, 2))
+                    1 -> {
+                        val j = launch { calc.longDelay() }
+                        delay(5)
+                        j.cancelAndJoin()
+                    }
+                    2 -> assertFailsWith<KotlinNativeException> { calc.failAfterDelay() }
+                }
+            }
         }
     }
 }

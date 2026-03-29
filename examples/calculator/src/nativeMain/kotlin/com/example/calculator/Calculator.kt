@@ -271,6 +271,46 @@ class Calculator(initial: Int = 0) {
 
     fun getSinglePoint(): List<Point> = listOf(Point(accumulator, accumulator * 2))
 
+    // ── Suspend functions ─────────────────────────────────────────────────────
+
+    suspend fun delayedAdd(a: Int, b: Int): Int {
+        kotlinx.coroutines.delay(50)
+        accumulator = a + b
+        return accumulator
+    }
+
+    suspend fun delayedDescribe(): String {
+        kotlinx.coroutines.delay(30)
+        return describe()
+    }
+
+    suspend fun failAfterDelay(): String {
+        kotlinx.coroutines.delay(30)
+        error("intentional suspend error")
+    }
+
+    suspend fun longDelay(): Int {
+        kotlinx.coroutines.delay(5000)
+        return 42
+    }
+
+    suspend fun instantReturn(): Int = accumulator
+
+    suspend fun delayedIsPositive(): Boolean {
+        kotlinx.coroutines.delay(10)
+        return accumulator > 0
+    }
+
+    suspend fun delayedGetOp(): Operation {
+        kotlinx.coroutines.delay(10)
+        return lastOperation
+    }
+
+    suspend fun delayedNullable(): String? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator > 0) "positive($accumulator)" else null
+    }
+
     // ── Object in callbacks ────────────────────────────────────────────────────
 
     fun onSelfReady(callback: (Calculator) -> Unit) {

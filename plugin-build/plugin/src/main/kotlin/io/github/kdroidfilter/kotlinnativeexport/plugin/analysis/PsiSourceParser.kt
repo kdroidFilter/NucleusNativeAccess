@@ -225,12 +225,14 @@ class PsiSourceParser {
     private fun parseFunction(fn: KtNamedFunction, typeMaps: TypeMaps): KneFunction? {
         val name = fn.name ?: return null
         if (name == "init") return null
+        val isSuspend = fn.hasModifier(KtTokens.SUSPEND_KEYWORD)
         val params = fn.valueParameters.mapNotNull { param ->
             val pName = param.name ?: return@mapNotNull null
             val type = resolveTypeFromMaps(param.typeReference, typeMaps) ?: return@mapNotNull null
             KneParam(pName, type)
         }
-        return KneFunction(name, params, fn.typeReference?.let { resolveTypeFromMaps(it, typeMaps) } ?: KneType.UNIT)
+        val returnType = fn.typeReference?.let { resolveTypeFromMaps(it, typeMaps) } ?: KneType.UNIT
+        return KneFunction(name, params, returnType, isSuspend = isSuspend)
     }
 
     private fun parseProperty(prop: KtProperty, typeMaps: TypeMaps): KneProperty? {

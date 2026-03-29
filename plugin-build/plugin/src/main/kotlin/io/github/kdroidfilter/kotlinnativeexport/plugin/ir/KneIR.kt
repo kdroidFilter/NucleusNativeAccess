@@ -42,6 +42,7 @@ data class KneFunction(
     val name: String,
     val params: List<KneParam>,
     val returnType: KneType,
+    val isSuspend: Boolean = false,
 ) : Serializable
 
 data class KneProperty(

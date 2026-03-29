@@ -98,6 +98,23 @@ class KotlinNativeExportPlugin : Plugin<Project> {
         // Keep old task name as alias
         project.tasks.register("generateKneJvmProxies") { it.dependsOn(generateBridges) }
 
+        // ── Coroutines dependency (required for suspend function support) ──
+        val coroutinesVersion = "1.10.2"
+        nativeTarget?.let { target ->
+            kotlin.sourceSets.findByName("${target.name}Main")?.dependencies {
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
+            }
+        }
+        kotlin.sourceSets.findByName("nativeMain")?.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
+        }
+        kotlin.sourceSets.findByName("jvmMain")?.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$coroutinesVersion")
+        }
+        kotlin.sourceSets.findByName("jvmTest")?.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
+        }
+
         // Wire generated bridges into the native source set (try nativeMain, fall back to <target>Main)
         val nativeSourceSet = kotlin.sourceSets.findByName("nativeMain")
             ?: nativeTarget?.let { kotlin.sourceSets.findByName("${it.name}Main") }
@@ -172,6 +189,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
 
         project.tasks.withType(Test::class.java).configureEach { testTask ->
             testTask.dependsOn(project.tasks.matching { it.name == linkTaskName })
+            testTask.useJUnitPlatform()
             testTask.jvmArgs(
                 "-Djava.library.path=$libraryPath",
                 "--enable-native-access=ALL-UNNAMED",

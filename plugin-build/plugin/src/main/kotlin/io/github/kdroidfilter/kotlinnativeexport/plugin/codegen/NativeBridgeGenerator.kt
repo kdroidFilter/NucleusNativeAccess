@@ -54,6 +54,13 @@ class NativeBridgeGenerator {
         appendLine("import kotlinx.cinterop.*")
         appendLine("import kotlin.concurrent.AtomicReference")
         appendLine("import kotlin.native.concurrent.ObsoleteWorkersApi")
+
+        val hasSuspend = module.classes.any { cls -> cls.methods.any { it.isSuspend } || cls.companionMethods.any { it.isSuspend } } ||
+            module.functions.any { it.isSuspend }
+        if (hasSuspend) {
+            appendLine("import kotlinx.coroutines.*")
+        }
+
         module.packages.forEach { pkg ->
             appendLine("import $pkg.*")
         }
@@ -64,6 +71,11 @@ class NativeBridgeGenerator {
         appendLine()
 
         appendErrorFunctions(module.libName)
+
+        // Suspend helper bridges (once per module)
+        if (hasSuspend) {
+            appendSuspendHelpers(module.libName)
+        }
 
         module.classes.forEach { cls -> appendClass(cls, module.libName) }
         module.enums.forEach { enum -> appendEnum(enum, module.libName) }
@@ -187,8 +199,11 @@ class NativeBridgeGenerator {
         appendLine("}")
         appendLine()
 
-        // Methods
-        cls.methods.forEach { method -> appendMethod(method, cls, p) }
+        // Methods (dispatch suspend vs regular)
+        cls.methods.forEach { method ->
+            if (method.isSuspend) appendSuspendMethod(method, cls, p)
+            else appendMethod(method, cls, p)
+        }
 
         // Properties
         cls.properties.forEach { prop -> appendProperty(prop, cls, p) }
@@ -1271,5 +1286,119 @@ class NativeBridgeGenerator {
         appendLine("    try { handle.toCPointer<COpaque>()?.asStableRef<List<$fq>>()?.dispose() } catch (_: Throwable) {}")
         appendLine("}")
         appendLine()
+    }
+
+    // ── Suspend function support ────────────────────────────────────────────
+
+    /** Generate module-level helper bridges for suspend functions. */
+    private fun StringBuilder.appendSuspendHelpers(prefix: String) {
+        // Cancel a native Job from JVM
+        appendLine("@CName(\"${prefix}_kne_cancelJob\")")
+        appendLine("fun `${prefix}_kne_cancelJob`(jobHandle: Long) {")
+        appendLine("    if (jobHandle == 0L) return")
+        appendLine("    try { jobHandle.toCPointer<COpaque>()!!.asStableRef<Job>().get().cancel() } catch (_: Throwable) {}")
+        appendLine("}")
+        appendLine()
+
+        // Dispose a StableRef (for cleaning up result handles)
+        appendLine("@CName(\"${prefix}_kne_disposeRef\")")
+        appendLine("fun `${prefix}_kne_disposeRef`(handle: Long) {")
+        appendLine("    if (handle == 0L) return")
+        appendLine("    try { handle.toCPointer<COpaque>()?.asStableRef<Any>()?.dispose() } catch (_: Throwable) {}")
+        appendLine("}")
+        appendLine()
+
+        // Read a String from a StableRef handle
+        appendLine("@CName(\"${prefix}_kne_readStringRef\")")
+        appendLine("fun `${prefix}_kne_readStringRef`(handle: Long, outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
+        appendLine("    val str = handle.toCPointer<COpaque>()!!.asStableRef<String>().get()")
+        appendLine("    val bytes = str.encodeToByteArray()")
+        appendLine("    val writeLen = minOf(bytes.size, outLen - 1)")
+        appendLine("    bytes.forEachIndexed { i, b -> if (i < writeLen) outBuf?.set(i, b) }")
+        appendLine("    outBuf?.set(writeLen, 0)")
+        appendLine("    return bytes.size")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Generate a suspend function bridge (instance method). */
+    private fun StringBuilder.appendSuspendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
+        val paramList = buildExpandedParamList(fn.params)
+        val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}, _contPtr: Long, _excPtr: Long, _cancelOut: CPointer<LongVar>?"
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($allParams) {")
+        appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+
+        // Reconstruct params
+        appendObjectParamConversions(fn)
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
+
+        // Create Job for cancellation
+        appendLine("    val _job = Job()")
+        appendLine("    val _jobRef = StableRef.create(_job)")
+        appendLine("    _cancelOut?.pointed?.value = _jobRef.asCPointer().toLong()")
+
+        // Launch coroutine
+        appendLine("    CoroutineScope(_job + Dispatchers.Default).launch {")
+        appendLine("        try {")
+
+        // Call suspend function and encode result
+        if (fn.returnType == KneType.UNIT) {
+            appendLine("            obj.${fn.name}($callArgs)")
+            appendLine("            val _contFn = _contPtr.toCPointer<CFunction<(Int, Long) -> Unit>>()!!")
+            appendLine("            _contFn.invoke(1, 0L)")
+        } else {
+            appendLine("            val _result = obj.${fn.name}($callArgs)")
+            appendLine("            val _contFn = _contPtr.toCPointer<CFunction<(Int, Long) -> Unit>>()!!")
+            appendSuspendResultEncode("_result", fn.returnType)
+        }
+
+        appendLine("        } catch (_e: CancellationException) {")
+        appendLine("            val _excFn = _excPtr.toCPointer<CFunction<(Long) -> Unit>>()!!")
+        appendLine("            _excFn.invoke(0L)")
+        appendLine("        } catch (_e: Throwable) {")
+        appendLine("            val _excFn = _excPtr.toCPointer<CFunction<(Long) -> Unit>>()!!")
+        appendLine("            val _msgRef = StableRef.create(_e.message ?: _e::class.simpleName ?: \"Unknown error\")")
+        appendLine("            _excFn.invoke(_msgRef.asCPointer().toLong())")
+        appendLine("        } finally {")
+        appendLine("            _jobRef.dispose()")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Encode the suspend result into the continuation callback (Int, Long). */
+    private fun StringBuilder.appendSuspendResultEncode(resultExpr: String, type: KneType) {
+        when (type) {
+            KneType.INT -> appendLine("            _contFn.invoke(1, $resultExpr.toLong())")
+            KneType.LONG -> appendLine("            _contFn.invoke(1, $resultExpr)")
+            KneType.SHORT -> appendLine("            _contFn.invoke(1, $resultExpr.toLong())")
+            KneType.BYTE -> appendLine("            _contFn.invoke(1, $resultExpr.toLong())")
+            KneType.FLOAT -> appendLine("            _contFn.invoke(1, $resultExpr.toRawBits().toLong())")
+            KneType.DOUBLE -> appendLine("            _contFn.invoke(1, $resultExpr.toRawBits())")
+            KneType.BOOLEAN -> appendLine("            _contFn.invoke(1, if ($resultExpr) 1L else 0L)")
+            KneType.STRING -> {
+                appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            is KneType.OBJECT -> {
+                appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            is KneType.ENUM -> appendLine("            _contFn.invoke(1, $resultExpr.ordinal.toLong())")
+            is KneType.DATA_CLASS -> {
+                appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            is KneType.NULLABLE -> {
+                appendLine("            if ($resultExpr == null) { _contFn.invoke(0, 0L) } else {")
+                appendSuspendResultEncode(resultExpr + "!!", type.inner)
+                appendLine("            }")
+            }
+            else -> appendLine("            _contFn.invoke(1, $resultExpr.toLong())")
+        }
     }
 }
