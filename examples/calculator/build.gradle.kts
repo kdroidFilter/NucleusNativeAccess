@@ -104,38 +104,3 @@ nucleus.application {
     }
 }
 
-afterEvaluate {
-    // Copy the Kotlin/Native shared library next to the GraalVM native binary
-    // (native-image can't extract from JAR at runtime — needs .so beside the executable)
-    val hostTarget = when {
-        System.getProperty("os.name") == "Linux" -> "linuxX64"
-        System.getProperty("os.name") == "Mac OS X" -> "macosArm64"
-        else -> "mingwX64"
-    }
-    tasks.matching { it.name == "packageGraalvmNative" }.configureEach {
-        val cap = hostTarget.replaceFirstChar { it.uppercaseChar() }
-        dependsOn("linkCalculatorReleaseShared$cap")
-        doLast {
-            val libFileName = System.mapLibraryName("calculator")
-            val src = file("build/bin/$hostTarget/calculatorReleaseShared/$libFileName")
-            if (!src.exists()) return@doLast
-            listOf(
-                "build/compose/tmp/main/graalvm/nativeCompile",
-                "build/compose/tmp/main/graalvm/output",
-            ).forEach { dir ->
-                val target = file(dir)
-                if (target.exists()) {
-                    if (target.isDirectory && dir.endsWith("output")) {
-                        target.listFiles()?.filter { it.isDirectory }?.forEach { appDir ->
-                            src.copyTo(appDir.resolve(libFileName), overwrite = true)
-                            println("kne: Copied $libFileName to $appDir")
-                        }
-                    } else {
-                        src.copyTo(target.resolve(libFileName), overwrite = true)
-                        println("kne: Copied $libFileName to $target")
-                    }
-                }
-            }
-        }
-    }
-}

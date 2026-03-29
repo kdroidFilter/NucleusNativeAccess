@@ -1,3 +1,5 @@
+import io.github.kdroidfilter.nucleus.desktop.application.dsl.TargetFormat
+
 plugins {
     kotlin("multiplatform")
     id("org.jetbrains.compose") version "1.10.2"
@@ -60,6 +62,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.runtime)
+                implementation("io.github.kdroidfilter:nucleus.graalvm-runtime:1.7.2")
             }
         }
         val jvmTest by getting {
@@ -83,7 +86,23 @@ nucleus.application {
     mainClass = "com.example.systeminfo.MainKt"
     jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 
+    graalvm {
+        isEnabled = true
+        javaLanguageVersion = 25
+        jvmVendor = JvmVendorSpec.BELLSOFT
+        imageName = "system-info"
+        march = "compatibility"
+        buildArgs.addAll(
+            "-H:+AddAllCharsets",
+            "-Djava.awt.headless=false",
+            "-Os",
+            "-H:-IncludeMethodData",
+            "--enable-native-access=ALL-UNNAMED",
+        )
+    }
+
     nativeDistributions {
+        targetFormats(TargetFormat.Deb, TargetFormat.Nsis, TargetFormat.Dmg)
         appName = "Native System Info"
         packageName = "com.example.systeminfo"
         packageVersion = "1.0.0"

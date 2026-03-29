@@ -36,15 +36,18 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 
-fun main() = application {
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "Native System Info (via FFM)",
-        state = rememberWindowState(width = 500.dp, height = 620.dp),
-    ) {
-        MaterialTheme(colors = darkColors()) {
-            Surface(modifier = Modifier.fillMaxSize()) {
-                SystemInfoScreen()
+fun main() {
+    io.github.kdroidfilter.nucleus.graalvm.GraalVmInitializer.initialize()
+    application {
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "Native System Info (via FFM)",
+            state = rememberWindowState(width = 500.dp, height = 620.dp),
+        ) {
+            MaterialTheme(colors = darkColors()) {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    SystemInfoScreen()
+                }
             }
         }
     }
