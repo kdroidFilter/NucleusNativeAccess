@@ -971,6 +971,62 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // ByteArray
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `ByteArray return`() {
+        Calculator(42).use { calc ->
+            val bytes = calc.toBytes()
+            assertEquals("42", String(bytes))
+        }
+    }
+
+    @Test
+    fun `ByteArray return - negative`() {
+        Calculator(-7).use { calc ->
+            val bytes = calc.toBytes()
+            assertEquals("-7", String(bytes))
+        }
+    }
+
+    @Test
+    fun `ByteArray param - sum`() {
+        Calculator(0).use { calc ->
+            val result = calc.sumBytes(byteArrayOf(1, 2, 3, 4))
+            assertEquals(10, result)
+        }
+    }
+
+    @Test
+    fun `ByteArray param - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.sumBytes(byteArrayOf())
+            assertEquals(0, result)
+        }
+    }
+
+    @Test
+    fun `ByteArray roundtrip - reverse`() {
+        Calculator(0).use { calc ->
+            val input = byteArrayOf(1, 2, 3, 4, 5)
+            val reversed = calc.reverseBytes(input)
+            assertEquals(listOf<Byte>(5, 4, 3, 2, 1), reversed.toList())
+        }
+    }
+
+    @Test
+    fun `ByteArray roundtrip - large`() {
+        Calculator(0).use { calc ->
+            val input = ByteArray(1000) { (it % 256).toByte() }
+            val reversed = calc.reverseBytes(input)
+            assertEquals(1000, reversed.size)
+            assertEquals(input.last(), reversed.first())
+            assertEquals(input.first(), reversed.last())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Enums in callbacks
     // ═══════════════════════════════════════════════════════════════════════════
 

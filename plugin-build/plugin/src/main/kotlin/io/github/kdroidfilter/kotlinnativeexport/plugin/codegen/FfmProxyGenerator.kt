@@ -32,16 +32,20 @@ class FfmProxyGenerator {
     }
 
     private fun KneType.returnsViaBuffer(): Boolean =
-        this == KneType.STRING || (this is KneType.NULLABLE && inner == KneType.STRING)
+        this == KneType.STRING || this == KneType.BYTE_ARRAY ||
+        (this is KneType.NULLABLE && (inner == KneType.STRING || inner == KneType.BYTE_ARRAY))
 
     private fun KneType.isStringLike(): Boolean =
         this == KneType.STRING || (this is KneType.NULLABLE && inner == KneType.STRING)
 
+    private fun KneType.isByteArrayType(): Boolean =
+        this == KneType.BYTE_ARRAY
+
     private fun KneType.isFunctionType(): Boolean = this is KneType.FUNCTION
 
-    /** Check if a function needs a confined arena (for string alloc only — callbacks use persistent arena). */
+    /** Check if a function needs a confined arena (for string/byte alloc — callbacks use persistent arena). */
     private fun needsConfinedArena(params: List<KneParam>, returnType: KneType): Boolean =
-        params.any { it.type.isStringLike() } || returnType.isStringLike()
+        params.any { it.type.isStringLike() || it.type.isByteArrayType() } || returnType.isStringLike() || returnType.isByteArrayType()
 
     private fun isDataClassReturn(type: KneType): Boolean =
         type is KneType.DATA_CLASS || (type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS)
@@ -633,8 +637,9 @@ class FfmProxyGenerator {
         return args.joinToString(", ")
     }
 
-    /** Expand a single param into invoke args. DATA_CLASS becomes N args (one per field). */
+    /** Expand a single param into invoke args. DATA_CLASS becomes N args, ByteArray adds size. */
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
+        if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
         val dc = extractDataClass(p.type)
         if (dc == null) return listOf(buildJvmInvokeArg(p.name, p.type))
         val isNullable = p.type is KneType.NULLABLE
@@ -848,6 +853,8 @@ class FfmProxyGenerator {
                 if (dc != null) {
                     if (p.type is KneType.NULLABLE) add("JAVA_INT") // isNull flag
                     dc.fields.forEach { f -> add(f.type.ffmLayout) }
+                } else if (p.type == KneType.BYTE_ARRAY) {
+                    add("ADDRESS"); add("JAVA_INT") // pointer + size
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -920,6 +927,7 @@ class FfmProxyGenerator {
 
     private fun buildJvmInvokeArg(name: String, type: KneType): String = when (type) {
         KneType.STRING -> "${name}Seg"
+        KneType.BYTE_ARRAY -> "${name}Seg"
         KneType.BOOLEAN -> "if ($name) 1 else 0"
         is KneType.OBJECT -> "$name.handle"
         is KneType.ENUM -> "$name.ordinal"
@@ -978,6 +986,10 @@ class FfmProxyGenerator {
         params.filter { it.type == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = arena.allocateFrom(${p.name})")
         }
+        params.filter { it.type == KneType.BYTE_ARRAY }.forEach { p ->
+            appendLine("${indent}val ${p.name}Seg = arena.allocate(${p.name}.size.toLong())")
+            appendLine("${indent}MemorySegment.copy(${p.name}, 0, ${p.name}Seg, JAVA_BYTE, 0, ${p.name}.size)")
+        }
         params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}) else MemorySegment.NULL")
         }
@@ -1024,6 +1036,12 @@ class FfmProxyGenerator {
                 appendLine("${indent}$handleName.invoke($invokeArgs)")
                 appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return buf.getString(0)")
+            }
+            KneType.BYTE_ARRAY -> {
+                appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+                appendLine("${indent}val len = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return buf.asSlice(0, len.toLong()).toArray(JAVA_BYTE)")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")

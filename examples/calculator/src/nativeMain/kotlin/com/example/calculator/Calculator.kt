@@ -107,6 +107,20 @@ class Calculator(initial: Int = 0) {
 
     fun toDoubleOrNull(): Double? = if (accumulator != 0) accumulator.toDouble() else null
 
+    // ── ByteArray support ─────────────────────────────────────────────────
+
+    fun toBytes(): ByteArray {
+        val str = accumulator.toString()
+        return str.encodeToByteArray()
+    }
+
+    fun sumBytes(data: ByteArray): Int {
+        accumulator = data.sumOf { it.toInt() }
+        return accumulator
+    }
+
+    fun reverseBytes(data: ByteArray): ByteArray = data.reversedArray()
+
     // ── Callback support ──────────────────────────────────────────────────
 
     fun onValueChanged(callback: (Int) -> Unit) {

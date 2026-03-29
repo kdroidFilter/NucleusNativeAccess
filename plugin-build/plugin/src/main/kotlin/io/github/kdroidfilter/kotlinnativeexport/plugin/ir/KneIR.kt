@@ -70,6 +70,7 @@ sealed class KneType : Serializable {
     data class NULLABLE(val inner: KneType) : KneType()
     data class FUNCTION(val paramTypes: List<KneType>, val returnType: KneType) : KneType()
     data class DATA_CLASS(val fqName: String, val simpleName: String, val fields: List<KneParam>) : KneType()
+    object BYTE_ARRAY : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -95,6 +96,7 @@ sealed class KneType : Serializable {
             }
             is FUNCTION -> "JAVA_LONG" // function pointer address
             is DATA_CLASS -> "ADDRESS" // fields are expanded, not used directly
+            BYTE_ARRAY -> "ADDRESS" // pointer to byte buffer + JAVA_INT size
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -114,6 +116,7 @@ sealed class KneType : Serializable {
             is NULLABLE -> "${inner.jvmTypeName}?"
             is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
             is DATA_CLASS -> simpleName
+            BYTE_ARRAY -> "ByteArray"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -141,6 +144,7 @@ sealed class KneType : Serializable {
             }
             is FUNCTION -> "Long" // function pointer address
             is DATA_CLASS -> "Long" // fields are expanded, not used directly
+            BYTE_ARRAY -> "CPointer<ByteVar>?" // pointer to bytes
         }
 
     /** The native pointer type for out-param usage (e.g. IntVar for Int). */

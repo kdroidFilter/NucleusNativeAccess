@@ -134,6 +134,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
 | `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ | ✅ | &mdash; | ✅ param + return | field decomposition (primitive + String fields) |
+| `ByteArray` | ✅ | ✅ | &mdash; | ❌ | pointer + size pattern, raw byte transfer |
 | `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
 
 ### Declarations
@@ -243,7 +244,7 @@ calc.add(5) // works normally after exception
 | Object (class) in callbacks | Not yet implemented | Use data class or primitives |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
-| `ByteArray` / collections | Not yet implemented | Use individual elements or C buffers |
+| Collections (`List`, `Map`, etc.) | Not yet implemented | Use `ByteArray` for binary data, data classes for structured data |
 | Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
@@ -355,7 +356,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 177 tests
+./gradlew :examples:calculator:jvmTest    # 183 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 

@@ -501,6 +501,7 @@ class KotlinSourceParser {
             "Byte" -> KneType.BYTE
             "Short" -> KneType.SHORT
             "String" -> KneType.STRING
+            "ByteArray" -> KneType.BYTE_ARRAY
             "Unit", "" -> KneType.UNIT
             else -> {
                 val enumFq = knownTypes.enums[clean]
