@@ -311,6 +311,42 @@ class Calculator(initial: Int = 0) {
         return if (accumulator > 0) "positive($accumulator)" else null
     }
 
+    suspend fun delayedDouble(value: Double): Double {
+        kotlinx.coroutines.delay(10)
+        return value * 2.0
+    }
+
+    suspend fun delayedLong(value: Long): Long {
+        kotlinx.coroutines.delay(10)
+        return value + accumulator.toLong()
+    }
+
+    suspend fun delayedUnit() {
+        kotlinx.coroutines.delay(10)
+        accumulator += 1
+    }
+
+    suspend fun multiError(shouldFail: Boolean): Int {
+        kotlinx.coroutines.delay(20)
+        if (shouldFail) error("conditional error")
+        return accumulator
+    }
+
+    suspend fun chainedDelay(steps: Int): Int {
+        var result = accumulator
+        repeat(steps) {
+            kotlinx.coroutines.delay(5)
+            result += 1
+        }
+        accumulator = result
+        return result
+    }
+
+    suspend fun delayedGetCurrentOrNull(): Int? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator != 0) accumulator else null
+    }
+
     // ── Object in callbacks ────────────────────────────────────────────────────
 
     fun onSelfReady(callback: (Calculator) -> Unit) {

@@ -662,6 +662,9 @@ class FfmProxyGenerator {
         if (hasCallbacks) {
             appendLine("    internal val _callbackArena: Arena = Arena.ofShared()")
         }
+        if (classHasSuspend) {
+            appendLine("    private val _suspendInFlight = java.util.concurrent.atomic.AtomicInteger(0)")
+        }
         appendLine()
 
         val companionHasCallbacks = cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
@@ -799,7 +802,12 @@ class FfmProxyGenerator {
         appendLine("            val obj = $n(h)")
         if (hasCallbacks) {
             appendLine("            val cbArena = obj._callbackArena")
-            appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+            if (classHasSuspend) {
+                appendLine("            val inFlight = obj._suspendInFlight")
+                appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; repeat(1000) { if (inFlight.get() <= 0) return@repeat; Thread.sleep(1) }; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+            } else {
+                appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+            }
         } else {
             appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
         }
@@ -820,10 +828,14 @@ class FfmProxyGenerator {
         }
         cls.properties.forEach { prop -> appendPropertyProxy(prop, cls) }
 
-        // close() — idempotent, thread-safe
+        // close() — idempotent, thread-safe, waits for in-flight suspend calls
         appendLine("    override fun close() {")
         appendLine("        if (_disposed) return")
         appendLine("        _disposed = true")
+        if (classHasSuspend) {
+            // Spin-wait for all native coroutines to finish calling back before closing the arena
+            appendLine("        while (_suspendInFlight.get() > 0) { Thread.sleep(1) }")
+        }
         if (hasCallbacks) {
             appendLine("        runCatching { _callbackArena.close() }")
         }
@@ -861,14 +873,19 @@ class FfmProxyGenerator {
         val retType = fn.returnType.jvmTypeName
 
         appendLine("    suspend fun ${fn.name}($params): $retType = suspendCancellableCoroutine { _cont ->")
+        appendLine("        _suspendInFlight.incrementAndGet()")
         // Use the object's shared callback arena — stubs live as long as the proxy object
         appendLine("        val _contStub = KneRuntime.createSuspendContStub({ _hasValue, _value ->")
-        appendSuspendResultDecode("            ", fn.returnType)
+        appendLine("            try {")
+        appendSuspendResultDecode("                ", fn.returnType)
+        appendLine("            } finally { _suspendInFlight.decrementAndGet() }")
         appendLine("        }, _callbackArena)")
 
         appendLine("        val _excStub = KneRuntime.createSuspendExcStub({ _msgHandle ->")
-        appendLine("            if (_msgHandle == 0L) _cont.cancel()")
-        appendLine("            else _cont.resumeWithException(KotlinNativeException(KneRuntime.readStringFromRef(_msgHandle)))")
+        appendLine("            try {")
+        appendLine("                if (_msgHandle == 0L) _cont.cancel()")
+        appendLine("                else _cont.resumeWithException(KotlinNativeException(KneRuntime.readStringFromRef(_msgHandle)))")
+        appendLine("            } finally { _suspendInFlight.decrementAndGet() }")
         appendLine("        }, _callbackArena)")
 
         // Invoke native bridge
