@@ -315,94 +315,36 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 ## Roadmap
 
-The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, and exception propagation. The roadmap extends the type system, improves analysis, and adds deployment features.
+The current implementation covers: classes, methods, properties, top-level functions, all primitive types, String, enums, companion objects, object composition, nullable types, and exception propagation.
 
 Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
 
-### Phase 2a &mdash; Foundation (unblocks everything else)
+### What's done
 
-- [ ] **Kotlin Analysis API (K2)** &mdash; replace regex `KotlinSourceParser` with proper K2 symbol extraction
-  - [ ] Add `kotlin-analysis-api` dependency, set up `analyze {}` session lifecycle
-  - [ ] Create a `KneSession` facade (inspired by SIR's `SirSession`) aggregating providers: `DeclarationProvider`, `TypeProvider`, `ParentProvider`
-  - [ ] Dispatch `KaDeclarationSymbol` kinds &rarr; `KneClass`, `KneFunction`, `KneProperty` (like `SirDeclarationFromKtSymbolProvider`)
-  - [ ] Extract full type information: nullability, generics bounds, modality, annotations
-  - [ ] Detect `@Throws` annotation for exception propagation
-  - [ ] Extract companion object members via `combinedDeclaredMemberScope`
-  - [ ] Keep regex parser as fallback (flag `useAnalysisApi = true|false` in extension DSL)
+- [x] Classes, methods, properties, constructors
+- [x] All primitive types (`Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`)
+- [x] `String` (output-buffer pattern for returns, `CPointer<ByteVar>` for params)
+- [x] `Unit` / void functions
+- [x] Enums (ordinal mapping, enum as param/return, mutable enum properties)
+- [x] Companion objects (static methods and properties, factory functions)
+- [x] Object composition (class as param/return, `StableRef` handle passing)
+- [x] Nullable types (sentinel-based encoding for all supported types)
+- [x] Exception propagation (`@ThreadLocal` error state, `KotlinNativeException` on JVM)
 
-- [ ] **Extend the IR model (`KneIR.kt`)** &mdash; add missing concepts to represent Phase 2 features
-  - [x] `KneType.NULLABLE(inner: KneType)` &mdash; wrapper type for nullable values
-  - [ ] `KneType.SEALED(fqName, subclasses)` &mdash; algebraic types
-  - [ ] `KneType.FUNCTION(params, returnType)` &mdash; function/lambda types
-  - [ ] `KneInterface` &mdash; Kotlin interface declaration (protocols in SIR)
-  - [ ] `KneClass.superClass`, `KneClass.interfaces`, `KneClass.modality` (OPEN / FINAL / ABSTRACT / SEALED)
-  - [x] `KneClass.companionMethods`, `KneClass.companionProperties` &mdash; static members
-  - [ ] `KneConstructor.overloads` &mdash; list of parameter combinations (from default params)
-  - [ ] `KneFunction.errorType` &mdash; nullable, present when `@Throws` detected
-  - [x] `KneEnum` with entries list (name, ordinal)
+### Phase 3 &mdash; Callbacks & lambdas
 
-### Phase 2b &mdash; Type system extensions
-
-- [x] **Nullable types** &mdash; proper `null` handling across FFM boundary
-  - [x] Native bridge: sentinel-based encoding (widened types for primitives, -1/0L for reference types)
-  - [x] FFM proxy: check sentinels after downcall, return `null` when sentinel detected
-  - [x] String params/returns: `MemorySegment.NULL` for null, -1 return for null strings
-
-- [x] **Enums** &mdash; map Kotlin `enum class` to JVM enum
-  - [x] Native bridge: `@CName` function returning ordinal `Int` + name `String` (output-buffer)
-  - [x] FFM proxy: generate JVM `enum class` with `values()` / `valueOf()`, backed by ordinal downcall
-  - [x] Support enum as parameter type (pass ordinal, reconstruct on native side)
-
-- [ ] **Sealed classes** &mdash; map to JVM sealed interface + data classes (inspired by swift-java's sealed interface + records pattern)
-  - [ ] Native bridge: discriminator function returning subclass tag `Int`
-  - [ ] FFM proxy: `sealed interface` with per-subclass `data class` implementing it
-  - [ ] Pattern: `getDiscriminator()` downcall &rarr; `when(tag)` dispatch on JVM side
-
-### Phase 2c &mdash; OOP features
-
-- [ ] **Inheritance & open classes** &mdash; preserve class hierarchy on JVM
-  - [ ] IR: track `superClass` reference and `modality`
-  - [ ] Native bridge: virtual dispatch via `StableRef` (actual object type preserved)
-  - [ ] FFM proxy: generate `open class` with `override` methods where applicable
-  - [ ] Upcast support: child handle usable where parent type expected
-
-- [ ] **Interfaces** &mdash; generate JVM interfaces for Kotlin interfaces
-  - [ ] IR: `KneInterface` with method signatures (no body)
-  - [ ] FFM proxy: generate `interface` + ensure implementing classes declare `override`
-  - [ ] No native bridge needed for interface declarations themselves (only implementing classes)
-
-- [x] **Companion objects** &mdash; expose as static methods/properties on JVM proxy
-  - [x] Extract companion members (via K2 `combinedDeclaredMemberScope` or regex `companion object` block)
-  - [x] Native bridge: `@CName` functions without handle parameter (like top-level)
-  - [x] FFM proxy: `companion object` with MethodHandles (no instance needed)
-
-- [ ] **Constructor overloads** &mdash; generate overloads from default parameter values
-  - [ ] K2: detect `hasDefaultValue` on `KaValueParameterSymbol`
-  - [ ] Generate N overloads: full params, drop last default, drop last 2, etc.
-  - [ ] Native bridge: one `@CName` per overload, each calling `ClassName(...)` with appropriate args
-  - [ ] FFM proxy: multiple `operator fun invoke(...)` overloads in companion
-
-### Phase 2d &mdash; Advanced type features
-
-- [x] **Exceptions** &mdash; catch on native side, propagate to JVM
-  - [x] Native bridge: wrap body in `try/catch`, store error in `@ThreadLocal` variable
-  - [x] FFM proxy: `kne_hasError()` + `kne_getLastError()` after every downcall, throw `KotlinNativeException(message)`
-  - [x] Zero-allocation happy path (2 FFM calls), error path adds 1 call + Arena
+The only type that **cannot** live in `commonMain` and must cross the FFM boundary.
 
 - [ ] **Lambdas & callbacks** &mdash; FFM upcall handles for JVM &rarr; native callbacks
-  - [ ] IR: `KneType.FUNCTION` with param/return types
+  - [ ] IR: `KneType.FUNCTION(params, returnType)` &mdash; function type representation
   - [ ] FFM proxy: accept `@FunctionalInterface` parameter, create upcall stub via `Linker.nativeLinker().upcallStub()` (swift-java pattern)
   - [ ] Native bridge: receive `CPointer<CFunction<...>>`, invoke as C function pointer
   - [ ] Lifetime: upcall stub tied to `Arena.ofConfined()`, freed after native call returns
+  - [ ] Support common signatures: `() -> Unit`, `(T) -> R`, `(T, U) -> R`
 
-- [ ] **Generics** &mdash; type-erased proxy generation
-  - [ ] IR: `KneClass.typeParameters` with optional upper bound
-  - [ ] Single upper bound &rarr; use bound type; no bound &rarr; `Any` (like SIR)
-  - [ ] Native bridge: erased to upper bound at bridge level (same `StableRef<Any>`)
-  - [ ] FFM proxy: generate generic class with unchecked casts on return values
-  - [ ] Multiple bounds &rarr; unsupported (warn and skip, like swift-export)
+### Phase 4 &mdash; Packaging & deployment
 
-### Phase 2e &mdash; Packaging & deployment
+Make the plugin production-ready with zero-config deployment.
 
 - [ ] **Automatic native lib bundling** &mdash; single-JAR deployment
   - [ ] Embed `.so`/`.dylib`/`.dll` in JAR under `META-INF/native/{os}-{arch}/`
@@ -419,13 +361,28 @@ Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin
   - [ ] Bundle each platform's shared lib under `META-INF/native/{os}-{arch}/`
   - [ ] `KneRuntime`: detect current OS/arch at startup, load correct variant
 
+### Phase 5 &mdash; Analysis robustness
+
+- [ ] **Kotlin Analysis API (K2)** &mdash; replace regex `KotlinSourceParser` with proper K2 symbol extraction
+  - [ ] Add `kotlin-analysis-api` dependency, set up `analyze {}` session lifecycle
+  - [ ] Create a `KneSession` facade (inspired by SIR's `SirSession`)
+  - [ ] Extract full type information: nullability, annotations, companion members
+  - [ ] Keep regex parser as fallback (flag `useAnalysisApi = true|false` in extension DSL)
+
 ### Future considerations
 
 - **Suspend functions / coroutines** &mdash; swift-java maps `async` to `CompletableFuture`, kotlin-swift-export maps `suspend` to Swift `async/await`. A similar approach could map `suspend` to `CompletableFuture` on JVM, but this requires significant runtime support.
 
+### Design philosophy
+
+This plugin binds **only what must cross the native boundary** &mdash; platform-specific APIs (cinterop, POSIX, C libraries), performance-critical native code, and types that cannot exist in common Kotlin.
+
+Features like interfaces, inheritance, sealed classes, generics, and data classes belong in `commonMain` (shared KMP code) and do not need FFM bridges. If it can be written in common Kotlin, it should be.
+
 ### Out of scope
 
-- Full Kotlin Multiplatform expect/actual (that's KMP's job, not ours)
+- Interfaces, inheritance, sealed classes, generics (use `commonMain`)
+- Full Kotlin Multiplatform expect/actual (that's KMP's job)
 
 ## Requirements
 
