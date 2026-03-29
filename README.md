@@ -117,25 +117,25 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types
+### Types — test coverage (217 tests)
 
-| Feature | As param | As return | As property | In callbacks | Notes |
-|---------|----------|-----------|-------------|--------------|-------|
-| `Int` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `Long` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `Double` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `Float` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `Boolean` | ✅ | ✅ | ✅ | ✅ param + return | 0/1 convention over FFM |
-| `Byte` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `Short` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
-| `String` | ✅ | ✅ | ✅ | ✅ param + return | output-buffer pattern for returns |
-| `Unit` | &mdash; | ✅ | &mdash; | ✅ return only | `FunctionDescriptor.ofVoid(...)` |
-| `enum class` | ✅ | ✅ | ✅ | ✅ param + return | ordinal mapping, auto-generates JVM enum |
-| Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
-| `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding (incl. `DataClass?`) |
-| `data class` | ✅ | ✅ | &mdash; | ✅ param + return | field decomposition (all types: primitive, String, Enum, Object, nested DC) |
-| `ByteArray` | ✅ | ✅ | &mdash; | ❌ | pointer + size pattern, raw byte transfer |
-| `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
+| Feature | As param | As return | As property | CB param | CB return | Notes |
+|---------|----------|-----------|-------------|----------|-----------|-------|
+| `Int` | ✅ 5t | ✅ 5t | ✅ 2t | ✅ 3t | ✅ 2t | direct pass-through |
+| `Long` | ✅ 2t | ✅ 2t | &mdash; | ✅ 2t | ✅ 2t | direct pass-through |
+| `Double` | ✅ 2t | ✅ 2t | ✅ 1t | ✅ 2t | ✅ 2t | direct pass-through |
+| `Float` | ✅ 1t | ✅ 1t | &mdash; | ✅ 1t | ✅ 1t | direct pass-through |
+| `Boolean` | ✅ 3t | ✅ 2t | ✅ 1t | ✅ 3t | ✅ 1t | 0/1 convention over FFM |
+| `Byte` | ✅ 1t | ✅ 1t | &mdash; | ✅ 1t | ✅ 1t | direct pass-through |
+| `Short` | ✅ 1t | ✅ 1t | &mdash; | ✅ 1t | ✅ 1t | direct pass-through |
+| `String` | ✅ 4t | ✅ 4t | ✅ 3t | ✅ 4t | ✅ 3t | output-buffer pattern |
+| `Unit` | &mdash; | ✅ 1t | &mdash; | &mdash; | ✅ 3t | `FunctionDescriptor.ofVoid(...)` |
+| `enum class` | ✅ 3t | ✅ 2t | ✅ 2t | ✅ 2t | ✅ 3t | ordinal mapping |
+| Classes | ✅ 3t | ✅ 4t | &mdash; | ❌ | &mdash; | opaque handle via `StableRef` |
+| `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
+| `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
+| `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
+| `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
 
 ### Declarations
 
@@ -353,7 +353,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 210 tests
+./gradlew :examples:calculator:jvmTest    # 217 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
