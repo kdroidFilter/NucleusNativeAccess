@@ -36,3 +36,4 @@ rootProject.name = "kotlin-native-jvm-export"
 
 include(":examples:calculator")
 include(":examples:systeminfo")
+include(":examples:benchmark")

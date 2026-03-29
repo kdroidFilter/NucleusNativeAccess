@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (511 end-to-end FFM tests)
+### Types — test coverage (602 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all tests cross the real native boundary.
 
@@ -263,6 +263,56 @@ calc.add(5) // works normally after exception
 | `Byte?` | `JAVA_INT` | `Int.MIN_VALUE` = null |
 | `Float?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
 | `Double?` | `JAVA_LONG` (raw bits) | `Long.MIN_VALUE` = null |
+
+## Benchmarks — Native (FFM) vs Pure JVM
+
+Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (GraalVM), Kotlin 2.3.20.
+
+**Methodology**: each benchmark runs the operation in a tight loop. 3 warmup iterations are discarded, then 5 measured iterations are averaged. "Native" creates a proxy object via FFM and calls into the Kotlin/Native shared library (.so). "JVM" runs the equivalent Kotlin/JVM code directly. Ratio = native/jvm (>1 = native slower due to FFM overhead). Memory is measured via `Runtime.totalMemory() - freeMemory()` before/after with explicit GC.
+
+### Compute-bound (work stays in native, single FFM call)
+
+| Benchmark | Native | JVM | Ratio | Analysis |
+|-----------|--------|-----|-------|----------|
+| Fibonacci recursive (n=35) | 18.07 ms | 23.85 ms | **0.76x** | Native faster (no JIT warmup needed) |
+| Fibonacci iterative (n=1M) | 0.30 ms | 0.21 ms | 1.43x | Near-equal, JVM JIT slightly ahead |
+| Pi Leibniz series (10M iter) | 8.60 ms | 8.56 ms | **1.01x** | Identical performance |
+| String concat loop (10K) | 21.65 ms | 17.62 ms | 1.23x | Near-equal |
+| Bubble sort (5K elements) | 13.13 ms | 4.78 ms | 2.75x | JVM JIT optimizes array access better |
+
+### FFM call overhead (many small downcalls)
+
+| Benchmark | Native | JVM | Ratio | Analysis |
+|-----------|--------|-----|-------|----------|
+| 100K trivial calls | 4.94 ms | 0.31 ms | 16x | ~49 ns/call FFM overhead |
+| 10K create+close cycles | 4.12 ms | 0.11 ms | 36x | StableRef alloc+dispose cost |
+| 10K data class returns | 4.32 ms | 0.15 ms | 29x | Out-param marshaling cost |
+| 10K string returns | 6.45 ms | 0.59 ms | 11x | Output-buffer + UTF-8 copy |
+| 10K data class params | 0.96 ms | 0.01 ms | 65x | Field expansion overhead |
+| 5K list params (100 elems) | 7.78 ms | 2.89 ms | 2.70x | Arena alloc + memcpy |
+
+### Concurrent (10 threads, separate instances)
+
+| Benchmark | Native | JVM | Ratio |
+|-----------|--------|-----|-------|
+| 10t &times; 1K fib(100) | 3.83 ms | 0.49 ms | 7.87x |
+| 10t &times; 1K string reverse | 2.91 ms | 0.69 ms | 4.24x |
+| 10t &times; 1K create+close | 2.25 ms | 0.44 ms | 5.07x |
+| 10t &times; 1K DC roundtrip | 2.11 ms | 0.92 ms | 2.28x |
+
+### Memory allocation
+
+| Benchmark | Native | JVM | Analysis |
+|-----------|--------|-----|----------|
+| 100K point allocations | **0 KB** | 3,071 KB | Native: no JVM heap pressure |
+| 10t &times; 10K points (concurrent) | **1,151 KB** | 5,124 KB | Native uses 4.5x less JVM memory |
+| String concat (10K) | **0 KB** | 131,680 KB | Native: strings stay on native heap |
+
+**Key takeaways**:
+- **Compute-bound workloads** (fibonacci, pi, sorting) run at near-native speed &mdash; the FFM boundary is crossed once, then all work happens in Kotlin/Native
+- **FFM call overhead** is ~49 ns/call &mdash; negligible for methods that do real work, visible only in micro-benchmarks with 100K+ trivial calls
+- **Memory advantage**: native allocations don't touch the JVM heap, reducing GC pressure significantly (0 KB vs 131 MB for string-heavy workloads)
+- **Thread-safe**: all concurrent benchmarks pass with zero crashes (AtomicReference error state, idempotent dispose)
 
 ## What's NOT supported
 

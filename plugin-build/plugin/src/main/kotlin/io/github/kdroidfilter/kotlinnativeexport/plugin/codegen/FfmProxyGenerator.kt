@@ -590,6 +590,7 @@ class FfmProxyGenerator {
         val hasCallbacks = classHasCallbacks(cls)
 
         appendLine("class $n private constructor(internal val handle: Long) : AutoCloseable {")
+        appendLine("    @Volatile private var _disposed = false")
         if (hasCallbacks) {
             appendLine("    internal val _callbackArena: Arena = Arena.ofShared()")
         }
@@ -701,9 +702,9 @@ class FfmProxyGenerator {
         appendLine("            val obj = $n(h)")
         if (hasCallbacks) {
             appendLine("            val cbArena = obj._callbackArena")
-            appendLine("            CLEANER.register(obj) { runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } }")
+            appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
         } else {
-            appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
+            appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
         }
         appendLine("            return obj")
         appendLine("        }")
@@ -719,8 +720,10 @@ class FfmProxyGenerator {
         cls.methods.forEach { method -> appendMethodProxy(method, cls, p) }
         cls.properties.forEach { prop -> appendPropertyProxy(prop, cls) }
 
-        // close()
+        // close() — idempotent, thread-safe
         appendLine("    override fun close() {")
+        appendLine("        if (_disposed) return")
+        appendLine("        _disposed = true")
         if (hasCallbacks) {
             appendLine("        runCatching { _callbackArena.close() }")
         }

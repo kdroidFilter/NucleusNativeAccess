@@ -52,14 +52,15 @@ class NativeBridgeGenerator {
         appendLine("@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)")
         appendLine()
         appendLine("import kotlinx.cinterop.*")
+        appendLine("import kotlin.concurrent.AtomicReference")
+        appendLine("import kotlin.native.concurrent.ObsoleteWorkersApi")
         module.packages.forEach { pkg ->
             appendLine("import $pkg.*")
         }
         appendLine()
 
-        // Thread-local error state for exception propagation
-        appendLine("@kotlin.native.concurrent.ThreadLocal")
-        appendLine("private var _kneLastError: String? = null")
+        // Thread-safe error state using AtomicReference (works with new memory model + foreign threads)
+        appendLine("private val _kneLastError = AtomicReference<String?>(null)")
         appendLine()
 
         appendErrorFunctions(module.libName)
@@ -73,12 +74,12 @@ class NativeBridgeGenerator {
 
     private fun StringBuilder.appendErrorFunctions(prefix: String) {
         appendLine("@CName(\"${prefix}_kne_hasError\")")
-        appendLine("fun `${prefix}_kne_hasError`(): Int = if (_kneLastError != null) 1 else 0")
+        appendLine("fun `${prefix}_kne_hasError`(): Int = if (_kneLastError.value != null) 1 else 0")
         appendLine()
         appendLine("@CName(\"${prefix}_kne_getLastError\")")
         appendLine("fun `${prefix}_kne_getLastError`(outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
-        appendLine("    val err = _kneLastError ?: return -1")
-        appendLine("    _kneLastError = null")
+        appendLine("    val err = _kneLastError.value ?: return -1")
+        appendLine("    _kneLastError.value = null")
         appendLine("    val bytes = err.encodeToByteArray()")
         appendLine("    val writeLen = minOf(bytes.size, outLen - 1)")
         appendLine("    bytes.forEachIndexed { i, b -> if (i < writeLen) outBuf?.set(i, b) }")
@@ -91,13 +92,13 @@ class NativeBridgeGenerator {
     // ── Try/catch helpers ────────────────────────────────────────────────────
 
     private fun StringBuilder.appendTryCatchStart() {
-        appendLine("    _kneLastError = null")
+        appendLine("    _kneLastError.value = null")
         appendLine("    try {")
     }
 
     private fun StringBuilder.appendTryCatchEnd(returnType: KneType) {
         appendLine("    } catch (e: Throwable) {")
-        appendLine("        _kneLastError = e.message ?: e::class.simpleName ?: \"Unknown error\"")
+        appendLine("        _kneLastError.value = e.message ?: e::class.simpleName ?: \"Unknown error\"")
         if (returnType != KneType.UNIT) {
             appendLine("        return ${defaultErrorValue(returnType)}")
         }
@@ -172,12 +173,13 @@ class NativeBridgeGenerator {
             appendLine()
         }
 
-        // Dispose
+        // Dispose (safe against double-call and concurrent access)
         appendLine("@CName(\"${p}_${n}_dispose\")")
         appendLine("fun `${p}_${n}_dispose`(handle: Long) {")
-        appendTryCatchStart()
-        appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<$fq>().dispose()")
-        appendTryCatchEnd(KneType.UNIT)
+        appendLine("    if (handle == 0L) return")
+        appendLine("    try {")
+        appendLine("        handle.toCPointer<COpaque>()?.asStableRef<$fq>()?.dispose()")
+        appendLine("    } catch (_: Throwable) {}")
         appendLine("}")
         appendLine()
 
