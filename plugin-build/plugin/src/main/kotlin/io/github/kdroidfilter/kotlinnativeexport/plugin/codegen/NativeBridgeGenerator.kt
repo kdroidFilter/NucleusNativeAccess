@@ -18,6 +18,9 @@ import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
  *   - Constructor → StableRef.create(obj).asCPointer().toLong()  (opaque Long handle)
  *   - Methods     → recover StableRef from handle, call method
  *   - Dispose     → StableRef.dispose()  (equivalent to Swift's swift_release)
+ *
+ * All bridge functions are wrapped in try/catch. Errors are stored in a
+ * @ThreadLocal variable and queried by the JVM side via kne_hasError/kne_getLastError.
  */
 class NativeBridgeGenerator {
 
@@ -36,12 +39,76 @@ class NativeBridgeGenerator {
         }
         appendLine()
 
+        // Thread-local error state for exception propagation
+        appendLine("@kotlin.native.concurrent.ThreadLocal")
+        appendLine("private var _kneLastError: String? = null")
+        appendLine()
+
+        appendErrorFunctions(module.libName)
+
         module.classes.forEach { cls -> appendClass(cls, module.libName) }
         module.enums.forEach { enum -> appendEnum(enum, module.libName) }
         module.functions.forEach { fn -> appendTopLevelFunction(fn, module.libName) }
     }
 
-    // ── Classes ���─────────────────────────────────────────────────────────────
+    // ── Error query functions ────────────────────────────────────────────────
+
+    private fun StringBuilder.appendErrorFunctions(prefix: String) {
+        appendLine("@CName(\"${prefix}_kne_hasError\")")
+        appendLine("fun `${prefix}_kne_hasError`(): Int = if (_kneLastError != null) 1 else 0")
+        appendLine()
+        appendLine("@CName(\"${prefix}_kne_getLastError\")")
+        appendLine("fun `${prefix}_kne_getLastError`(outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
+        appendLine("    val err = _kneLastError ?: return -1")
+        appendLine("    _kneLastError = null")
+        appendLine("    val bytes = err.encodeToByteArray()")
+        appendLine("    val writeLen = minOf(bytes.size, outLen - 1)")
+        appendLine("    bytes.forEachIndexed { i, b -> if (i < writeLen) outBuf?.set(i, b) }")
+        appendLine("    outBuf?.set(writeLen, 0)")
+        appendLine("    return bytes.size")
+        appendLine("}")
+        appendLine()
+    }
+
+    // ── Try/catch helpers ────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendTryCatchStart() {
+        appendLine("    _kneLastError = null")
+        appendLine("    try {")
+    }
+
+    private fun StringBuilder.appendTryCatchEnd(returnType: KneType) {
+        appendLine("    } catch (e: Throwable) {")
+        appendLine("        _kneLastError = e.message ?: e::class.simpleName ?: \"Unknown error\"")
+        if (returnType != KneType.UNIT) {
+            appendLine("        return ${defaultErrorValue(returnType)}")
+        }
+        appendLine("    }")
+    }
+
+    private fun defaultErrorValue(type: KneType): String = when (type) {
+        KneType.INT -> "0"
+        KneType.LONG -> "0L"
+        KneType.DOUBLE -> "0.0"
+        KneType.FLOAT -> "0.0f"
+        KneType.BOOLEAN -> "0"
+        KneType.BYTE -> "0"
+        KneType.SHORT -> "0"
+        KneType.STRING -> "0"
+        KneType.UNIT -> ""
+        is KneType.OBJECT -> "0L"
+        is KneType.ENUM -> "0"
+        is KneType.NULLABLE -> when (type.inner) {
+            KneType.STRING -> "-1"
+            KneType.BOOLEAN, is KneType.ENUM -> "-1"
+            KneType.INT, KneType.LONG, KneType.FLOAT, KneType.DOUBLE -> "Long.MIN_VALUE"
+            KneType.SHORT, KneType.BYTE -> "Int.MIN_VALUE"
+            is KneType.OBJECT -> "0L"
+            else -> "0"
+        }
+    }
+
+    // ── Classes ──────────────────────────────────────────────────────────────
 
     private fun StringBuilder.appendClass(cls: KneClass, prefix: String) {
         val p = prefix
@@ -56,20 +123,26 @@ class NativeBridgeGenerator {
             buildParamConversion(param.name, param.type)
         }
         appendLine("@CName(\"${p}_${n}_new\")")
-        appendLine("fun `${p}_${n}_new`($ctorArgs): Long =")
-        appendLine("    StableRef.create($fq($ctorCall)).asCPointer().toLong()")
+        appendLine("fun `${p}_${n}_new`($ctorArgs): Long {")
+        appendTryCatchStart()
+        appendLine("    return StableRef.create($fq($ctorCall)).asCPointer().toLong()")
+        appendTryCatchEnd(KneType.LONG) // Long handle
+        appendLine("}")
         appendLine()
 
-        // Dispose — equivalent to swift_release in swift-java
+        // Dispose
         appendLine("@CName(\"${p}_${n}_dispose\")")
-        appendLine("fun `${p}_${n}_dispose`(handle: Long) =")
+        appendLine("fun `${p}_${n}_dispose`(handle: Long) {")
+        appendTryCatchStart()
         appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<$fq>().dispose()")
+        appendTryCatchEnd(KneType.UNIT)
+        appendLine("}")
         appendLine()
 
         // Methods
         cls.methods.forEach { method -> appendMethod(method, cls, p) }
 
-        // Properties — generate getter (and setter if mutable)
+        // Properties
         cls.properties.forEach { prop -> appendProperty(prop, cls, p) }
 
         // Companion methods
@@ -83,7 +156,6 @@ class NativeBridgeGenerator {
         val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
         val returnsViaBuffer = fn.returnType.returnsViaBuffer()
 
-        // Build C-level parameter list
         val extraParams = if (returnsViaBuffer) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
         val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
         val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams"
@@ -92,15 +164,12 @@ class NativeBridgeGenerator {
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
+        appendTryCatchStart()
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
-
-        // Convert object params (recover from StableRef)
         appendObjectParamConversions(fn)
-
         val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
-
         appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
-
+        appendTryCatchEnd(fn.returnType)
         appendLine("}")
         appendLine()
     }
@@ -112,8 +181,10 @@ class NativeBridgeGenerator {
 
         appendLine("@CName(\"$getterName\")")
         appendLine("fun `$getterName`(handle: Long$extraParams)$returnDecl {")
+        appendTryCatchStart()
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
         appendReturnStatement("obj.${prop.name}", prop.type)
+        appendTryCatchEnd(prop.type)
         appendLine("}")
         appendLine()
 
@@ -122,14 +193,16 @@ class NativeBridgeGenerator {
             val valueParam = "value: ${prop.type.nativeBridgeType}"
             appendLine("@CName(\"$setterName\")")
             appendLine("fun `$setterName`(handle: Long, $valueParam) {")
+            appendTryCatchStart()
             appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
             appendSetterBody("obj.${prop.name}", prop.type)
+            appendTryCatchEnd(KneType.UNIT)
             appendLine("}")
             appendLine()
         }
     }
 
-    // ── Companion methods/properties ────────���────────────────────────────────
+    // ── Companion methods/properties ────────────────────────────────────────��
 
     private fun StringBuilder.appendCompanionMethod(fn: KneFunction, cls: KneClass, prefix: String) {
         val symbolName = "${prefix}_${cls.simpleName}_companion_${fn.name}"
@@ -143,14 +216,11 @@ class NativeBridgeGenerator {
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
-
-        // Convert object params
+        appendTryCatchStart()
         appendObjectParamConversions(fn)
-
         val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
-
         appendReturnStatement("${cls.fqName}.${fn.name}($callArgs)", fn.returnType)
-
+        appendTryCatchEnd(fn.returnType)
         appendLine("}")
         appendLine()
     }
@@ -162,8 +232,9 @@ class NativeBridgeGenerator {
 
         appendLine("@CName(\"$getterName\")")
         appendLine("fun `$getterName`($getterParams)$returnDecl {")
-        // Clean up empty param list
+        appendTryCatchStart()
         appendReturnStatement("${cls.fqName}.${prop.name}", prop.type)
+        appendTryCatchEnd(prop.type)
         appendLine("}")
         appendLine()
 
@@ -172,7 +243,9 @@ class NativeBridgeGenerator {
             val valueParam = "value: ${prop.type.nativeBridgeType}"
             appendLine("@CName(\"$setterName\")")
             appendLine("fun `$setterName`($valueParam) {")
+            appendTryCatchStart()
             appendSetterBody("${cls.fqName}.${prop.name}", prop.type)
+            appendTryCatchEnd(KneType.UNIT)
             appendLine("}")
             appendLine()
         }
@@ -185,20 +258,24 @@ class NativeBridgeGenerator {
         val n = enum.simpleName
         val fq = enum.fqName
 
-        // Get name from ordinal (string output-buffer pattern)
         appendLine("@CName(\"${p}_${n}_name\")")
         appendLine("fun `${p}_${n}_name`(ordinal: Int, outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
+        appendTryCatchStart()
         appendStringReturn("$fq.entries[ordinal].name")
+        appendTryCatchEnd(KneType.STRING) // returns Int (byte count)
         appendLine("}")
         appendLine()
 
-        // Get entry count
         appendLine("@CName(\"${p}_${n}_count\")")
-        appendLine("fun `${p}_${n}_count`(): Int = $fq.entries.size")
+        appendLine("fun `${p}_${n}_count`(): Int {")
+        appendTryCatchStart()
+        appendLine("    return $fq.entries.size")
+        appendTryCatchEnd(KneType.INT)
+        appendLine("}")
         appendLine()
     }
 
-    // ── Top-level functions ───────────────────────────────────────────────────
+    // ── Top-level functions ──────────────────────────────────────────────────
 
     private fun StringBuilder.appendTopLevelFunction(fn: KneFunction, prefix: String) {
         val symbolName = "${prefix}_${fn.name}"
@@ -211,19 +288,16 @@ class NativeBridgeGenerator {
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
-
-        // Convert object params
+        appendTryCatchStart()
         appendObjectParamConversions(fn)
-
         val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
-
         appendReturnStatement("${fn.name}($callArgs)", fn.returnType)
-
+        appendTryCatchEnd(fn.returnType)
         appendLine("}")
         appendLine()
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     /** Build the return type declaration for a bridge function. */
     private fun buildReturnDecl(type: KneType): String = when {
@@ -292,11 +366,9 @@ class NativeBridgeGenerator {
             val objType = p.type as KneType.OBJECT
             appendLine("    val ${p.name}Obj = ${p.name}.toCPointer<COpaque>()!!.asStableRef<${objType.fqName}>().get()")
         }
-        // Nullable String params
         fn.params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
             appendLine("    val ${p.name}Str = ${p.name}?.toKString()")
         }
-        // Nullable Object params
         fn.params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner is KneType.OBJECT }.forEach { p ->
             val objType = (p.type as KneType.NULLABLE).inner as KneType.OBJECT
             appendLine("    val ${p.name}Obj = if (${p.name} != 0L) ${p.name}.toCPointer<COpaque>()!!.asStableRef<${objType.fqName}>().get() else null")
@@ -370,11 +442,6 @@ class NativeBridgeGenerator {
         }
     }
 
-    /**
-     * Appends code to write a Kotlin String result to an output buffer.
-     * The output-buffer pattern avoids any native heap allocation:
-     * the JVM allocates the buffer via Arena, the native side fills it.
-     */
     private fun StringBuilder.appendStringReturn(expr: String) {
         appendLine("    val result = $expr")
         appendLine("    val bytes = result.encodeToByteArray()")

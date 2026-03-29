@@ -35,6 +35,16 @@ class Calculator(initial: Int = 0) {
         accumulator = 0
     }
 
+    fun divide(divisor: Int): Int {
+        require(divisor != 0) { "Division by zero" }
+        accumulator /= divisor
+        return accumulator
+    }
+
+    fun failAlways(): String {
+        error("Intentional error for testing")
+    }
+
     val current: Int
         get() = accumulator
 

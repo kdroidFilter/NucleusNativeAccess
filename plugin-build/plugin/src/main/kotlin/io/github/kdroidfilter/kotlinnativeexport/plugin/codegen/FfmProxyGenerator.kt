@@ -17,6 +17,8 @@ import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
  *  - Object lifecycle uses Java Cleaner + a captured Long handle
  *    (mirrors swift-java's AllocatingSwiftArena + swift_retain/swift_release pattern).
  *  - String I/O uses the output-buffer pattern (Arena.allocate + get/set ADDRESS).
+ *  - Exception propagation: every downcall is followed by KneRuntime.checkError()
+ *    which queries the native @ThreadLocal error state.
  *
  * Generated classes have the exact same API as the native Kotlin classes,
  * making the bridge fully transparent to the JVM developer.
@@ -25,6 +27,7 @@ class FfmProxyGenerator {
 
     companion object {
         private const val STRING_BUF_SIZE = 8192
+        private const val ERR_BUF_SIZE = 8192
     }
 
     private fun KneType.returnsViaBuffer(): Boolean =
@@ -40,20 +43,17 @@ class FfmProxyGenerator {
     fun generate(module: KneModule, jvmPackage: String): Map<String, String> {
         val files = mutableMapOf<String, String>()
 
-        // Shared runtime helper (one per module)
         files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage)
+        files["KotlinNativeException.kt"] = generateException(jvmPackage)
 
-        // One file per class
         module.classes.forEach { cls ->
             files["${cls.simpleName}.kt"] = generateClassProxy(cls, module, jvmPackage)
         }
 
-        // One file per enum
         module.enums.forEach { enum ->
             files["${enum.simpleName}.kt"] = generateEnumProxy(enum, module, jvmPackage)
         }
 
-        // Top-level functions → one object per module
         if (module.functions.isNotEmpty()) {
             val objectName = module.libName.replaceFirstChar { it.uppercaseChar() }
             files["$objectName.kt"] = generateFunctionObject(module.functions, objectName, module, jvmPackage)
@@ -72,12 +72,13 @@ class FfmProxyGenerator {
         appendLine("import java.lang.foreign.FunctionDescriptor")
         appendLine("import java.lang.foreign.Linker")
         appendLine("import java.lang.foreign.SymbolLookup")
+        appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine("import java.nio.file.Paths")
         appendLine()
         appendLine("/**")
-        appendLine(" * Shared FFM runtime: loads the native library and resolves MethodHandles.")
-        appendLine(" * Mirrors swift-java's SwiftRuntime symbol lookup pattern.")
+        appendLine(" * Shared FFM runtime: loads the native library, resolves MethodHandles,")
+        appendLine(" * and propagates exceptions from the native side.")
         appendLine(" */")
         appendLine("internal object KneRuntime {")
         appendLine()
@@ -90,7 +91,6 @@ class FfmProxyGenerator {
         appendLine("        val fileName = System.mapLibraryName(name)")
         appendLine("        val sep = if (System.getProperty(\"os.name\").lowercase().contains(\"win\")) \";\" else \":\"")
         appendLine("        val basePaths = System.getProperty(\"java.library.path\", \"\").split(sep)")
-        appendLine("        // Also search next to the executable (GraalVM native-image), CWD, and lib/ subdirs")
         appendLine("        val extraDirs = mutableListOf(System.getProperty(\"user.dir\", \".\"))")
         appendLine("        try {")
         appendLine("            ProcessHandle.current().info().command().ifPresent { cmd ->")
@@ -103,7 +103,6 @@ class FfmProxyGenerator {
         appendLine("            val file = Paths.get(dir, fileName).toFile()")
         appendLine("            if (file.exists()) return SymbolLookup.libraryLookup(file.toPath(), globalArena)")
         appendLine("        }")
-        appendLine("        // Fallback: let the OS linker find it")
         appendLine("        return SymbolLookup.loaderLookup()")
         appendLine("    }")
         appendLine()
@@ -112,10 +111,43 @@ class FfmProxyGenerator {
         appendLine("            library.find(symbol).orElseThrow { UnsatisfiedLinkError(\"Symbol not found: \$symbol\") },")
         appendLine("            descriptor,")
         appendLine("        )")
+        appendLine()
+        appendLine("    // ── Exception propagation ────────────────────────────────────────────")
+        appendLine()
+        appendLine("    private val HAS_ERROR_HANDLE: MethodHandle by lazy {")
+        appendLine("        handle(\"${libName}_kne_hasError\", FunctionDescriptor.of(JAVA_INT))")
+        appendLine("    }")
+        appendLine("    private val GET_LAST_ERROR_HANDLE: MethodHandle by lazy {")
+        appendLine("        handle(\"${libName}_kne_getLastError\", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))")
+        appendLine("    }")
+        appendLine()
+        appendLine("    fun checkError() {")
+        appendLine("        val hasError = HAS_ERROR_HANDLE.invoke() as Int")
+        appendLine("        if (hasError != 0) {")
+        appendLine("            Arena.ofConfined().use { arena ->")
+        appendLine("                val buf = arena.allocate($ERR_BUF_SIZE.toLong())")
+        appendLine("                GET_LAST_ERROR_HANDLE.invoke(buf, $ERR_BUF_SIZE)")
+        appendLine("                throw KotlinNativeException(buf.getString(0))")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    }")
         appendLine("}")
     }
 
-    // ── Class proxy ───────────────────────────────────────────────────────────
+    // ── Exception class ──────────────────────────────────────────────────────
+
+    private fun generateException(pkg: String): String = buildString {
+        appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
+        appendLine("package $pkg")
+        appendLine()
+        appendLine("/**")
+        appendLine(" * Exception thrown when a Kotlin/Native function throws across the FFM boundary.")
+        appendLine(" * The message contains the original Kotlin exception's message.")
+        appendLine(" */")
+        appendLine("class KotlinNativeException(message: String) : RuntimeException(message)")
+    }
+
+    // ── Class proxy ──────────────────────────────────────────────────────────
 
     private fun generateClassProxy(cls: KneClass, module: KneModule, pkg: String): String = buildString {
         val p = module.libName
@@ -145,7 +177,6 @@ class FfmProxyGenerator {
         appendLine("        private val CLEANER = Cleaner.create()")
         appendLine()
 
-        // MethodHandles — each in its own lazy val (mirrors swift-java's descriptor class per method)
         val ctorLayouts = buildLayouts(cls.constructor.params.map { it.type })
         appendLine("        private val NEW_HANDLE: MethodHandle by lazy {")
         appendLine("            KneRuntime.handle(\"${p}_${n}_new\",")
@@ -182,7 +213,6 @@ class FfmProxyGenerator {
             }
         }
 
-        // Companion method/property handles
         cls.companionMethods.forEach { method ->
             val handleName = "COMPANION_${method.name.uppercase()}_HANDLE"
             val descriptor = buildTopLevelDescriptor(method)
@@ -207,7 +237,7 @@ class FfmProxyGenerator {
             }
         }
 
-        // Factory function (operator invoke = transparent construction)
+        // Factory
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
         appendLine("        /**")
@@ -220,17 +250,18 @@ class FfmProxyGenerator {
             appendStringInvokeArgsAlloc("                ", cls.constructor.params)
             val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
             appendLine("                val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
+            appendLine("                KneRuntime.checkError()")
             appendLine("                return fromNativeHandle(h)")
             appendLine("            }")
         } else {
             val ctorInvokeArgs = buildCtorInvokeArgs(cls.constructor.params)
             appendLine("            val h = NEW_HANDLE.invoke($ctorInvokeArgs) as Long")
+            appendLine("            KneRuntime.checkError()")
             appendLine("            return fromNativeHandle(h)")
         }
         appendLine("        }")
         appendLine()
 
-        // fromNativeHandle factory for wrapping handles returned by other methods
         appendLine("        internal fun fromNativeHandle(h: Long): $n {")
         appendLine("            val obj = $n(h)")
         appendLine("            CLEANER.register(obj) { runCatching { DISPOSE_HANDLE.invoke(h) } }")
@@ -238,22 +269,14 @@ class FfmProxyGenerator {
         appendLine("        }")
 
         // Companion methods
-        cls.companionMethods.forEach { method ->
-            appendCompanionMethodProxy(method)
-        }
-
-        // Companion properties
-        cls.companionProperties.forEach { prop ->
-            appendCompanionPropertyProxy(prop)
-        }
+        cls.companionMethods.forEach { method -> appendCompanionMethodProxy(method) }
+        cls.companionProperties.forEach { prop -> appendCompanionPropertyProxy(prop) }
 
         appendLine("    }")
         appendLine()
 
         // Methods
         cls.methods.forEach { method -> appendMethodProxy(method, cls, p) }
-
-        // Properties
         cls.properties.forEach { prop -> appendPropertyProxy(prop, cls) }
 
         // close()
@@ -299,9 +322,11 @@ class FfmProxyGenerator {
             appendLine("                val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
             if (prop.type is KneType.NULLABLE) {
                 appendLine("                val len = $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE) as Int")
+                appendLine("                KneRuntime.checkError()")
                 appendLine("                return if (len < 0) null else buf.getString(0)")
             } else {
                 appendLine("                $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE)")
+                appendLine("                KneRuntime.checkError()")
                 appendLine("                return buf.getString(0)")
             }
             appendLine("            }")
@@ -319,7 +344,7 @@ class FfmProxyGenerator {
         appendLine()
     }
 
-    // ── Companion method/property proxies ─────────────────────────────────────
+    // ── Companion method/property proxies ────────────────────────────────────
 
     private fun StringBuilder.appendCompanionMethodProxy(fn: KneFunction) {
         val handleName = "COMPANION_${fn.name.uppercase()}_HANDLE"
@@ -358,9 +383,11 @@ class FfmProxyGenerator {
             appendLine("                    val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
             if (prop.type is KneType.NULLABLE) {
                 appendLine("                    val len = $getHandleName.invoke(buf, $STRING_BUF_SIZE) as Int")
+                appendLine("                    KneRuntime.checkError()")
                 appendLine("                    return if (len < 0) null else buf.getString(0)")
             } else {
                 appendLine("                    $getHandleName.invoke(buf, $STRING_BUF_SIZE)")
+                appendLine("                    KneRuntime.checkError()")
                 appendLine("                    return buf.getString(0)")
             }
             appendLine("                }")
@@ -377,16 +404,13 @@ class FfmProxyGenerator {
         }
     }
 
-    // ── Enum proxy ────────────────────────────────────────────────────────────
+    // ── Enum proxy ───────────────────────────────────────────────────────────
 
     private fun generateEnumProxy(enum: KneEnum, module: KneModule, pkg: String): String = buildString {
-        val p = module.libName
-        val n = enum.simpleName
-
         appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
         appendLine("package $pkg")
         appendLine()
-        appendLine("enum class $n {")
+        appendLine("enum class ${enum.simpleName} {")
         enum.entries.forEachIndexed { idx, entry ->
             val separator = if (idx < enum.entries.size - 1) "," else ";"
             appendLine("    $entry$separator")
@@ -394,7 +418,7 @@ class FfmProxyGenerator {
         appendLine("}")
     }
 
-    // ── Top-level function object ──────────────────────────────────────────────
+    // ── Top-level function object ────────────────────────────────────────────
 
     private fun generateFunctionObject(
         fns: List<KneFunction>,
@@ -439,8 +463,8 @@ class FfmProxyGenerator {
                 appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
                 appendLine("        }")
             } else {
-                val invokeArgs = fn.params.joinToString(", ") { p ->
-                    buildJvmInvokeArg(p.name, p.type)
+                val invokeArgs = fn.params.joinToString(", ") { fp ->
+                    buildJvmInvokeArg(fp.name, fp.type)
                 }
                 appendCallAndReturn("        ", fn.returnType, handleName, invokeArgs)
             }
@@ -452,15 +476,14 @@ class FfmProxyGenerator {
         appendLine("}")
     }
 
-    // ── Descriptor builders ───────────────────────────────────────────────────
+    // ── Descriptor builders ──────────────────────────────────────────────────
 
     private fun buildMethodDescriptor(fn: KneFunction): String {
         val paramLayouts = buildList {
             add("JAVA_LONG") // handle
             fn.params.forEach { p -> add(p.type.ffmLayout) }
             if (fn.returnType.returnsViaBuffer()) {
-                add("ADDRESS") // outBuf
-                add("JAVA_INT") // outLen
+                add("ADDRESS"); add("JAVA_INT")
             }
         }
         return buildDescriptor(fn.returnType, paramLayouts)
@@ -468,10 +491,9 @@ class FfmProxyGenerator {
 
     private fun buildGetterDescriptor(prop: KneProperty): String {
         val paramLayouts = buildList {
-            add("JAVA_LONG") // handle
+            add("JAVA_LONG")
             if (prop.type.returnsViaBuffer()) {
-                add("ADDRESS") // outBuf
-                add("JAVA_INT") // outLen
+                add("ADDRESS"); add("JAVA_INT")
             }
         }
         return buildDescriptor(prop.type, paramLayouts)
@@ -480,8 +502,7 @@ class FfmProxyGenerator {
     private fun buildCompanionGetterDescriptor(prop: KneProperty): String {
         val paramLayouts = buildList {
             if (prop.type.returnsViaBuffer()) {
-                add("ADDRESS") // outBuf
-                add("JAVA_INT") // outLen
+                add("ADDRESS"); add("JAVA_INT")
             }
         }
         return buildDescriptor(prop.type, paramLayouts)
@@ -491,8 +512,7 @@ class FfmProxyGenerator {
         val paramLayouts = buildList {
             fn.params.forEach { p -> add(p.type.ffmLayout) }
             if (fn.returnType.returnsViaBuffer()) {
-                add("ADDRESS") // outBuf
-                add("JAVA_INT") // outLen
+                add("ADDRESS"); add("JAVA_INT")
             }
         }
         return buildDescriptor(fn.returnType, paramLayouts)
@@ -512,9 +532,8 @@ class FfmProxyGenerator {
     private fun buildLayouts(types: List<KneType>): String =
         types.filter { it.ffmLayout.isNotEmpty() }.joinToString("") { ", ${it.ffmLayout}" }
 
-    // ── Invoke arg builders ───────────────────────────────────────────────────
+    // ── Invoke arg builders ──────────────────────────────────────────────────
 
-    /** Build the JVM invoke argument for a single parameter. */
     private fun buildJvmInvokeArg(name: String, type: KneType): String = when (type) {
         KneType.STRING -> "${name}Seg"
         KneType.BOOLEAN -> "if ($name) 1 else 0"
@@ -547,10 +566,7 @@ class FfmProxyGenerator {
         val args = buildList {
             add("handle")
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType.returnsViaBuffer()) {
-                add("buf")
-                add("$STRING_BUF_SIZE")
-            }
+            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
         }
         return args.joinToString(", ")
     }
@@ -566,20 +582,13 @@ class FfmProxyGenerator {
     private fun buildTopLevelInvokeArgs(fn: KneFunction): String {
         val args = buildList {
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType.returnsViaBuffer()) {
-                add("buf")
-                add("$STRING_BUF_SIZE")
-            }
+            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
         }
         return args.joinToString(", ")
     }
 
-    // ── Code emission helpers ─────────────────────────────────────────────────
+    // ── Code emission helpers ────────────────────────────────────────────────
 
-    /**
-     * Emits Arena allocations for all String parameters (including nullable).
-     * Each String param becomes a `val <name>Seg = arena.allocateFrom(<name>)`.
-     */
     private fun StringBuilder.appendStringInvokeArgsAlloc(indent: String, params: List<KneParam>) {
         params.filter { it.type == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = arena.allocateFrom(${p.name})")
@@ -590,8 +599,8 @@ class FfmProxyGenerator {
     }
 
     /**
-     * Emits a handle invocation and returns the result, including
-     * string output-buffer handling when the return type is STRING.
+     * Emits a handle invocation with checkError() after the call.
+     * For value-returning functions, stores result in a local var, checks error, then returns.
      */
     private fun StringBuilder.appendCallAndReturn(
         indent: String,
@@ -600,25 +609,60 @@ class FfmProxyGenerator {
         invokeArgs: String,
     ) {
         when (returnType) {
-            KneType.UNIT -> appendLine("${indent}$handleName.invoke($invokeArgs)")
+            KneType.UNIT -> {
+                appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
             KneType.STRING -> {
                 appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
                 appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return buf.getString(0)")
             }
-            KneType.BOOLEAN -> appendLine("${indent}return ($handleName.invoke($invokeArgs) as Int) != 0")
-            KneType.INT -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Int")
-            KneType.LONG -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Long")
-            KneType.DOUBLE -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Double")
-            KneType.FLOAT -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Float")
-            KneType.BYTE -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Byte")
-            KneType.SHORT -> appendLine("${indent}return $handleName.invoke($invokeArgs) as Short")
+            KneType.BOOLEAN -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r != 0")
+            }
+            KneType.INT -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Double")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Float")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
+            KneType.BYTE -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Byte")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
+            KneType.SHORT -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Short")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
             is KneType.OBJECT -> {
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return ${returnType.simpleName}.fromNativeHandle(resultHandle)")
             }
             is KneType.ENUM -> {
-                appendLine("${indent}return ${returnType.simpleName}.entries[$handleName.invoke($invokeArgs) as Int]")
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return ${returnType.simpleName}.entries[_r]")
             }
             is KneType.NULLABLE -> appendNullableCallAndReturn(indent, returnType, handleName, invokeArgs)
         }
@@ -634,50 +678,66 @@ class FfmProxyGenerator {
             KneType.STRING -> {
                 appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
                 appendLine("${indent}val len = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (len < 0) null else buf.getString(0)")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw < 0) null else raw != 0")
             }
             KneType.INT -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else raw.toInt()")
             }
             KneType.LONG -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else raw")
             }
             KneType.SHORT -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Int.MIN_VALUE) null else raw.toShort()")
             }
             KneType.BYTE -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Int.MIN_VALUE) null else raw.toByte()")
             }
             KneType.FLOAT -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Float.fromBits(raw.toInt())")
             }
             KneType.DOUBLE -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Double.fromBits(raw)")
             }
             is KneType.OBJECT -> {
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (resultHandle == 0L) null else ${type.inner.simpleName}.fromNativeHandle(resultHandle)")
             }
             is KneType.ENUM -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw < 0) null else ${type.inner.simpleName}.entries[raw]")
             }
-            KneType.UNIT -> appendLine("${indent}$handleName.invoke($invokeArgs)")
-            else -> appendLine("${indent}return $handleName.invoke($invokeArgs)")
+            KneType.UNIT -> {
+                appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
+            else -> {
+                appendLine("${indent}val _r = $handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}return _r")
+            }
         }
     }
 
-    /** Emits a setter invoke with proper type conversion. */
     private fun StringBuilder.appendSetterInvoke(indent: String, handleName: String, type: KneType, handleArg: String?) {
         val prefix = if (handleArg != null) "$handleArg, " else ""
         when (type) {
@@ -685,13 +745,26 @@ class FfmProxyGenerator {
                 appendLine("${indent}Arena.ofConfined().use { arena ->")
                 appendLine("${indent}    val valueSeg = arena.allocateFrom(value)")
                 appendLine("${indent}    $handleName.invoke(${prefix}valueSeg)")
+                appendLine("${indent}    KneRuntime.checkError()")
                 appendLine("${indent}}")
             }
-            KneType.BOOLEAN -> appendLine("${indent}$handleName.invoke(${prefix}if (value) 1 else 0)")
-            is KneType.OBJECT -> appendLine("${indent}$handleName.invoke(${prefix}value.handle)")
-            is KneType.ENUM -> appendLine("${indent}$handleName.invoke(${prefix}value.ordinal)")
+            KneType.BOOLEAN -> {
+                appendLine("${indent}$handleName.invoke(${prefix}if (value) 1 else 0)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
+            is KneType.OBJECT -> {
+                appendLine("${indent}$handleName.invoke(${prefix}value.handle)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}$handleName.invoke(${prefix}value.ordinal)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
             is KneType.NULLABLE -> appendNullableSetterInvoke(indent, handleName, type, handleArg)
-            else -> appendLine("${indent}$handleName.invoke(${prefix}value)")
+            else -> {
+                appendLine("${indent}$handleName.invoke(${prefix}value)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
         }
     }
 
@@ -702,18 +775,25 @@ class FfmProxyGenerator {
                 appendLine("${indent}Arena.ofConfined().use { arena ->")
                 appendLine("${indent}    val valueSeg = if (value != null) arena.allocateFrom(value) else MemorySegment.NULL")
                 appendLine("${indent}    $handleName.invoke(${prefix}valueSeg)")
+                appendLine("${indent}    KneRuntime.checkError()")
                 appendLine("${indent}}")
             }
-            KneType.BOOLEAN -> appendLine("${indent}$handleName.invoke(${prefix}if (value == null) -1 else if (value) 1 else 0)")
-            KneType.INT -> appendLine("${indent}$handleName.invoke(${prefix}value?.toLong() ?: Long.MIN_VALUE)")
-            KneType.LONG -> appendLine("${indent}$handleName.invoke(${prefix}value ?: Long.MIN_VALUE)")
-            KneType.SHORT -> appendLine("${indent}$handleName.invoke(${prefix}value?.toInt() ?: Int.MIN_VALUE)")
-            KneType.BYTE -> appendLine("${indent}$handleName.invoke(${prefix}value?.toInt() ?: Int.MIN_VALUE)")
-            KneType.FLOAT -> appendLine("${indent}$handleName.invoke(${prefix}if (value != null) value.toRawBits().toLong() else Long.MIN_VALUE)")
-            KneType.DOUBLE -> appendLine("${indent}$handleName.invoke(${prefix}if (value != null) value.toRawBits() else Long.MIN_VALUE)")
-            is KneType.OBJECT -> appendLine("${indent}$handleName.invoke(${prefix}value?.handle ?: 0L)")
-            is KneType.ENUM -> appendLine("${indent}$handleName.invoke(${prefix}value?.ordinal ?: -1)")
-            else -> appendLine("${indent}$handleName.invoke(${prefix}value)")
+            else -> {
+                val valueExpr = when (type.inner) {
+                    KneType.BOOLEAN -> "if (value == null) -1 else if (value) 1 else 0"
+                    KneType.INT -> "value?.toLong() ?: Long.MIN_VALUE"
+                    KneType.LONG -> "value ?: Long.MIN_VALUE"
+                    KneType.SHORT -> "value?.toInt() ?: Int.MIN_VALUE"
+                    KneType.BYTE -> "value?.toInt() ?: Int.MIN_VALUE"
+                    KneType.FLOAT -> "if (value != null) value.toRawBits().toLong() else Long.MIN_VALUE"
+                    KneType.DOUBLE -> "if (value != null) value.toRawBits() else Long.MIN_VALUE"
+                    is KneType.OBJECT -> "value?.handle ?: 0L"
+                    is KneType.ENUM -> "value?.ordinal ?: -1"
+                    else -> "value"
+                }
+                appendLine("${indent}$handleName.invoke(${prefix}$valueExpr)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
         }
     }
 }

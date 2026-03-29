@@ -2,6 +2,7 @@ package com.example.calculator
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -639,6 +640,58 @@ class CalculatorTest {
     fun `nullable Object return - null`() {
         CalculatorManager().use { mgr ->
             assertNull(mgr.getOrNull("nonexistent"))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase 3b: Exception propagation
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `divide works normally`() {
+        Calculator(10).use { calc ->
+            assertEquals(5, calc.divide(2))
+            assertEquals(5, calc.current)
+        }
+    }
+
+    @Test
+    fun `divide by zero throws KotlinNativeException`() {
+        Calculator(10).use { calc ->
+            val ex = assertFailsWith<KotlinNativeException> {
+                calc.divide(0)
+            }
+            assertTrue(ex.message!!.contains("Division by zero"), "Expected 'Division by zero' but got: ${ex.message}")
+        }
+    }
+
+    @Test
+    fun `failAlways throws with correct message`() {
+        Calculator(0).use { calc ->
+            val ex = assertFailsWith<KotlinNativeException> {
+                calc.failAlways()
+            }
+            assertTrue(ex.message!!.contains("Intentional error"), "Expected 'Intentional error' but got: ${ex.message}")
+        }
+    }
+
+    @Test
+    fun `calculator works normally after exception`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            // Subsequent calls should work fine
+            assertEquals(15, calc.add(5))
+            assertEquals(15, calc.current)
+        }
+    }
+
+    @Test
+    fun `multiple exceptions in sequence`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            assertFailsWith<KotlinNativeException> { calc.divide(0) }
+            // Still works
+            assertEquals(5, calc.divide(2))
         }
     }
 }
