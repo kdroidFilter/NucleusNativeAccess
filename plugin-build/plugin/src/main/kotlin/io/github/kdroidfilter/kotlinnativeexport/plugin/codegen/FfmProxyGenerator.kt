@@ -70,8 +70,8 @@ class FfmProxyGenerator {
     }
 
     private fun classHasCallbacks(cls: KneClass): Boolean =
-        cls.methods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } } ||
-        cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
+        cls.methods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } || fn.isSuspend } ||
+        cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } || fn.isSuspend }
 
     /**
      * Generates all proxy files for the module.
@@ -861,24 +861,15 @@ class FfmProxyGenerator {
         val retType = fn.returnType.jvmTypeName
 
         appendLine("    suspend fun ${fn.name}($params): $retType = suspendCancellableCoroutine { _cont ->")
-        appendLine("        val _suspendArena = Arena.ofShared()")
-        appendLine("        val _closed = java.util.concurrent.atomic.AtomicBoolean(false)")
-        appendLine("        fun _closeOnce() { if (_closed.compareAndSet(false, true)) _suspendArena.close() }")
-
-        // Continuation stub — decodes result based on return type
+        // Use the object's shared callback arena — stubs live as long as the proxy object
         appendLine("        val _contStub = KneRuntime.createSuspendContStub({ _hasValue, _value ->")
-        appendLine("            try {")
-        appendSuspendResultDecode("                ", fn.returnType)
-        appendLine("            } finally { _closeOnce() }")
-        appendLine("        }, _suspendArena)")
+        appendSuspendResultDecode("            ", fn.returnType)
+        appendLine("        }, _callbackArena)")
 
-        // Exception stub
         appendLine("        val _excStub = KneRuntime.createSuspendExcStub({ _msgHandle ->")
-        appendLine("            try {")
-        appendLine("                if (_msgHandle == 0L) _cont.cancel()")
-        appendLine("                else _cont.resumeWithException(KotlinNativeException(KneRuntime.readStringFromRef(_msgHandle)))")
-        appendLine("            } finally { _closeOnce() }")
-        appendLine("        }, _suspendArena)")
+        appendLine("            if (_msgHandle == 0L) _cont.cancel()")
+        appendLine("            else _cont.resumeWithException(KotlinNativeException(KneRuntime.readStringFromRef(_msgHandle)))")
+        appendLine("        }, _callbackArena)")
 
         // Invoke native bridge
         appendLine("        Arena.ofConfined().use { _callArena ->")
@@ -899,7 +890,6 @@ class FfmProxyGenerator {
         appendLine("            $handleName.invoke($invokeArgs)")
         appendLine("            val _jobHandle = _cancelOut.get(JAVA_LONG, 0L) as Long")
         appendLine("            _cont.invokeOnCancellation { KneRuntime.CANCEL_JOB_HANDLE.invoke(_jobHandle) }")
-        // Note: do NOT close arena here — the native coroutine will call cont/exc callback which closes it
         appendLine("        }")
         appendLine("    }")
         appendLine()
@@ -1308,10 +1298,16 @@ class FfmProxyGenerator {
                     add(p.type.ffmLayout)
                 }
             }
-            if (fn.returnType.returnsViaBuffer()) {
+            // Suspend functions: add continuation + exception + cancelOut params, return void early
+            if (fn.isSuspend) {
+                add("JAVA_LONG")  // contPtr
+                add("JAVA_LONG")  // excPtr
+                add("ADDRESS")    // cancelOut
+            }
+            if (!fn.isSuspend && fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
-            if (returnDc != null) {
+            if (!fn.isSuspend && returnDc != null) {
                 flattenDcFields(returnDc, "").forEach { (_, type) ->
                     when (type) {
                         KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
@@ -1319,8 +1315,8 @@ class FfmProxyGenerator {
                     }
                 }
             }
-            // Collection return out-params (unwrap nullable)
-            if (fn.returnType.isCollection()) {
+            // Collection return out-params (unwrap nullable) — skip for suspend
+            if (!fn.isSuspend && fn.returnType.isCollection()) {
                 val collInner = fn.returnType.unwrapCollection()
                 val collElem = when (collInner) { is KneType.LIST -> collInner.elementType; is KneType.SET -> collInner.elementType; else -> null }
                 if (collElem is KneType.DATA_CLASS) {
@@ -1338,12 +1334,6 @@ class FfmProxyGenerator {
                     }
                     else -> {}
                 }
-            }
-            // Suspend functions: add continuation + exception + cancelOut params
-            if (fn.isSuspend) {
-                add("JAVA_LONG")  // contPtr
-                add("JAVA_LONG")  // excPtr
-                add("ADDRESS")    // cancelOut (CPointer<LongVar>)
             }
         }
         if (fn.isSuspend) return buildDescriptor(KneType.UNIT, paramLayouts)
