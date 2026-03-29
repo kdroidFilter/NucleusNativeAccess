@@ -408,7 +408,7 @@ class FfmProxyGenerator {
         appendLine("    }")
     }
 
-    /** Emit collection return as packed buffer [count:Int64][elements...] from upcall. 8-byte header for alignment. */
+    /** Emit collection return as packed buffer [count:Int64][ elements...] from upcall. 8-byte header for alignment. */
     private fun StringBuilder.appendUpcallCollectionReturn(elemType: KneType, srcExpr: String) {
         val H = 8 // header: 8 bytes (Int at offset 0, 4 bytes padding) — ensures 8-byte alignment for all element types
         appendLine("        val _list = $srcExpr")

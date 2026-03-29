@@ -943,7 +943,7 @@ class NativeBridgeGenerator {
         appendLine("    }")
     }
 
-    /** Read a collection from packed buffer returned by callback. Buffer: [count:Int32][4-byte pad][elements...] */
+    /** Read a collection from packed buffer returned by callback. Buffer: [count:Int32][4-byte pad][ elements...] */
     private fun StringBuilder.appendCollectionReturnFromPackedBuffer(elemType: KneType, isSet: Boolean) {
         val H = 8 // 8-byte header: count(4) + padding(4) for alignment
         val varType = KneType.collectionElementVarType(elemType)
@@ -974,7 +974,7 @@ class NativeBridgeGenerator {
         else appendLine("        _list")
     }
 
-    /** Read a map from packed buffer returned by callback. Buffer: [count:Int32][4-pad][keys...][values...] */
+    /** Read a map from packed buffer returned by callback. Buffer: [count:Int32][4-pad][keys...][ values...] */
     private fun StringBuilder.appendMapReturnFromPackedBuffer(mapType: KneType.MAP) {
         val H = 8 // 8-byte header for alignment
         val kSize = if (mapType.keyType == KneType.STRING) 0 else fieldSize(mapType.keyType)
