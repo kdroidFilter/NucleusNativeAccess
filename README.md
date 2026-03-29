@@ -135,6 +135,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
+| `List<T>` | ✅ 4t | ✅ 4t | &mdash; | &mdash; | &mdash; | pointer + size (flat array) |
+| `Set<T>` | ✅ 2t | ✅ 2t | &mdash; | &mdash; | &mdash; | same as List at C ABI |
+| `Map<K, V>` | ✅ 2t | ✅ 2t | &mdash; | &mdash; | &mdash; | parallel key/value arrays |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
 
 ### Declarations
@@ -179,6 +182,32 @@ calc.formatWith { "Result: $it" }
 // Async callbacks work (e.g. native event listeners)
 desktop.setTrayClickCallback { index -> println("Clicked: $index") }
 ```
+
+### Collections
+
+`List<T>`, `Set<T>`, and `Map<K, V>` cross the FFM boundary using flat arrays (pointer + size), inspired by swift-java's `[UInt8]` lowering.
+
+**Supported element types**: `Int`, `Long`, `Double`, `Float`, `Short`, `Byte`, `Boolean`, `String`, `enum class`
+
+```kotlin
+// Kotlin/Native
+fun getScores(): List<Int> = listOf(accumulator, accumulator * 2, accumulator * 3)
+fun sumAll(values: List<Int>): Int { accumulator = values.sum(); return accumulator }
+fun getMetadata(): Map<String, Int> = mapOf("current" to accumulator, "scale" to scale.toInt())
+
+// JVM — transparent
+val scores = calc.getScores()              // [10, 20, 30]
+calc.sumAll(listOf(1, 2, 3, 4, 5))        // 15
+val meta = calc.getMetadata()              // {current=42, scale=3}
+```
+
+| Collection | C ABI encoding |
+|---|---|
+| `List<primitive>` | `CPointer<XxxVar>` + `size: Int` |
+| `List<String>` | packed null-terminated buffer + count |
+| `List<Enum>` | ordinal array + count |
+| `Set<T>` | same as `List<T>` (converted at boundary) |
+| `Map<K, V>` | parallel key + value arrays + count |
 
 ### Data classes
 
@@ -241,7 +270,7 @@ calc.add(5) // works normally after exception
 | Object (class) directly in callbacks | Not yet implemented | Wrap in a data class |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
-| Collections (`List`, `Map`, `Set`) | Not yet implemented | Use `ByteArray` for binary, data class for structured |
+| Collections in callbacks | Not yet implemented | Use collections as direct params/returns |
 | Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |

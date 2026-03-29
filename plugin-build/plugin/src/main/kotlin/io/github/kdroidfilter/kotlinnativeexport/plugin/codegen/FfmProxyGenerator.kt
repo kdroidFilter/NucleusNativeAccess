@@ -29,6 +29,7 @@ class FfmProxyGenerator {
     companion object {
         private const val STRING_BUF_SIZE = 8192
         private const val ERR_BUF_SIZE = 8192
+        private const val MAX_COLLECTION_SIZE = 4096
     }
 
     private fun KneType.returnsViaBuffer(): Boolean =
@@ -43,9 +44,13 @@ class FfmProxyGenerator {
 
     private fun KneType.isFunctionType(): Boolean = this is KneType.FUNCTION
 
-    /** Check if a function needs a confined arena (for string/byte alloc — callbacks use persistent arena). */
+    private fun KneType.isCollection(): Boolean =
+        this is KneType.LIST || this is KneType.SET || this is KneType.MAP
+
+    /** Check if a function needs a confined arena (for string/byte/collection alloc — callbacks use persistent arena). */
     private fun needsConfinedArena(params: List<KneParam>, returnType: KneType): Boolean =
-        params.any { it.type.isStringLike() || it.type.isByteArrayType() } || returnType.isStringLike() || returnType.isByteArrayType()
+        params.any { it.type.isStringLike() || it.type.isByteArrayType() || it.type.isCollection() } ||
+        returnType.isStringLike() || returnType.isByteArrayType() || returnType.isCollection()
 
     private fun isDataClassReturn(type: KneType): Boolean =
         type is KneType.DATA_CLASS || (type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS)
@@ -551,14 +556,18 @@ class FfmProxyGenerator {
         val returnDc = extractDataClass(fn.returnType)
         val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
         val hasAnyDcParams = fn.params.any { extractDataClass(it.type) != null }
+        val returnsCollection = fn.returnType.isCollection()
         val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType) || returnDc != null ||
             hasAnyDcParams && fn.params.any { dc -> val d = extractDataClass(dc.type); d != null && d.fields.any { f -> f.type == KneType.STRING } }
 
-        if (needsConfinedArena || returnDc != null) {
+        if (needsConfinedArena || returnDc != null || returnsCollection) {
             appendLine("        Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("            ", fn.params)
+            appendCollectionParamAlloc("            ", fn.params)
             if (returnDc != null) {
                 appendDataClassReturnProxy("            ", fn, handleName, returnsNullableDc)
+            } else if (returnsCollection) {
+                appendCollectionReturnProxy("            ", fn, handleName)
             } else {
                 val invokeArgs = buildClassInvokeArgsExpanded(fn)
                 appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
@@ -653,9 +662,14 @@ class FfmProxyGenerator {
         return args.joinToString(", ")
     }
 
-    /** Expand a single param into invoke args. DATA_CLASS becomes N args (recursive), ByteArray adds size. */
+    /** Expand a single param into invoke args. DATA_CLASS becomes N args (recursive), ByteArray/collections add size. */
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
         if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
+        if (p.type is KneType.LIST) return listOf("${p.name}Seg", "${p.name}.size")
+        if (p.type is KneType.SET) return listOf("${p.name}Seg", "${p.name}.size")
+        if (p.type is KneType.MAP) {
+            return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
+        }
         val dc = extractDataClass(p.type)
         if (dc == null) return listOf(buildJvmInvokeArg(p.name, p.type))
         val isNullable = p.type is KneType.NULLABLE
@@ -885,6 +899,12 @@ class FfmProxyGenerator {
                     }
                 } else if (p.type == KneType.BYTE_ARRAY) {
                     add("ADDRESS"); add("JAVA_INT")
+                } else if (p.type is KneType.LIST || p.type is KneType.SET) {
+                    add("ADDRESS"); add("JAVA_INT") // pointer + size
+                } else if (p.type is KneType.MAP) {
+                    add("ADDRESS") // keys pointer
+                    add("ADDRESS") // values pointer
+                    add("JAVA_INT") // size
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -900,10 +920,28 @@ class FfmProxyGenerator {
                     }
                 }
             }
+            // Collection return out-params
+            if (fn.returnType.isCollection()) {
+                when (fn.returnType) {
+                    is KneType.LIST, is KneType.SET -> {
+                        add("ADDRESS"); add("JAVA_INT") // outBuf + outLen/outBufLen
+                    }
+                    is KneType.MAP -> {
+                        val map = fn.returnType as KneType.MAP
+                        add("ADDRESS") // outKeys
+                        if (map.keyType == KneType.STRING) add("JAVA_INT")
+                        add("ADDRESS") // outValues
+                        if (map.valueType == KneType.STRING) add("JAVA_INT")
+                        add("JAVA_INT") // outLen
+                    }
+                    else -> {}
+                }
+            }
         }
         val effectiveReturn = when {
             returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
             returnDc != null -> KneType.UNIT
+            fn.returnType.isCollection() -> KneType.INT // element count
             else -> fn.returnType
         }
         return buildDescriptor(effectiveReturn, paramLayouts)
@@ -962,6 +1000,9 @@ class FfmProxyGenerator {
         is KneType.ENUM -> "$name.ordinal"
         is KneType.NULLABLE -> buildNullableJvmInvokeArg(name, type)
         is KneType.FUNCTION -> "${name}Stub"
+        is KneType.LIST -> "${name}Seg"
+        is KneType.SET -> "${name}Seg"
+        is KneType.MAP -> "${name}Seg" // shouldn't be reached; MAP expands to keys+values
         else -> name
     }
 
@@ -1045,6 +1086,166 @@ class FfmProxyGenerator {
         }
     }
 
+    // ── Collection marshaling ────────────────────────────────────────────────
+
+    /** Allocate MemorySegments for collection parameters. */
+    private fun StringBuilder.appendCollectionParamAlloc(indent: String, params: List<KneParam>) {
+        params.forEach { p ->
+            when (p.type) {
+                is KneType.LIST -> appendListParamAlloc(indent, p.name, p.type.elementType)
+                is KneType.SET -> {
+                    appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
+                    appendListParamAlloc(indent, p.name, p.type.elementType, srcExpr = "${p.name}AsList")
+                }
+                is KneType.MAP -> appendMapParamAlloc(indent, p.name, p.type)
+                else -> {}
+            }
+        }
+    }
+
+    private fun StringBuilder.appendListParamAlloc(indent: String, name: String, elemType: KneType, srcExpr: String = name) {
+        when (elemType) {
+            KneType.STRING -> {
+                // Pack strings as null-terminated sequence in a single buffer
+                appendLine("${indent}val ${name}TotalBytes = $srcExpr.sumOf { it.length + 1 }")
+                appendLine("${indent}val ${name}Seg = arena.allocate(${name}TotalBytes.toLong().coerceAtLeast(1))")
+                appendLine("${indent}var ${name}Off = 0L")
+                appendLine("${indent}for (_s in $srcExpr) { ${name}Seg.setString(${name}Off, _s); ${name}Off += _s.length + 1 }")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_INT, i.toLong(), if (v) 1 else 0) }")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_INT, i.toLong(), v.ordinal) }")
+            }
+            is KneType.OBJECT -> {
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), v.handle) }")
+            }
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                appendLine("${indent}val ${name}Seg = arena.allocate($layout, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex($layout, i.toLong(), v) }")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendMapParamAlloc(indent: String, name: String, type: KneType.MAP) {
+        appendLine("${indent}val ${name}KeysList = ${name}.keys.toList()")
+        appendLine("${indent}val ${name}ValuesList = ${name}.values.toList()")
+        appendListParamAlloc(indent, "${name}_keys", type.keyType, srcExpr = "${name}KeysList")
+        appendListParamAlloc(indent, "${name}_values", type.valueType, srcExpr = "${name}ValuesList")
+    }
+
+    /** Generate the return-proxy for collection types. */
+    private fun StringBuilder.appendCollectionReturnProxy(indent: String, fn: KneFunction, handleName: String) {
+        val type = fn.returnType
+        when (type) {
+            is KneType.LIST -> appendListReturnProxy(indent, fn, handleName, type.elementType, "List")
+            is KneType.SET -> appendListReturnProxy(indent, fn, handleName, type.elementType, "Set")
+            is KneType.MAP -> appendMapReturnProxy(indent, fn, handleName, type)
+            else -> {}
+        }
+    }
+
+    private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String) {
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
+                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $STRING_BUF_SIZE"
+                appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendLine("${indent}val _list = mutableListOf<String>()")
+                appendLine("${indent}var _off = 0L")
+                appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().length + 1 }")
+                if (collType == "Set") appendLine("${indent}return _list.toSet()")
+                else appendLine("${indent}return _list")
+            }
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                appendLine("${indent}val _outBuf = arena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $MAX_COLLECTION_SIZE"
+                appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}KneRuntime.checkError()")
+                appendCollectionElementRead(indent, elemType, "_count", collType)
+            }
+        }
+    }
+
+    private fun StringBuilder.appendCollectionElementRead(indent: String, elemType: KneType, countExpr: String, collType: String) {
+        when (elemType) {
+            KneType.BOOLEAN -> {
+                appendLine("${indent}val _list = List($countExpr) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+            }
+            is KneType.OBJECT -> {
+                appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+            }
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                appendLine("${indent}val _list = List($countExpr) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+            }
+        }
+        if (collType == "Set") appendLine("${indent}return _list.toSet()")
+        else appendLine("${indent}return _list")
+    }
+
+    private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP) {
+        val kLayout = KneType.collectionElementLayout(type.keyType)
+        val vLayout = KneType.collectionElementLayout(type.valueType)
+        val isKeyString = type.keyType == KneType.STRING
+        val isValString = type.valueType == KneType.STRING
+        if (isKeyString) appendLine("${indent}val _keysBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
+        else appendLine("${indent}val _keysBuf = arena.allocate($kLayout, $MAX_COLLECTION_SIZE.toLong())")
+        if (isValString) appendLine("${indent}val _valuesBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
+        else appendLine("${indent}val _valuesBuf = arena.allocate($vLayout, $MAX_COLLECTION_SIZE.toLong())")
+
+        val invokeArgs = buildList {
+            add("handle")
+            fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            add("_keysBuf")
+            if (isKeyString) add("$STRING_BUF_SIZE")
+            add("_valuesBuf")
+            if (isValString) add("$STRING_BUF_SIZE")
+            add("$MAX_COLLECTION_SIZE")
+        }.joinToString(", ")
+
+        appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+        appendLine("${indent}KneRuntime.checkError()")
+        appendLine("${indent}val _map = mutableMapOf<${type.keyType.jvmTypeName}, ${type.valueType.jvmTypeName}>()")
+        // Read keys
+        if (isKeyString) {
+            appendLine("${indent}val _keys = mutableListOf<String>()")
+            appendLine("${indent}var _kOff = 0L")
+            appendLine("${indent}repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().length + 1 }")
+        } else {
+            appendMapElementRead(indent, "_keys", type.keyType, "_count", "_keysBuf")
+        }
+        // Read values
+        if (isValString) {
+            appendLine("${indent}val _values = mutableListOf<String>()")
+            appendLine("${indent}var _vOff = 0L")
+            appendLine("${indent}repeat(_count) { _values.add(_valuesBuf.getString(_vOff)); _vOff += _values.last().length + 1 }")
+        } else {
+            appendMapElementRead(indent, "_values", type.valueType, "_count", "_valuesBuf")
+        }
+        appendLine("${indent}repeat(_count) { _map[_keys[it]] = _values[it] }")
+        appendLine("${indent}return _map")
+    }
+
+    private fun StringBuilder.appendMapElementRead(indent: String, varName: String, elemType: KneType, countExpr: String, bufExpr: String) {
+        val layout = KneType.collectionElementLayout(elemType)
+        when (elemType) {
+            KneType.BOOLEAN -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+            is KneType.ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.entries[$bufExpr.getAtIndex(JAVA_INT, it.toLong())] }")
+            else -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+        }
+    }
+
     /**
      * Emits a handle invocation with checkError() after the call.
      * For value-returning functions, stores result in a local var, checks error, then returns.
@@ -1124,6 +1325,11 @@ class FfmProxyGenerator {
             }
             is KneType.DATA_CLASS -> {
                 // DATA_CLASS returns are handled separately in appendMethodProxy
+                appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}KneRuntime.checkError()")
+            }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                // Collection returns are handled separately in appendCollectionReturnProxy
                 appendLine("${indent}$handleName.invoke($invokeArgs)")
                 appendLine("${indent}KneRuntime.checkError()")
             }

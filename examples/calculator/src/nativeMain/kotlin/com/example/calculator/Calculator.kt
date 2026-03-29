@@ -251,6 +251,57 @@ class Calculator(initial: Int = 0) {
         callback(label, found)
     }
 
+    // ── Collection support ────────────────────────────────────────────────────
+
+    // List<Int>
+    fun getScores(): List<Int> = listOf(accumulator, accumulator * 2, accumulator * 3)
+
+    fun sumAll(values: List<Int>): Int {
+        accumulator = values.sum()
+        return accumulator
+    }
+
+    // List<String>
+    fun getLabels(): List<String> = listOf(label.ifEmpty { "default" }, "item_$accumulator")
+
+    fun joinLabels(labels: List<String>): String = labels.joinToString(", ")
+
+    // List<Double>
+    fun getWeights(): List<Double> = listOf(accumulator.toDouble(), accumulator * 1.5)
+
+    // List<Boolean>
+    fun getFlags(): List<Boolean> = listOf(accumulator > 0, accumulator % 2 == 0, label.isNotEmpty())
+
+    // List<Enum>
+    fun getOperations(): List<Operation> = Operation.entries.toList()
+
+    fun countOps(ops: List<Operation>): Int = ops.size
+
+    // Set<Int>
+    fun getUniqueDigits(): Set<Int> {
+        val digits = mutableSetOf<Int>()
+        var n = if (accumulator < 0) -accumulator else accumulator
+        if (n == 0) digits.add(0)
+        while (n > 0) { digits.add(n % 10); n /= 10 }
+        return digits
+    }
+
+    fun sumUnique(values: Set<Int>): Int {
+        accumulator = values.sum()
+        return accumulator
+    }
+
+    // Map<String, Int>
+    fun getMetadata(): Map<String, Int> = mapOf("current" to accumulator, "scale" to scale.toInt())
+
+    fun sumMap(data: Map<String, Int>): Int {
+        accumulator = data.values.sum()
+        return accumulator
+    }
+
+    // Map<Int, String>
+    fun getIndexedLabels(): Map<Int, String> = mapOf(0 to label.ifEmpty { "default" }, 1 to "item_$accumulator")
+
     // ── Companion object ────────────────────────────────────────────────────
 
     companion object {

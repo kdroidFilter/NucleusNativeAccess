@@ -198,15 +198,34 @@ class KotlinSourceParser {
                 "String" -> KneType.STRING
                 "ByteArray" -> KneType.BYTE_ARRAY
                 else -> {
-                    val enumFq = knownEnums[typeStr]
-                    if (enumFq != null) KneType.ENUM(enumFq, typeStr)
-                    else {
-                        val dcInfo = knownDataClasses[typeStr]
-                        if (dcInfo != null) KneType.DATA_CLASS(dcInfo.first, typeStr, dcInfo.second)
+                    // Try collection types
+                    val listMatch = Regex("""^(?:Mutable)?List<(.+)>$""").find(typeStr)
+                    val setMatch = if (listMatch == null) Regex("""^(?:Mutable)?Set<(.+)>$""").find(typeStr) else null
+                    val mapMatch = if (listMatch == null && setMatch == null) Regex("""^(?:Mutable)?Map<(.+)>$""").find(typeStr) else null
+                    if (listMatch != null || setMatch != null) {
+                        val elemStr = (listMatch ?: setMatch)!!.groupValues[1].trim()
+                        val elemType = resolveSimpleType(elemStr, knownEnums, knownClasses, knownDataClasses) ?: return null
+                        if (listMatch != null) KneType.LIST(elemType) else KneType.SET(elemType)
+                    } else if (mapMatch != null) {
+                        val inner = mapMatch.groupValues[1]
+                        val comma = inner.indexOf(',')
+                        if (comma < 0) return null
+                        val kStr = inner.substring(0, comma).trim()
+                        val vStr = inner.substring(comma + 1).trim()
+                        val kType = resolveSimpleType(kStr, knownEnums, knownClasses, knownDataClasses) ?: return null
+                        val vType = resolveSimpleType(vStr, knownEnums, knownClasses, knownDataClasses) ?: return null
+                        KneType.MAP(kType, vType)
+                    } else {
+                        val enumFq = knownEnums[typeStr]
+                        if (enumFq != null) KneType.ENUM(enumFq, typeStr)
                         else {
-                            val classFq = knownClasses[typeStr]
-                            if (classFq != null) KneType.OBJECT(classFq, typeStr)
-                            else return null // unresolvable
+                            val dcInfo = knownDataClasses[typeStr]
+                            if (dcInfo != null) KneType.DATA_CLASS(dcInfo.first, typeStr, dcInfo.second)
+                            else {
+                                val classFq = knownClasses[typeStr]
+                                if (classFq != null) KneType.OBJECT(classFq, typeStr)
+                                else return null // unresolvable
+                            }
                         }
                     }
                 }
@@ -214,6 +233,29 @@ class KotlinSourceParser {
             fields.add(KneParam(name = name, type = type))
         }
         return if (fields.isNotEmpty()) fields else null
+    }
+
+    /** Resolve a simple type string (no function types) for use in data class field resolution. */
+    private fun resolveSimpleType(
+        typeStr: String,
+        knownEnums: Map<String, String>,
+        knownClasses: Map<String, String>,
+        knownDataClasses: Map<String, Pair<String, List<KneParam>>>,
+    ): KneType? = when (typeStr) {
+        "Int" -> KneType.INT
+        "Long" -> KneType.LONG
+        "Double" -> KneType.DOUBLE
+        "Float" -> KneType.FLOAT
+        "Boolean" -> KneType.BOOLEAN
+        "Byte" -> KneType.BYTE
+        "Short" -> KneType.SHORT
+        "String" -> KneType.STRING
+        "ByteArray" -> KneType.BYTE_ARRAY
+        else -> {
+            knownEnums[typeStr]?.let { KneType.ENUM(it, typeStr) }
+                ?: knownDataClasses[typeStr]?.let { KneType.DATA_CLASS(it.first, typeStr, it.second) }
+                ?: knownClasses[typeStr]?.let { KneType.OBJECT(it, typeStr) }
+        }
     }
 
     private data class ParseResult(
@@ -529,6 +571,26 @@ class KotlinSourceParser {
             return parseFunctionType(trimmed, knownTypes) ?: KneType.UNIT
         }
         val clean = trimmed
+        // Collection types: List<T>, Set<T>, Map<K,V>, MutableList<T>, MutableSet<T>, MutableMap<K,V>
+        val collectionMatch = Regex("""^(Mutable)?List<(.+)>$""").find(clean)
+            ?: Regex("""^(Mutable)?Set<(.+)>$""").find(clean)
+        if (collectionMatch != null) {
+            val elemType = parseType(collectionMatch.groupValues[2].trim(), knownTypes)
+            if (elemType == KneType.UNIT) return KneType.UNIT // unsupported element
+            return if (clean.contains("Set")) KneType.SET(elemType) else KneType.LIST(elemType)
+        }
+        val mapMatch = Regex("""^(Mutable)?Map<(.+)>$""").find(clean)
+        if (mapMatch != null) {
+            val inner = mapMatch.groupValues[2]
+            val parts = splitAtTopLevelCommas(inner)
+            if (parts.size == 2) {
+                val keyType = parseType(parts[0].trim(), knownTypes)
+                val valueType = parseType(parts[1].trim(), knownTypes)
+                if (keyType != KneType.UNIT && valueType != KneType.UNIT) {
+                    return KneType.MAP(keyType, valueType)
+                }
+            }
+        }
         return when (clean) {
             "Int" -> KneType.INT
             "Long" -> KneType.LONG

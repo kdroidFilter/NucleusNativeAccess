@@ -2033,4 +2033,233 @@ class CalculatorTest {
             assertEquals(listOf(5, 8), values)
         }
     }
+
+    // ── Collection: List<Int> ───────────────────────────────────────────────
+
+    @Test
+    fun `List Int return - getScores`() {
+        Calculator(10).use { calc ->
+            val scores = calc.getScores()
+            assertEquals(listOf(10, 20, 30), scores)
+        }
+    }
+
+    @Test
+    fun `List Int return - zero accumulator`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf(0, 0, 0), calc.getScores())
+        }
+    }
+
+    @Test
+    fun `List Int return - negative accumulator`() {
+        Calculator(-3).use { calc ->
+            assertEquals(listOf(-3, -6, -9), calc.getScores())
+        }
+    }
+
+    @Test
+    fun `List Int param - sumAll`() {
+        Calculator(0).use { calc ->
+            val result = calc.sumAll(listOf(1, 2, 3, 4, 5))
+            assertEquals(15, result)
+        }
+    }
+
+    @Test
+    fun `List Int param - empty list`() {
+        Calculator(42).use { calc ->
+            assertEquals(0, calc.sumAll(emptyList()))
+        }
+    }
+
+    @Test
+    fun `List Int param - single element`() {
+        Calculator(0).use { calc ->
+            assertEquals(99, calc.sumAll(listOf(99)))
+        }
+    }
+
+    @Test
+    fun `List Int param - large list`() {
+        Calculator(0).use { calc ->
+            val largeList = List(1000) { it + 1 }
+            assertEquals(500500, calc.sumAll(largeList))
+        }
+    }
+
+    // ── Collection: List<String> ────────────────────────────────────────────
+
+    @Test
+    fun `List String return - getLabels`() {
+        Calculator(5).use { calc ->
+            calc.label = "test"
+            val labels = calc.getLabels()
+            assertEquals(listOf("test", "item_5"), labels)
+        }
+    }
+
+    @Test
+    fun `List String return - default label`() {
+        Calculator(0).use { calc ->
+            assertEquals(listOf("default", "item_0"), calc.getLabels())
+        }
+    }
+
+    @Test
+    fun `List String param - joinLabels`() {
+        Calculator(0).use { calc ->
+            val result = calc.joinLabels(listOf("a", "b", "c"))
+            assertEquals("a, b, c", result)
+        }
+    }
+
+    @Test
+    fun `List String param - empty list`() {
+        Calculator(0).use { calc ->
+            assertEquals("", calc.joinLabels(emptyList()))
+        }
+    }
+
+    @Test
+    fun `List String param - special characters`() {
+        Calculator(0).use { calc ->
+            val result = calc.joinLabels(listOf("hello world", "foo/bar", "a=b"))
+            assertEquals("hello world, foo/bar, a=b", result)
+        }
+    }
+
+    // ── Collection: List<Double> ────────────────────────────────────────────
+
+    @Test
+    fun `List Double return - getWeights`() {
+        Calculator(10).use { calc ->
+            val weights = calc.getWeights()
+            assertEquals(2, weights.size)
+            assertEquals(10.0, weights[0], 0.001)
+            assertEquals(15.0, weights[1], 0.001)
+        }
+    }
+
+    // ── Collection: List<Boolean> ───────────────────────────────────────────
+
+    @Test
+    fun `List Boolean return - getFlags positive`() {
+        Calculator(5).use { calc ->
+            calc.label = "test"
+            val flags = calc.getFlags()
+            assertEquals(listOf(true, false, true), flags)
+        }
+    }
+
+    @Test
+    fun `List Boolean return - getFlags zero`() {
+        Calculator(0).use { calc ->
+            val flags = calc.getFlags()
+            assertEquals(listOf(false, true, false), flags)
+        }
+    }
+
+    // ── Collection: List<Enum> ──────────────────────────────────────────────
+
+    @Test
+    fun `List Enum return - getOperations`() {
+        Calculator(0).use { calc ->
+            val ops = calc.getOperations()
+            assertEquals(listOf(Operation.ADD, Operation.SUBTRACT, Operation.MULTIPLY), ops)
+        }
+    }
+
+    @Test
+    fun `List Enum param - countOps`() {
+        Calculator(0).use { calc ->
+            assertEquals(2, calc.countOps(listOf(Operation.ADD, Operation.SUBTRACT)))
+        }
+    }
+
+    @Test
+    fun `List Enum param - empty list`() {
+        Calculator(0).use { calc ->
+            assertEquals(0, calc.countOps(emptyList()))
+        }
+    }
+
+    // ── Collection: Set<Int> ────────────────────────────────────────────────
+
+    @Test
+    fun `Set Int return - getUniqueDigits`() {
+        Calculator(123).use { calc ->
+            val digits = calc.getUniqueDigits()
+            assertEquals(setOf(1, 2, 3), digits)
+        }
+    }
+
+    @Test
+    fun `Set Int return - repeated digits`() {
+        Calculator(111).use { calc ->
+            assertEquals(setOf(1), calc.getUniqueDigits())
+        }
+    }
+
+    @Test
+    fun `Set Int return - zero`() {
+        Calculator(0).use { calc ->
+            assertEquals(setOf(0), calc.getUniqueDigits())
+        }
+    }
+
+    @Test
+    fun `Set Int param - sumUnique`() {
+        Calculator(0).use { calc ->
+            assertEquals(6, calc.sumUnique(setOf(1, 2, 3)))
+        }
+    }
+
+    @Test
+    fun `Set Int param - empty set`() {
+        Calculator(42).use { calc ->
+            assertEquals(0, calc.sumUnique(emptySet()))
+        }
+    }
+
+    // ── Collection: Map<String, Int> ────────────────────────────────────────
+
+    @Test
+    fun `Map String Int return - getMetadata`() {
+        Calculator(42).use { calc ->
+            calc.scale = 3.0
+            val meta = calc.getMetadata()
+            assertEquals(42, meta["current"])
+            assertEquals(3, meta["scale"])
+            assertEquals(2, meta.size)
+        }
+    }
+
+    @Test
+    fun `Map String Int param - sumMap`() {
+        Calculator(0).use { calc ->
+            val result = calc.sumMap(mapOf("a" to 10, "b" to 20, "c" to 30))
+            assertEquals(60, result)
+        }
+    }
+
+    @Test
+    fun `Map String Int param - empty map`() {
+        Calculator(42).use { calc ->
+            assertEquals(0, calc.sumMap(emptyMap()))
+        }
+    }
+
+    // ── Collection: Map<Int, String> ────────────────────────────────────────
+
+    @Test
+    fun `Map Int String return - getIndexedLabels`() {
+        Calculator(7).use { calc ->
+            calc.label = "hello"
+            val labels = calc.getIndexedLabels()
+            assertEquals("hello", labels[0])
+            assertEquals("item_7", labels[1])
+            assertEquals(2, labels.size)
+        }
+    }
 }
