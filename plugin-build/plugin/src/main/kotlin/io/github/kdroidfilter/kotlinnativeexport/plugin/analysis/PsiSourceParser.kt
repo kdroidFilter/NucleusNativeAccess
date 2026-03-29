@@ -94,11 +94,11 @@ class PsiSourceParser {
 
             val typeMaps = TypeMaps(knownClasses, knownEnums, knownDataClasses)
 
-            // Phase 3: parse nativeMain files
-            val classes = mutableListOf<KneClass>()
-            val dataClasses = mutableListOf<KneDataClass>()
-            val enums = mutableListOf<KneEnum>()
-            val functions = mutableListOf<KneFunction>()
+            // Phase 3: parse nativeMain files (deduplicate by fqName)
+            val classMap = mutableMapOf<String, KneClass>()
+            val dataClassMap = mutableMapOf<String, KneDataClass>()
+            val enumMap = mutableMapOf<String, KneEnum>()
+            val functionMap = mutableMapOf<String, KneFunction>()
             val packages = mutableSetOf<String>()
 
             for (file in ktFiles) {
@@ -109,29 +109,27 @@ class PsiSourceParser {
                 for (decl in ktFile.declarations) {
                     if (decl.isPrivateOrInternal()) continue
                     when {
-                        decl is KtClass && decl.isEnum() -> parseEnum(decl, pkg)?.let { enums.add(it) }
+                        decl is KtClass && decl.isEnum() -> parseEnum(decl, pkg)?.let { enumMap.putIfAbsent(it.fqName, it) }
                         decl is KtClass && decl.isData() -> {
                             val name = decl.name ?: continue
                             val dcInfo = knownDataClasses[name] ?: continue
-                            dataClasses.add(KneDataClass(name, dcInfo.first, dcInfo.second, isCommon = name in commonDataClassNames))
+                            val fq = dcInfo.first
+                            dataClassMap.putIfAbsent(fq, KneDataClass(name, fq, dcInfo.second, isCommon = name in commonDataClassNames))
                         }
-                        decl is KtClass && !decl.isInterface() -> parseClass(decl, pkg, typeMaps)?.let { classes.add(it) }
-                        decl is KtNamedFunction -> parseFunction(decl, typeMaps)?.let { functions.add(it) }
+                        decl is KtClass && !decl.isInterface() -> parseClass(decl, pkg, typeMaps)?.let { classMap.putIfAbsent(it.fqName, it) }
+                        decl is KtNamedFunction -> parseFunction(decl, typeMaps)?.let { functionMap.putIfAbsent(it.name, it) }
                     }
                 }
             }
 
             for (name in commonDataClassNames) {
                 val dcInfo = knownDataClasses[name] ?: continue
-                if (dataClasses.none { it.simpleName == name }) {
-                    dataClasses.add(KneDataClass(name, dcInfo.first, dcInfo.second, isCommon = true))
-                }
+                dataClassMap.putIfAbsent(dcInfo.first, KneDataClass(name, dcInfo.first, dcInfo.second, isCommon = true))
             }
 
-            // Clean up temp dir
             tmpHome.deleteRecursively()
 
-            return KneModule(libName, packages, classes, dataClasses, enums, functions)
+            return KneModule(libName, packages, classMap.values.toList(), dataClassMap.values.toList(), enumMap.values.toList(), functionMap.values.toList())
         } finally {
             Disposer.dispose(disposable)
         }

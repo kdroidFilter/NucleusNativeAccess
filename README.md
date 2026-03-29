@@ -18,7 +18,7 @@ class Calculator {      →     @CName bridges (native)   →   class Calculator
 
 **Pipeline:**
 
-1. Plugin scans your `nativeMain` sources and extracts the public API
+1. Plugin parses your `nativeMain` sources via Kotlin PSI and extracts the public API
 2. Generates `@CName` bridge functions with `StableRef` for object lifecycle (native side)
 3. Generates JVM proxy classes with FFM `MethodHandle` downcalls (JVM side)
 4. Compiles to a shared library (`.so` / `.dylib` / `.dll`)
@@ -438,13 +438,13 @@ Make the plugin production-ready with zero-config deployment.
   - [ ] Bundle each platform's shared lib under `META-INF/native/{os}-{arch}/`
   - [ ] `KneRuntime`: detect current OS/arch at startup, load correct variant
 
-### Phase 5 &mdash; Analysis robustness
+### Phase 5 &mdash; Analysis robustness ✅
 
-- [ ] **Kotlin Analysis API (K2)** &mdash; replace regex `KotlinSourceParser` with proper K2 symbol extraction
-  - [ ] Add `kotlin-analysis-api` dependency, set up `analyze {}` session lifecycle
-  - [ ] Create a `KneSession` facade (inspired by SIR's `SirSession`)
-  - [ ] Extract full type information: nullability, annotations, companion members
-  - [ ] Keep regex parser as fallback (flag `useAnalysisApi = true|false` in extension DSL)
+- [x] **Kotlin PSI parser** &mdash; replaced regex parser with proper AST-based parsing via `kotlin-compiler-embeddable`
+  - [x] Uses `KotlinCoreApplicationEnvironment` + `KtPsiFactory` for proper Kotlin file parsing
+  - [x] Gradle Worker API with `classLoaderIsolation` for PSI environment isolation
+  - [x] Handles nested generics, function types, default params, multi-line constructors natively
+  - [x] No regex, no `splitAtTopLevelCommas`, no brace counting
 
 ### Future considerations
 
