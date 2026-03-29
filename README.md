@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (369 end-to-end FFM tests)
+### Types — test coverage (378 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (130 exported symbols) → loads via FFM `MethodHandle` → verifies on JVM.
 
@@ -137,11 +137,11 @@ Every test compiles Kotlin/Native → `libcalculator.so` (130 exported symbols) 
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
-| `List<T>` | ✅ 26t | ✅ 17t | &mdash; | ✅ 12t | &mdash; | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum, Object |
+| `List<T>` | ✅ 26t | ✅ 17t | &mdash; | ✅ 12t | ✅ 5t | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum, Object |
 | `List<T>?` | ✅ 7t | ✅ 8t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
 | `Set<T>` | ✅ 9t | ✅ 13t | &mdash; | &mdash; | &mdash; | Int, String, Enum + intersect/empty edge cases |
 | `Set<T>?` | &mdash; | ✅ 5t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
-| `Map<K, V>` | ✅ 12t | ✅ 12t | &mdash; | &mdash; | &mdash; | String→Int, Int→String, Int→Int, String→String + merge/empty |
+| `Map<K, V>` | ✅ 12t | ✅ 12t | &mdash; | ✅ 2t | ✅ 2t | String→Int, Int→String, Int→Int, String→String + merge/empty |
 | `Map<K, V>?` | &mdash; | ✅ 4t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
 | `(T) -> R` (lambda) | ✅ 15t | &mdash; | &mdash; | &mdash; | &mdash; | persistent `Arena.ofShared()` |
 
@@ -276,8 +276,6 @@ calc.add(5) // works normally after exception
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | `List<DataClass>` as collection element | Complex field decomposition | Use Object handles or primitive/String/Enum elements |
-| Collection as callback return | Not yet implemented | Return collection from method instead |
-| `Map` in callbacks | Not yet implemented | Use `List` callback params instead |
 | Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |

@@ -246,6 +246,11 @@ class FfmProxyGenerator {
                     flatParams.add(FlatParam("p${i}_ptr", KneType.STRING)) // MemorySegment (ADDRESS)
                     flatParams.add(FlatParam("p${i}_size", KneType.INT))
                 }
+                is KneType.MAP -> {
+                    flatParams.add(FlatParam("p${i}_keys", KneType.STRING)) // ADDRESS
+                    flatParams.add(FlatParam("p${i}_values", KneType.STRING)) // ADDRESS
+                    flatParams.add(FlatParam("p${i}_size", KneType.INT))
+                }
                 else -> flatParams.add(FlatParam("p$i", t))
             }
         }
@@ -268,6 +273,10 @@ class FfmProxyGenerator {
         // Reconstruct DATA_CLASS/LIST/SET params from flat fields, convert others
         // First emit collection reconstruction as local vals
         sig.paramTypes.forEachIndexed { i, t ->
+            // MAP reconstruction
+            if (t is KneType.MAP) {
+                appendUpcallMapReconstruction(i, t)
+            }
             val elemType = when (t) { is KneType.LIST -> t.elementType; is KneType.SET -> (t as KneType.SET).elementType; else -> null }
             if (elemType != null) {
                 val layout = KneType.collectionElementLayout(elemType)
@@ -316,6 +325,7 @@ class FfmProxyGenerator {
                 }
                 is KneType.LIST -> "_list$i"
                 is KneType.SET -> "_set$i"
+                is KneType.MAP -> "_map$i"
                 else -> "p$i"
             }
         }.joinToString(", ")
@@ -349,6 +359,15 @@ class FfmProxyGenerator {
                 }
             }
             appendLine("        return _buf")
+        } else if (sig.returnType is KneType.LIST || sig.returnType is KneType.SET) {
+            val elemType = when (sig.returnType) { is KneType.LIST -> sig.returnType.elementType; is KneType.SET -> (sig.returnType as KneType.SET).elementType; else -> KneType.INT }
+            appendLine("        val _result = _fn.invoke($invokeConvertedArgs)")
+            val src = if (sig.returnType is KneType.SET) "_result.toList()" else "_result"
+            appendUpcallCollectionReturn(elemType, src)
+        } else if (sig.returnType is KneType.MAP) {
+            val mapType = sig.returnType as KneType.MAP
+            appendLine("        val _result = _fn.invoke($invokeConvertedArgs)")
+            appendUpcallMapReturn(mapType)
         } else {
             appendLine("        return _fn.invoke($invokeConvertedArgs)")
         }
@@ -389,6 +408,117 @@ class FfmProxyGenerator {
         appendLine("    }")
     }
 
+    /** Emit collection return as packed buffer [count:Int32][elements...] from upcall. */
+    private fun StringBuilder.appendUpcallCollectionReturn(elemType: KneType, srcExpr: String) {
+        appendLine("        val _list = $srcExpr")
+        appendLine("        val _arena = Arena.ofAuto()")
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val _totalBytes = 4 + _list.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
+                appendLine("        val _buf = _arena.allocate(_totalBytes.toLong())")
+                appendLine("        _buf.set(JAVA_INT, 0L, _list.size)")
+                appendLine("        var _off = 4L")
+                appendLine("        for (_s in _list) { _buf.setString(_off, _s); _off += _s.toByteArray(Charsets.UTF_8).size + 1 }")
+            }
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                val elemSize = fieldSize(elemType)
+                appendLine("        val _buf = _arena.allocate((4 + _list.size * $elemSize).toLong())")
+                appendLine("        _buf.set(JAVA_INT, 0L, _list.size)")
+                when (elemType) {
+                    KneType.BOOLEAN -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, (4 + i * 4).toLong(), if (v) 1 else 0) }")
+                    is KneType.ENUM -> appendLine("        _list.forEachIndexed { i, v -> _buf.set(JAVA_INT, (4 + i * 4).toLong(), v.ordinal) }")
+                    else -> appendLine("        _list.forEachIndexed { i, v -> _buf.set($layout, (4 + i * $elemSize).toLong(), v) }")
+                }
+            }
+        }
+        appendLine("        return _buf")
+    }
+
+    /** Emit map return as packed buffer from upcall. */
+    private fun StringBuilder.appendUpcallMapReturn(mapType: KneType.MAP) {
+        appendLine("        val _keys = _result.keys.toList()")
+        appendLine("        val _values = _result.values.toList()")
+        appendLine("        val _arena = Arena.ofAuto()")
+        val kSize = if (mapType.keyType == KneType.STRING) 0 else fieldSize(mapType.keyType)
+        val vSize = if (mapType.valueType == KneType.STRING) 0 else fieldSize(mapType.valueType)
+        // Calculate total buffer size
+        if (kSize > 0 && vSize > 0) {
+            appendLine("        val _buf = _arena.allocate((4 + _keys.size * ${kSize + vSize}).toLong())")
+        } else {
+            appendLine("        val _totalBytes = 4 + ${if (kSize > 0) "_keys.size * $kSize" else "_keys.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} + ${if (vSize > 0) "_values.size * $vSize + ${vSize}" else "_values.sumOf { it.toString().toByteArray(Charsets.UTF_8).size + 1 }"} // extra padding for alignment")
+            appendLine("        val _buf = _arena.allocate(_totalBytes.toLong())")
+        }
+        appendLine("        _buf.set(JAVA_INT, 0L, _keys.size)")
+        // Write keys starting at offset 4
+        appendUpcallWriteArray("_keys", mapType.keyType, "4L")
+        // Write values after keys
+        if (kSize > 0) {
+            appendUpcallWriteArray("_values", mapType.valueType, "(4 + _keys.size * $kSize).toLong()")
+        } else {
+            // Align offset for value element size
+            if (vSize > 1) {
+                appendLine("        val _valStart = (_keysEndOff + ${vSize - 1}) / $vSize * $vSize // align to ${vSize}-byte boundary")
+                appendUpcallWriteArray("_values", mapType.valueType, "_valStart")
+            } else {
+                appendUpcallWriteArray("_values", mapType.valueType, "_keysEndOff")
+            }
+        }
+        appendLine("        return _buf")
+    }
+
+    private fun StringBuilder.appendUpcallWriteArray(listExpr: String, elemType: KneType, startOffset: String) {
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        var _${listExpr}Off = $startOffset")
+                appendLine("        for (_s in $listExpr) { _buf.setString(_${listExpr}Off, _s.toString()); _${listExpr}Off += _s.toString().toByteArray(Charsets.UTF_8).size + 1 }")
+                appendLine("        val _${listExpr.removePrefix("_")}EndOff = _${listExpr}Off")
+            }
+            KneType.BOOLEAN -> appendLine("        $listExpr.forEachIndexed { i, v -> _buf.set(JAVA_INT, $startOffset + i * 4, if (v) 1 else 0) }")
+            is KneType.ENUM -> appendLine("        $listExpr.forEachIndexed { i, v -> _buf.set(JAVA_INT, $startOffset + i * 4, v.ordinal) }")
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                val elemSize = fieldSize(elemType)
+                appendLine("        $listExpr.forEachIndexed { i, v -> _buf.set($layout, $startOffset + i * $elemSize, v) }")
+            }
+        }
+    }
+
+    /** Emit MAP reconstruction code in upcall target. */
+    private fun StringBuilder.appendUpcallMapReconstruction(i: Int, t: KneType.MAP) {
+        // Read keys
+        appendUpcallCollectionRead(i, t.keyType, "keys", "p${i}_keys")
+        // Read values
+        appendUpcallCollectionRead(i, t.valueType, "values", "p${i}_values")
+        appendLine("        val _map$i = _keys${i}.zip(_values${i}).toMap()")
+    }
+
+    /** Emit collection array read for a specific role (keys/values) in upcall context. */
+    private fun StringBuilder.appendUpcallCollectionRead(i: Int, elemType: KneType, role: String, ptrName: String) {
+        val layout = KneType.collectionElementLayout(elemType)
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val _${role}${i} = mutableListOf<String>()")
+                appendLine("        var _${role}Off${i} = 0L")
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                appendLine("        repeat(p${i}_size) { _${role}${i}.add(_${role}Seg${i}.getString(_${role}Off${i})); _${role}Off$i += _${role}${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(p${i}_size.toLong() * 4)")
+                appendLine("        val _${role}${i} = List(p${i}_size) { _${role}Seg${i}.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+            }
+            is KneType.ENUM -> {
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(p${i}_size.toLong() * 4)")
+                appendLine("        val _${role}${i} = List(p${i}_size) { ${elemType.simpleName}.entries[_${role}Seg${i}.getAtIndex(JAVA_INT, it.toLong())] }")
+            }
+            else -> {
+                val elemSize = fieldSize(elemType)
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(p${i}_size.toLong() * $elemSize)")
+                appendLine("        val _${role}${i} = List(p${i}_size) { _${role}Seg${i}.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+            }
+        }
+    }
+
     /** The Java type name for upcall method signatures (C ABI compatible). */
     private fun upcallJvmType(type: KneType): String = when (type) {
         KneType.INT -> "Int"
@@ -401,6 +531,7 @@ class FfmProxyGenerator {
         KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
         is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "MemorySegment" // packed buffer
         else -> "Int"
     }
 
@@ -409,6 +540,7 @@ class FfmProxyGenerator {
         KneType.UNIT -> "Void.TYPE"
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.DATA_CLASS -> "java.lang.foreign.MemorySegment::class.java"
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "java.lang.foreign.MemorySegment::class.java"
         else -> "${upcallJvmType(type)}::class.javaPrimitiveType"
     }
 
@@ -423,6 +555,7 @@ class FfmProxyGenerator {
         KneType.SHORT -> "JAVA_SHORT"
         KneType.STRING -> "ADDRESS"
         is KneType.DATA_CLASS -> "ADDRESS" // struct pointer
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "ADDRESS" // packed buffer
         else -> "JAVA_INT"
     }
 

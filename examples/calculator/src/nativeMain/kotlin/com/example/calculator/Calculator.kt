@@ -355,6 +355,18 @@ class Calculator(initial: Int = 0) {
         callback(listOf(accumulator > 0, accumulator % 2 == 0))
     }
 
+    // Map in callbacks
+    fun onMetadataReady(callback: (Map<String, Int>) -> Unit) {
+        callback(mapOf("current" to accumulator, "doubled" to accumulator * 2))
+    }
+
+    // Collection as callback return
+    fun getTransformedScores(fn: (Int) -> List<Int>): List<Int> = fn(accumulator)
+
+    fun getComputedLabels(fn: (Int) -> List<String>): List<String> = fn(accumulator)
+
+    fun getComputedMap(fn: (Int) -> Map<String, Int>): Map<String, Int> = fn(accumulator)
+
     // ── Nullable collections ────────────────────────────────────────────────
 
     fun getScoresOrNull(): List<Int>? = if (accumulator != 0) listOf(accumulator, accumulator * 2) else null

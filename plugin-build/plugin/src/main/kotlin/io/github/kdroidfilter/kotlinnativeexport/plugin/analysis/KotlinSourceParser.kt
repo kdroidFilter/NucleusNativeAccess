@@ -548,8 +548,14 @@ class KotlinSourceParser {
         var start = 0
         for (i in str.indices) {
             when (str[i]) {
-                '(', '<' -> depth++
-                ')', '>' -> depth--
+                '(' -> depth++
+                ')' -> depth--
+                '<' -> depth++
+                '>' -> {
+                    // Don't count '>' in '->' as closing angle bracket
+                    if (i > 0 && str[i - 1] == '-') { /* skip: arrow operator */ }
+                    else depth--
+                }
                 ',' -> if (depth == 0) {
                     parts.add(str.substring(start, i))
                     start = i + 1
@@ -649,10 +655,13 @@ class KotlinSourceParser {
         )
         val returnType = parseType(returnStr, knownTypes)
         fun isSupportedCallbackParam(t: KneType): Boolean =
-            t in supportedCallbackPrimitive || t is KneType.DATA_CLASS || t is KneType.ENUM || t is KneType.LIST || t is KneType.SET
+            t in supportedCallbackPrimitive || t is KneType.DATA_CLASS || t is KneType.ENUM ||
+            t is KneType.LIST || t is KneType.SET || t is KneType.MAP
+        fun isSupportedCallbackReturn(t: KneType): Boolean =
+            t in supportedCallbackReturns || t is KneType.ENUM || t is KneType.DATA_CLASS ||
+            t is KneType.LIST || t is KneType.SET || t is KneType.MAP
         val unsupportedParam = paramTypes.any { !isSupportedCallbackParam(it) }
-        val unsupportedReturn = returnType !in supportedCallbackReturns && returnType !is KneType.ENUM && returnType !is KneType.DATA_CLASS
-        if (unsupportedParam || unsupportedReturn) return null
+        if (unsupportedParam || !isSupportedCallbackReturn(returnType)) return null
 
         return KneType.FUNCTION(paramTypes, returnType)
     }

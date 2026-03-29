@@ -3397,4 +3397,85 @@ class CalculatorTest {
             assertNull(calc.getScoresOrNull())
         }
     }
+
+    // ── Callback: Map param ─────────────────────────────────────────────────
+
+    @Test
+    fun `callback Map String Int param - onMetadataReady`() {
+        Calculator(10).use { calc ->
+            var received = emptyMap<String, Int>()
+            calc.onMetadataReady { received = it }
+            assertEquals(10, received["current"])
+            assertEquals(20, received["doubled"])
+        }
+    }
+
+    @Test
+    fun `callback Map String Int param - zero`() {
+        Calculator(0).use { calc ->
+            var received = emptyMap<String, Int>()
+            calc.onMetadataReady { received = it }
+            assertEquals(0, received["current"])
+            assertEquals(0, received["doubled"])
+        }
+    }
+
+    // ── Callback: collection return ─────────────────────────────────────────
+
+    @Test
+    fun `callback return List Int - getTransformedScores`() {
+        Calculator(5).use { calc ->
+            val result = calc.getTransformedScores { v -> listOf(v, v * 10, v * 100) }
+            assertEquals(listOf(5, 50, 500), result)
+        }
+    }
+
+    @Test
+    fun `callback return List Int - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.getTransformedScores { emptyList() }
+            assertEquals(emptyList<Int>(), result)
+        }
+    }
+
+    @Test
+    fun `callback return List Int - single`() {
+        Calculator(42).use { calc ->
+            val result = calc.getTransformedScores { listOf(it * 2) }
+            assertEquals(listOf(84), result)
+        }
+    }
+
+    @Test
+    fun `callback return List String - getComputedLabels`() {
+        Calculator(3).use { calc ->
+            val result = calc.getComputedLabels { v -> listOf("val=$v", "doubled=${v * 2}") }
+            assertEquals(listOf("val=3", "doubled=6"), result)
+        }
+    }
+
+    @Test
+    fun `callback return List String - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedLabels { emptyList() }
+            assertEquals(emptyList<String>(), result)
+        }
+    }
+
+    @Test
+    fun `callback return Map String Int - getComputedMap`() {
+        Calculator(7).use { calc ->
+            val result = calc.getComputedMap { v -> mapOf("input" to v, "squared" to v * v) }
+            assertEquals(7, result["input"])
+            assertEquals(49, result["squared"])
+        }
+    }
+
+    @Test
+    fun `callback return Map String Int - empty`() {
+        Calculator(0).use { calc ->
+            val result = calc.getComputedMap { emptyMap() }
+            assertEquals(emptyMap<String, Int>(), result)
+        }
+    }
 }

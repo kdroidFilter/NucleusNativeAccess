@@ -831,7 +831,7 @@ class NativeBridgeGenerator {
         val hasStringInvoke = fnType.paramTypes.any {
             it == KneType.STRING || (it is KneType.DATA_CLASS && it.fields.any { f -> f.type == KneType.STRING })
         }
-        val hasCollectionInvoke = fnType.paramTypes.any { it is KneType.LIST || it is KneType.SET }
+        val hasCollectionInvoke = fnType.paramTypes.any { it is KneType.LIST || it is KneType.SET || it is KneType.MAP }
         val needsMemScoped = hasStringInvoke || hasCollectionInvoke
 
         appendLine("    val ${paramName}Fn: ${fnType.jvmTypeName} = { $lambdaParamsStr ->")
@@ -840,8 +840,14 @@ class NativeBridgeGenerator {
         }
         appendLine("        val _fnPtr = ${paramName}.toCPointer<$cFuncType>()!!")
 
-        // Pre-allocate collection arrays for CFunction invoke
+        // Pre-allocate collection arrays for CFunction invoke (including Map)
         fnType.paramTypes.forEachIndexed { i, t ->
+            if (t is KneType.MAP) {
+                appendLine("        val _keys$i = _p$i.keys.toList()")
+                appendLine("        val _values$i = _p$i.values.toList()")
+                appendCollectionArrayAlloc(i, t.keyType, "_keys$i", "k")
+                appendCollectionArrayAlloc(i, t.valueType, "_values$i", "v")
+            }
             if (t is KneType.LIST || t is KneType.SET) {
                 val elemType = if (t is KneType.LIST) t.elementType else (t as KneType.SET).elementType
                 val src = if (t is KneType.SET) "_p$i.toList()" else "_p$i"
@@ -886,6 +892,7 @@ class NativeBridgeGenerator {
                     }
                 }
                 is KneType.LIST, is KneType.SET -> "_buf$i, _coll$i.size"
+                is KneType.MAP -> "_kBuf$i, _vBuf$i, _p$i.size"
                 else -> "_p$i"
             }
         }.joinToString(", ")
@@ -917,6 +924,16 @@ class NativeBridgeGenerator {
                 "${f.name} = $expr"
             }
             appendLine("        ${dc.fqName}($fieldArgs)")
+        } else if (fnType.returnType is KneType.LIST || fnType.returnType is KneType.SET) {
+            val elemType = when (fnType.returnType) { is KneType.LIST -> fnType.returnType.elementType; is KneType.SET -> (fnType.returnType as KneType.SET).elementType; else -> KneType.INT }
+            appendLine("        val _retPtr = _fnPtr.invoke($invokeArgs)!!")
+            appendLine("        val _count = _retPtr.reinterpret<IntVar>().pointed.value")
+            appendCollectionReturnFromPackedBuffer(elemType, fnType.returnType is KneType.SET)
+        } else if (fnType.returnType is KneType.MAP) {
+            val mapType = fnType.returnType as KneType.MAP
+            appendLine("        val _retPtr = _fnPtr.invoke($invokeArgs)!!")
+            appendLine("        val _count = _retPtr.reinterpret<IntVar>().pointed.value")
+            appendMapReturnFromPackedBuffer(mapType)
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }
@@ -926,11 +943,126 @@ class NativeBridgeGenerator {
         appendLine("    }")
     }
 
-    /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. LIST becomes pointer+size. */
+    /** Read a collection from packed buffer returned by callback. Buffer: [count:Int32][elements...] */
+    private fun StringBuilder.appendCollectionReturnFromPackedBuffer(elemType: KneType, isSet: Boolean) {
+        val varType = KneType.collectionElementVarType(elemType)
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val _list = mutableListOf<String>()")
+                appendLine("        var _sOff = 4")
+                appendLine("        for (i in 0 until _count) {")
+                appendLine("            val _s = (_retPtr + _sOff)!!.toKString()")
+                appendLine("            _list.add(_s)")
+                appendLine("            _sOff += _s.encodeToByteArray().size + 1")
+                appendLine("        }")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<IntVar>()")
+                appendLine("        val _list = List(_count) { _dataPtr[it] != 0 }")
+            }
+            is KneType.ENUM -> {
+                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<IntVar>()")
+                appendLine("        val _list = List(_count) { ${elemType.fqName}.entries[_dataPtr[it]] }")
+            }
+            else -> {
+                appendLine("        val _dataPtr = (_retPtr + 4)!!.reinterpret<$varType>()")
+                appendLine("        val _list = List(_count) { _dataPtr[it] }")
+            }
+        }
+        if (isSet) appendLine("        _list.toSet()")
+        else appendLine("        _list")
+    }
+
+    /** Read a map from packed buffer returned by callback. Buffer: [count:Int32][keys...][values...] */
+    private fun StringBuilder.appendMapReturnFromPackedBuffer(mapType: KneType.MAP) {
+        // For simplicity, encode as: [count:4][key_data][value_data]
+        // Fixed-size keys first, then fixed-size values. Strings use packed null-terminated.
+        val kSize = if (mapType.keyType == KneType.STRING) 0 else fieldSize(mapType.keyType)
+        val vSize = if (mapType.valueType == KneType.STRING) 0 else fieldSize(mapType.valueType)
+        appendReadPackedArrayFromBuffer("_keys", mapType.keyType, "4")
+        val valOffset = if (kSize > 0) {
+            "4 + _count * $kSize"
+        } else if (vSize > 1) {
+            "(_keysEndOff + ${vSize - 1}) / $vSize * $vSize" // align
+        } else {
+            "_keysEndOff"
+        }
+        appendReadPackedArrayFromBuffer("_values", mapType.valueType, valOffset)
+        appendLine("        _keys.zip(_values).toMap()")
+    }
+
+    private fun StringBuilder.appendReadPackedArrayFromBuffer(varName: String, elemType: KneType, startOffset: String) {
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val $varName = mutableListOf<String>()")
+                appendLine("        var ${varName}Off = $startOffset")
+                appendLine("        for (i in 0 until _count) {")
+                appendLine("            val _s = (_retPtr + ${varName}Off)!!.toKString()")
+                appendLine("            $varName.add(_s)")
+                appendLine("            ${varName}Off += _s.encodeToByteArray().size + 1")
+                appendLine("        }")
+                appendLine("        val ${varName}EndOff = ${varName}Off")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("        val ${varName}Ptr = (_retPtr + $startOffset)!!.reinterpret<IntVar>()")
+                appendLine("        val $varName = List(_count) { ${varName}Ptr[it] != 0 }")
+            }
+            is KneType.ENUM -> {
+                appendLine("        val ${varName}Ptr = (_retPtr + $startOffset)!!.reinterpret<IntVar>()")
+                appendLine("        val $varName = List(_count) { ${elemType.fqName}.entries[${varName}Ptr[it]] }")
+            }
+            else -> {
+                val varType = KneType.collectionElementVarType(elemType)
+                appendLine("        val ${varName}Ptr = (_retPtr + $startOffset)!!.reinterpret<$varType>()")
+                appendLine("        val $varName = List(_count) { ${varName}Ptr[it] }")
+            }
+        }
+    }
+
+    private fun fieldSize(type: KneType): Int = when (type) {
+        KneType.INT, KneType.FLOAT, KneType.BOOLEAN -> 4
+        KneType.LONG, KneType.DOUBLE -> 8
+        KneType.BYTE -> 1
+        KneType.SHORT -> 2
+        is KneType.ENUM -> 4
+        else -> 8
+    }
+
+    /** Allocate a native array for a collection element type in memScoped callback. */
+    private fun StringBuilder.appendCollectionArrayAlloc(idx: Int, elemType: KneType, srcExpr: String, prefix: String) {
+        val bufName = "_${prefix}Buf$idx"
+        val varType = KneType.collectionElementVarType(elemType)
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("        val $bufName = allocArray<ByteVar>($srcExpr.sumOf { it.encodeToByteArray().size + 1 }.coerceAtLeast(1))")
+                appendLine("        var _${prefix}Off$idx = 0")
+                appendLine("        for (_s in $srcExpr) { val _b = _s.encodeToByteArray(); _b.forEachIndexed { j, b -> $bufName[_${prefix}Off$idx + j] = b }; $bufName[_${prefix}Off$idx + _b.size] = 0; _${prefix}Off$idx += _b.size + 1 }")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("        val $bufName = allocArray<IntVar>($srcExpr.size)")
+                appendLine("        $srcExpr.forEachIndexed { j, v -> $bufName[j] = if (v) 1 else 0 }")
+            }
+            is KneType.ENUM -> {
+                appendLine("        val $bufName = allocArray<IntVar>($srcExpr.size)")
+                appendLine("        $srcExpr.forEachIndexed { j, v -> $bufName[j] = v.ordinal }")
+            }
+            else -> {
+                appendLine("        val $bufName = allocArray<$varType>($srcExpr.size)")
+                appendLine("        $srcExpr.forEachIndexed { j, v -> $bufName[j] = v }")
+            }
+        }
+    }
+
+    /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. LIST/SET/MAP become pointer+size. */
     private fun expandCFuncParamTypes(type: KneType): List<String> = when (type) {
         is KneType.DATA_CLASS -> type.fields.map { cFunctionParamType(it.type) }
         is KneType.LIST -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
         is KneType.SET -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
+        is KneType.MAP -> listOf(
+            KneType.collectionPointerType(type.keyType).replace("?", "") + "?",
+            KneType.collectionPointerType(type.valueType).replace("?", "") + "?",
+            "Int"
+        )
         else -> listOf(cFunctionParamType(type))
     }
 
@@ -952,6 +1084,7 @@ class NativeBridgeGenerator {
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.STRING -> "CPointer<ByteVar>?"
         is KneType.DATA_CLASS -> "CPointer<ByteVar>?" // pointer to struct
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "CPointer<ByteVar>?" // packed buffer
         else -> cFunctionParamType(type)
     }
 
