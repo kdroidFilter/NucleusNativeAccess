@@ -10,7 +10,8 @@ import libnotify.*
 import platform.posix.*
 import systray.*
 
-private var _trayClickCallback: ((Int) -> Unit)? = null
+// Global required because staticCFunction cannot capture variables (Kotlin/Native limitation)
+private var trayClickEmitter: ((Int) -> Unit)? = null
 
 actual class SystemDesktop {
 
@@ -98,13 +99,13 @@ actual class SystemDesktop {
     }
 
     actual fun trayClicks(): Flow<Int> = callbackFlow {
-        _trayClickCallback = { index -> trySend(index) }
+        trayClickEmitter = { index -> trySend(index) }
         systray_set_click_callback(staticCFunction { index ->
-            _trayClickCallback?.invoke(index)
+            trayClickEmitter?.invoke(index)
         })
         awaitClose {
             systray_set_click_callback(null)
-            _trayClickCallback = null
+            trayClickEmitter = null
         }
     }
 
