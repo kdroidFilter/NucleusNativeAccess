@@ -904,6 +904,7 @@ class NativeBridgeGenerator {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
                 KneType.STRING -> "_p$i.cstr.ptr"
                 is KneType.ENUM -> "_p$i.ordinal"
+                is KneType.OBJECT -> "StableRef.create(_p$i).asCPointer().toLong()"
                 is KneType.DATA_CLASS -> t.fields.joinToString(", ") { f ->
                     when (f.type) {
                         KneType.BOOLEAN -> "if (_p$i.${f.name}) 1 else 0"
@@ -925,6 +926,8 @@ class NativeBridgeGenerator {
             appendLine("        _fnPtr.invoke($invokeArgs)?.toKString() ?: \"\"")
         } else if (fnType.returnType is KneType.ENUM) {
             appendLine("        ${fnType.returnType.fqName}.entries[_fnPtr.invoke($invokeArgs)]")
+        } else if (fnType.returnType is KneType.OBJECT) {
+            appendLine("        _fnPtr.invoke($invokeArgs).toCPointer<COpaque>()!!.asStableRef<${fnType.returnType.fqName}>().get()")
         } else if (fnType.returnType is KneType.DATA_CLASS) {
             val dc = fnType.returnType as KneType.DATA_CLASS
             appendLine("        val _retPtr = _fnPtr.invoke($invokeArgs)!!")
@@ -1096,6 +1099,8 @@ class NativeBridgeGenerator {
         KneType.BYTE -> "Byte"
         KneType.SHORT -> "Short"
         KneType.STRING -> "CPointer<ByteVar>?"
+        is KneType.OBJECT -> "Long" // opaque StableRef handle
+        is KneType.ENUM -> "Int" // ordinal
         else -> "Int" // fallback
     }
 
@@ -1103,6 +1108,8 @@ class NativeBridgeGenerator {
         KneType.UNIT -> "Unit"
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.STRING -> "CPointer<ByteVar>?"
+        is KneType.OBJECT -> "Long" // opaque StableRef handle
+        is KneType.ENUM -> "Int"
         is KneType.DATA_CLASS -> "CPointer<ByteVar>?" // pointer to struct
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "CPointer<ByteVar>?" // packed buffer
         else -> cFunctionParamType(type)

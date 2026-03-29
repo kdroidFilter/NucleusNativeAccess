@@ -312,6 +312,7 @@ class FfmProxyGenerator {
                 KneType.BOOLEAN -> "p$i != 0"
                 KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
                 is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
+                is KneType.OBJECT -> "${t.simpleName}.fromNativeHandle(p$i)"
                 is KneType.DATA_CLASS -> {
                     val fieldArgs = t.fields.joinToString(", ") { f ->
                         val pName = "p${i}_${f.name}"
@@ -338,6 +339,8 @@ class FfmProxyGenerator {
             appendLine("        return Arena.ofAuto().allocateFrom(_fn.invoke($invokeConvertedArgs))")
         } else if (sig.returnType is KneType.ENUM) {
             appendLine("        return _fn.invoke($invokeConvertedArgs).ordinal")
+        } else if (sig.returnType is KneType.OBJECT) {
+            appendLine("        return _fn.invoke($invokeConvertedArgs).handle")
         } else if (sig.returnType is KneType.DATA_CLASS) {
             val dc = sig.returnType
             appendLine("        val _result = _fn.invoke($invokeConvertedArgs)")
@@ -528,6 +531,7 @@ class FfmProxyGenerator {
         KneType.SHORT -> "Short"
         KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
+        is KneType.OBJECT -> "Long" // opaque StableRef handle
         is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "MemorySegment" // packed buffer
         else -> "Int"
@@ -537,6 +541,7 @@ class FfmProxyGenerator {
     private fun upcallMethodTypeArg(type: KneType): String = when (type) {
         KneType.UNIT -> "Void.TYPE"
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
+        is KneType.OBJECT -> "Long::class.javaPrimitiveType"
         is KneType.DATA_CLASS -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "java.lang.foreign.MemorySegment::class.java"
         else -> "${upcallJvmType(type)}::class.javaPrimitiveType"
@@ -552,6 +557,7 @@ class FfmProxyGenerator {
         KneType.BYTE -> "JAVA_BYTE"
         KneType.SHORT -> "JAVA_SHORT"
         KneType.STRING -> "ADDRESS"
+        is KneType.OBJECT -> "JAVA_LONG" // opaque handle
         is KneType.DATA_CLASS -> "ADDRESS" // struct pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "ADDRESS" // packed buffer
         else -> "JAVA_INT"

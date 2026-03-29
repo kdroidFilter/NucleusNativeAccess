@@ -59,19 +59,27 @@ class PsiSourceParser {
             val rawDataClasses = mutableMapOf<String, Triple<String, KtClass, String>>()
             val commonDataClassNames = mutableSetOf<String>()
 
-            for (file in commonKtFiles + ktFiles) {
-                val ktFile = psiFactory.createFile(file.name, file.readText())
-                val pkg = ktFile.packageFqName.asString()
-                for (decl in ktFile.declarations) {
+            fun prescanDeclarations(declarations: List<KtDeclaration>, pkg: String, parentFq: String? = null) {
+                for (decl in declarations) {
                     if (decl !is KtClass) continue
                     val name = decl.name ?: continue
-                    val fq = if (pkg.isNotEmpty()) "$pkg.$name" else name
+                    val fq = if (parentFq != null) "$parentFq.$name"
+                        else if (pkg.isNotEmpty()) "$pkg.$name" else name
                     when {
                         decl.isEnum() -> knownEnums[name] = fq
                         decl.isData() -> rawDataClasses[name] = Triple(fq, decl, pkg)
-                        !decl.isInterface() -> knownClasses[name] = fq
+                        !decl.isInterface() -> {
+                            knownClasses[name] = fq
+                            prescanDeclarations(decl.declarations.toList(), pkg, fq)
+                        }
                     }
                 }
+            }
+
+            for (file in commonKtFiles + ktFiles) {
+                val ktFile = psiFactory.createFile(file.name, file.readText())
+                val pkg = ktFile.packageFqName.asString()
+                prescanDeclarations(ktFile.declarations.toList(), pkg)
                 if (file in commonKtFiles) {
                     rawDataClasses.keys.forEach { commonDataClassNames.add(it) }
                 }
@@ -106,20 +114,33 @@ class PsiSourceParser {
                 val pkg = ktFile.packageFqName.asString()
                 if (pkg.isNotEmpty()) packages.add(pkg)
 
-                for (decl in ktFile.declarations) {
-                    if (decl.isPrivateOrInternal()) continue
-                    when {
-                        decl is KtClass && decl.isEnum() -> parseEnum(decl, pkg)?.let { enumMap.putIfAbsent(it.fqName, it) }
-                        decl is KtClass && decl.isData() -> {
-                            val name = decl.name ?: continue
-                            val dcInfo = knownDataClasses[name] ?: continue
-                            val fq = dcInfo.first
-                            dataClassMap.putIfAbsent(fq, KneDataClass(name, fq, dcInfo.second, isCommon = name in commonDataClassNames))
+                fun processDeclarations(declarations: List<KtDeclaration>, parentSimpleName: String?, isTopLevel: Boolean) {
+                    for (decl in declarations) {
+                        if (decl.isPrivateOrInternal()) continue
+                        when {
+                            decl is KtClass && decl.isEnum() -> parseEnum(decl, pkg)?.let { enumMap.putIfAbsent(it.fqName, it) }
+                            decl is KtClass && decl.isData() -> {
+                                val name = decl.name ?: continue
+                                val dcInfo = knownDataClasses[name] ?: continue
+                                val fq = dcInfo.first
+                                dataClassMap.putIfAbsent(fq, KneDataClass(name, fq, dcInfo.second, isCommon = name in commonDataClassNames))
+                            }
+                            decl is KtClass && !decl.isInterface() -> {
+                                val cls = parseClass(decl, pkg, typeMaps) ?: continue
+                                val correctFq = knownClasses[decl.name ?: ""] ?: cls.fqName
+                                val qualifiedCls = if (parentSimpleName != null) {
+                                    cls.copy(simpleName = "${parentSimpleName}_${cls.simpleName}", fqName = correctFq)
+                                } else cls.copy(fqName = correctFq)
+                                classMap.putIfAbsent(qualifiedCls.fqName, qualifiedCls)
+                                // Only recurse for nested classes, not into class body
+                                processDeclarations(decl.declarations.toList(), qualifiedCls.simpleName, false)
+                            }
+                            // Only add top-level functions (not methods from nested class bodies — those are handled by parseClass)
+                            isTopLevel && decl is KtNamedFunction -> parseFunction(decl, typeMaps)?.let { functionMap.putIfAbsent(it.name, it) }
                         }
-                        decl is KtClass && !decl.isInterface() -> parseClass(decl, pkg, typeMaps)?.let { classMap.putIfAbsent(it.fqName, it) }
-                        decl is KtNamedFunction -> parseFunction(decl, typeMaps)?.let { functionMap.putIfAbsent(it.name, it) }
                     }
                 }
+                processDeclarations(ktFile.declarations.toList(), null, true)
             }
 
             for (name in commonDataClassNames) {
@@ -244,7 +265,7 @@ class PsiSourceParser {
             }
             val returnType = resolveType(typeElem.returnTypeReference, knownEnums, knownClasses, knownDataClasses) ?: KneType.UNIT
             val supported = setOf(KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT, KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING)
-            fun ok(t: KneType) = t in supported || t is KneType.DATA_CLASS || t is KneType.ENUM || t is KneType.LIST || t is KneType.SET || t is KneType.MAP
+            fun ok(t: KneType) = t in supported || t is KneType.DATA_CLASS || t is KneType.ENUM || t is KneType.OBJECT || t is KneType.LIST || t is KneType.SET || t is KneType.MAP
             fun okRet(t: KneType) = ok(t) || t == KneType.UNIT
             if (paramTypes.any { !ok(it) } || !okRet(returnType)) return null
             return KneType.FUNCTION(paramTypes, returnType)

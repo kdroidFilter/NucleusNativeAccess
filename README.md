@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (602 end-to-end FFM tests)
+### Types — test coverage (616 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all tests cross the real native boundary.
 
@@ -133,7 +133,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols)
 | `String` | ✅ 4t | ✅ 4t | ✅ 3t | ✅ 4t | ✅ 3t | output-buffer pattern |
 | `Unit` | &mdash; | ✅ 1t | &mdash; | &mdash; | ✅ 3t | `FunctionDescriptor.ofVoid(...)` |
 | `enum class` | ✅ 3t | ✅ 2t | ✅ 2t | ✅ 2t | ✅ 3t | ordinal mapping |
-| Classes | ✅ 3t | ✅ 4t | &mdash; | ❌ | &mdash; | opaque handle via `StableRef` |
+| Classes | ✅ 3t | ✅ 4t | &mdash; | ✅ 7t | ✅ 2t | opaque handle via `StableRef` |
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
 | `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
@@ -150,6 +150,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols)
 | Feature | Supported | Notes |
 |---------|-----------|-------|
 | Top-level classes | ✅ | `StableRef` lifecycle, `AutoCloseable` on JVM |
+| Nested classes | ✅ | exported as `Outer_Inner`, qualified bridge symbols |
 | Methods (fun) | ✅ | instance methods with any supported param/return types |
 | Properties (val/var) | ✅ | getters + setters, all supported types |
 | Constructors | ✅ | primary constructor with supported param types |
@@ -322,8 +323,6 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Inheritance / open classes | Can live in `commonMain` | Define in shared KMP code |
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
-| Nested/inner classes | Parser limitation | Use top-level classes |
-| Object (class) directly in callbacks | Not yet implemented | Wrap in a data class |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | `List<DataClass>` as collection element | Complex field decomposition | Use Object handles or primitive/String/Enum elements |

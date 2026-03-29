@@ -251,6 +251,19 @@ class Calculator(initial: Int = 0) {
         callback(label, found)
     }
 
+    // ── Object in callbacks ────────────────────────────────────────────────────
+
+    fun onSelfReady(callback: (Calculator) -> Unit) {
+        callback(this)
+    }
+
+    fun transformWith(other: Calculator, fn: (Calculator, Calculator) -> Int): Int {
+        accumulator = fn(this, other)
+        return accumulator
+    }
+
+    fun createVia(factory: (Int) -> Calculator): Calculator = factory(accumulator)
+
     // ── Collection support ────────────────────────────────────────────────────
 
     // List<Int>
@@ -579,4 +592,22 @@ class NestedDcProcessor {
 
     fun getStyleOrNull(): Style? = if (lastStyle.color != 0) lastStyle else null
     fun getStyledPointOrNull(): StyledPoint? = if (lastPoint.x != 0) StyledPoint(lastPoint, lastStyle) else null
+}
+
+// ── Nested class test ────────────────────────────────────────────────────────
+
+class MathSuite {
+    class Adder {
+        private var sum = 0
+        fun add(value: Int): Int { sum += value; return sum }
+        val current: Int get() = sum
+        fun reset() { sum = 0 }
+    }
+
+    class Multiplier {
+        private var product = 1
+        fun multiply(value: Int): Int { product *= value; return product }
+        val current: Int get() = product
+        fun reset() { product = 1 }
+    }
 }

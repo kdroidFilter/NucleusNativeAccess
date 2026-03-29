@@ -4975,4 +4975,132 @@ class CalculatorTest {
         threads.forEach { it.start() }
         threads.forEach { it.join() }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OBJECT IN CALLBACKS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `obj cb - onSelfReady receives self`() {
+        Calculator(42).use { calc ->
+            var received: Calculator? = null
+            calc.onSelfReady { received = it }
+            assertEquals(42, received?.current)
+            received?.close()
+        }
+    }
+
+    @Test fun `obj cb - onSelfReady modify through callback`() {
+        Calculator(10).use { calc ->
+            calc.onSelfReady { it.add(5) }
+            // callback received a handle to the same native object
+            assertEquals(15, calc.current)
+        }
+    }
+
+    @Test fun `obj cb - transformWith two instances`() {
+        Calculator(10).use { a ->
+            Calculator(20).use { b ->
+                val result = a.transformWith(b) { x, y -> x.current + y.current }
+                assertEquals(30, result)
+                assertEquals(30, a.current)
+            }
+        }
+    }
+
+    @Test fun `obj cb - transformWith multiply currents`() {
+        Calculator(3).use { a ->
+            Calculator(7).use { b ->
+                assertEquals(21, a.transformWith(b) { x, y -> x.current * y.current })
+            }
+        }
+    }
+
+    @Test fun `obj cb - createVia factory`() {
+        Calculator(42).use { calc ->
+            val created = calc.createVia { value -> Calculator(value * 2) }
+            assertEquals(84, created.current)
+            created.close()
+        }
+    }
+
+    @Test fun `obj cb - createVia factory zero`() {
+        Calculator(0).use { calc ->
+            val created = calc.createVia { Calculator(it + 1) }
+            assertEquals(1, created.current)
+            created.close()
+        }
+    }
+
+    @Test fun `obj cb - onSelfReady multiple times`() {
+        Calculator(1).use { calc ->
+            val values = mutableListOf<Int>()
+            repeat(5) {
+                calc.onSelfReady { values.add(it.current) }
+                calc.add(1)
+            }
+            assertEquals(listOf(1, 2, 3, 4, 5), values)
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // NESTED CLASSES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `nested - Adder basic`() {
+        MathSuite_Adder().use { adder ->
+            assertEquals(0, adder.current)
+            assertEquals(5, adder.add(5))
+            assertEquals(15, adder.add(10))
+        }
+    }
+
+    @Test fun `nested - Adder reset`() {
+        MathSuite_Adder().use { adder ->
+            adder.add(100)
+            adder.reset()
+            assertEquals(0, adder.current)
+        }
+    }
+
+    @Test fun `nested - Multiplier basic`() {
+        MathSuite_Multiplier().use { mul ->
+            assertEquals(1, mul.current)
+            assertEquals(5, mul.multiply(5))
+            assertEquals(15, mul.multiply(3))
+        }
+    }
+
+    @Test fun `nested - Multiplier reset`() {
+        MathSuite_Multiplier().use { mul ->
+            mul.multiply(10)
+            mul.reset()
+            assertEquals(1, mul.current)
+        }
+    }
+
+    @Test fun `nested - Adder and Multiplier independent`() {
+        MathSuite_Adder().use { adder ->
+            MathSuite_Multiplier().use { mul ->
+                adder.add(10)
+                mul.multiply(5)
+                assertEquals(10, adder.current)
+                assertEquals(5, mul.current)
+            }
+        }
+    }
+
+    @Test fun `nested - 10 Adder instances`() {
+        val adders = (1..10).map { MathSuite_Adder() }
+        adders.forEachIndexed { i, adder -> adder.add(i + 1) }
+        val sum = adders.sumOf { it.current }
+        assertEquals(55, sum) // 1+2+...+10
+        adders.forEach { it.close() }
+    }
+
+    @Test fun `nested - Adder 10K adds`() {
+        MathSuite_Adder().use { adder ->
+            repeat(10_000) { adder.add(1) }
+            assertEquals(10_000, adder.current)
+        }
+    }
 }
