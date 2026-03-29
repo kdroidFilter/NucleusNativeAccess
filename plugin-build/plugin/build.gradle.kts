@@ -40,11 +40,15 @@ gradlePlugin {
     vcsUrl.set(property("VCS_URL").toString())
 }
 
+/*
 publishing {
     publications.withType<MavenPublication>().configureEach {
-        artifactId = "nucleusnativeaccess"
+        if (name == "pluginMaven") {
+            artifactId = "nucleusnativeaccess"
+        }
     }
 }
+*/
 
 tasks.register("setupPluginUploadFromEnvironment") {
     doLast {

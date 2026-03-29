@@ -31,6 +31,7 @@ develocity {
     }
 }
 
-rootProject.name = "io.github.kdroidfilter.nucleusnativeaccess"
+rootProject.name = "nucleusnativeaccess-plugin"
 
-include(":plugin")
+include(":nucleusnativeaccess")
+project(":nucleusnativeaccess").projectDir = file("plugin")
