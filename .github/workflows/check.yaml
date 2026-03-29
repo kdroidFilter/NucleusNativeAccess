@@ -1,0 +1,43 @@
+name: Check
+
+on:
+  pull_request:
+    branches:
+      - '*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x64
+          - os: windows-latest
+            name: Windows x64
+          - os: macos-latest
+            name: macOS ARM
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev
+
+      - name: Plugin tests
+        run: ./gradlew --project-dir plugin-build :plugin:check
+
+      - name: Examples tests
+        run: ./gradlew :examples:calculator:check :examples:systeminfo:check :examples:benchmark:check
