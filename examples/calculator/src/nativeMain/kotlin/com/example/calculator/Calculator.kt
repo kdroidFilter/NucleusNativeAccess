@@ -143,6 +143,15 @@ class Calculator(initial: Int = 0) {
         accumulator = nv.value
     }
 
+    fun getPointOrNull(): Point? = if (accumulator != 0) Point(accumulator, accumulator * 2) else null
+
+    fun addPointOrNull(p: Point?): Int {
+        if (p != null) accumulator += p.x + p.y
+        return accumulator
+    }
+
+    fun getResultOrNull(): CalcResult? = if (accumulator != 0) CalcResult(accumulator, "Result: $accumulator") else null
+
     // ── Data class support (commonMain) ─────────────────────────────────
 
     fun getResult(): CalcResult = CalcResult(accumulator, "Result: $accumulator")

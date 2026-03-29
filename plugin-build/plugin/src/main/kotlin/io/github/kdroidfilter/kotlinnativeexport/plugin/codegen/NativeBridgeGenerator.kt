@@ -155,18 +155,35 @@ class NativeBridgeGenerator {
         cls.companionProperties.forEach { prop -> appendCompanionProperty(prop, cls, p) }
     }
 
+    /** Check if a type is DATA_CLASS or NULLABLE(DATA_CLASS). */
+    private fun isDataClassReturn(type: KneType): Boolean =
+        type is KneType.DATA_CLASS || (type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS)
+
+    private fun extractDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
+        is KneType.DATA_CLASS -> type
+        is KneType.NULLABLE -> type.inner as? KneType.DATA_CLASS
+        else -> null
+    }
+
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
         val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
         val returnsViaBuffer = fn.returnType.returnsViaBuffer()
-        val returnsDataClass = fn.returnType is KneType.DATA_CLASS
+        val returnsDataClass = isDataClassReturn(fn.returnType)
+        val returnDc = extractDataClass(fn.returnType)
+        val returnsNullableDataClass = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
 
-        // Build param list — expand DATA_CLASS params into flat fields
+        // Build param list — expand DATA_CLASS and NULLABLE(DATA_CLASS) params into flat fields
         val extraParams = if (returnsViaBuffer) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
         val paramList = buildExpandedParamList(fn.params)
-        val dcOutParams = if (returnsDataClass) buildDataClassOutParams(fn.returnType as KneType.DATA_CLASS) else ""
+        val dcOutParams = if (returnDc != null) buildDataClassOutParams(returnDc) else ""
         val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}$extraParams$dcOutParams"
 
-        val returnDecl = if (returnsDataClass) "" else buildReturnDecl(fn.returnType)
+        // Nullable data class returns Int (0=null, 1=present). Plain data class returns void.
+        val returnDecl = when {
+            returnsNullableDataClass -> ": Int"
+            returnDc != null -> ""
+            else -> buildReturnDecl(fn.returnType)
+        }
 
         appendLine("@CName(\"$symbolName\")")
         appendLine("fun `$symbolName`($allParams)$returnDecl {")
@@ -174,21 +191,25 @@ class NativeBridgeGenerator {
         appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
         appendObjectParamConversions(fn)
         val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
-        if (returnsDataClass) {
-            appendDataClassReturn("obj.${fn.name}($callArgs)", fn.returnType as KneType.DATA_CLASS)
+        if (returnsNullableDataClass) {
+            appendNullableDataClassReturn("obj.${fn.name}($callArgs)", returnDc!!)
+        } else if (returnDc != null) {
+            appendDataClassReturn("obj.${fn.name}($callArgs)", returnDc)
         } else {
             appendReturnStatement("obj.${fn.name}($callArgs)", fn.returnType)
         }
-        appendTryCatchEnd(if (returnsDataClass) KneType.UNIT else fn.returnType)
+        appendTryCatchEnd(if (returnsNullableDataClass) KneType.INT else if (returnDc != null) KneType.UNIT else fn.returnType)
         appendLine("}")
         appendLine()
     }
 
-    /** Expand params: DATA_CLASS becomes individual field params. */
+    /** Expand params: DATA_CLASS becomes individual field params, NULLABLE(DATA_CLASS) adds isNull flag. */
     private fun buildExpandedParamList(params: List<KneParam>): String =
         params.flatMap { p ->
-            if (p.type is KneType.DATA_CLASS) {
-                p.type.fields.map { f -> "${p.name}_${f.name}: ${f.type.nativeBridgeType}" }
+            val dc = extractDataClass(p.type)
+            if (dc != null) {
+                val fields = dc.fields.map { f -> "${p.name}_${f.name}: ${f.type.nativeBridgeType}" }
+                if (p.type is KneType.NULLABLE) listOf("${p.name}_isNull: Int") + fields else fields
             } else {
                 listOf("${p.name}: ${p.type.nativeBridgeType}")
             }
@@ -219,6 +240,25 @@ class NativeBridgeGenerator {
                 appendLine("    out_${f.name}!![0] = _result.${f.name}")
             }
         }
+    }
+
+    /** Write nullable data class fields to out-params. Returns 0 for null, 1 for present. */
+    private fun StringBuilder.appendNullableDataClassReturn(expr: String, dc: KneType.DATA_CLASS) {
+        appendLine("    val _result = $expr")
+        appendLine("    if (_result == null) return 0")
+        dc.fields.forEach { f ->
+            if (f.type == KneType.STRING) {
+                appendLine("    val _${f.name}_bytes = _result.${f.name}.encodeToByteArray()")
+                appendLine("    val _${f.name}_writeLen = minOf(_${f.name}_bytes.size, out_${f.name}_len - 1)")
+                appendLine("    _${f.name}_bytes.forEachIndexed { i, b -> if (i < _${f.name}_writeLen) out_${f.name}?.set(i, b) }")
+                appendLine("    out_${f.name}?.set(_${f.name}_writeLen, 0)")
+            } else if (f.type == KneType.BOOLEAN) {
+                appendLine("    out_${f.name}!![0] = if (_result.${f.name}) 1 else 0")
+            } else {
+                appendLine("    out_${f.name}!![0] = _result.${f.name}")
+            }
+        }
+        appendLine("    return 1")
     }
 
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
@@ -357,14 +397,15 @@ class NativeBridgeGenerator {
     }
 
     /** Convert a parameter value at the call site. */
-    private fun buildParamConversion(paramName: String, type: KneType): String = when (type) {
-        KneType.BOOLEAN -> "$paramName != 0"
-        KneType.STRING -> "$paramName?.toKString() ?: \"\""
-        is KneType.OBJECT -> "${paramName}Obj"
-        is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
-        is KneType.NULLABLE -> buildNullableParamConversion(paramName, type)
-        is KneType.FUNCTION -> "${paramName}Fn"
-        is KneType.DATA_CLASS -> "${paramName}Obj"
+    private fun buildParamConversion(paramName: String, type: KneType): String = when {
+        type == KneType.BOOLEAN -> "$paramName != 0"
+        type == KneType.STRING -> "$paramName?.toKString() ?: \"\""
+        type is KneType.OBJECT -> "${paramName}Obj"
+        type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
+        type is KneType.FUNCTION -> "${paramName}Fn"
+        type is KneType.DATA_CLASS -> "${paramName}Obj"
+        type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS -> "${paramName}Obj"
+        type is KneType.NULLABLE -> buildNullableParamConversion(paramName, type)
         else -> paramName
     }
 
@@ -383,14 +424,15 @@ class NativeBridgeGenerator {
     }
 
     /** Build the call argument expression for a parameter. */
-    private fun buildCallArg(paramName: String, type: KneType): String = when (type) {
-        KneType.STRING -> "${paramName}Str"
-        KneType.BOOLEAN -> "$paramName != 0"
-        is KneType.OBJECT -> "${paramName}Obj"
-        is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
-        is KneType.NULLABLE -> buildNullableCallArg(paramName, type)
-        is KneType.FUNCTION -> "${paramName}Fn"
-        is KneType.DATA_CLASS -> "${paramName}Obj"
+    private fun buildCallArg(paramName: String, type: KneType): String = when {
+        type == KneType.STRING -> "${paramName}Str"
+        type == KneType.BOOLEAN -> "$paramName != 0"
+        type is KneType.OBJECT -> "${paramName}Obj"
+        type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
+        type is KneType.FUNCTION -> "${paramName}Fn"
+        type is KneType.DATA_CLASS -> "${paramName}Obj"
+        type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS -> "${paramName}Obj"
+        type is KneType.NULLABLE -> buildNullableCallArg(paramName, type)
         else -> paramName
     }
 
@@ -428,9 +470,9 @@ class NativeBridgeGenerator {
             val fnType = p.type as KneType.FUNCTION
             appendFunctionParamConversion(p.name, fnType)
         }
-        // Reconstruct data classes from flattened fields
-        fn.params.filter { it.type is KneType.DATA_CLASS }.forEach { p ->
-            val dc = p.type as KneType.DATA_CLASS
+        // Reconstruct data classes from flattened fields (including nullable variants)
+        fn.params.forEach { p ->
+            val dc = extractDataClass(p.type) ?: return@forEach
             val fieldArgs = dc.fields.joinToString(", ") { f ->
                 val fieldParam = "${p.name}_${f.name}"
                 when (f.type) {
@@ -439,7 +481,11 @@ class NativeBridgeGenerator {
                     else -> "${f.name} = $fieldParam"
                 }
             }
-            appendLine("    val ${p.name}Obj = ${dc.fqName}($fieldArgs)")
+            if (p.type is KneType.NULLABLE) {
+                appendLine("    val ${p.name}Obj = if (${p.name}_isNull != 0) null else ${dc.fqName}($fieldArgs)")
+            } else {
+                appendLine("    val ${p.name}Obj = ${dc.fqName}($fieldArgs)")
+            }
         }
     }
 

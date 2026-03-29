@@ -772,6 +772,54 @@ class CalculatorTest {
         }
     }
 
+    // ── nullable data class ───────────────────────────────────────────────
+
+    @Test
+    fun `nullable Point return - non-null`() {
+        Calculator(5).use { calc ->
+            val p = calc.getPointOrNull()
+            assertEquals(Point(5, 10), p)
+        }
+    }
+
+    @Test
+    fun `nullable Point return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getPointOrNull())
+        }
+    }
+
+    @Test
+    fun `nullable Point param - non-null`() {
+        Calculator(0).use { calc ->
+            val result = calc.addPointOrNull(Point(3, 7))
+            assertEquals(10, result)
+        }
+    }
+
+    @Test
+    fun `nullable Point param - null`() {
+        Calculator(5).use { calc ->
+            val result = calc.addPointOrNull(null)
+            assertEquals(5, result) // unchanged
+        }
+    }
+
+    @Test
+    fun `nullable CalcResult return - non-null`() {
+        Calculator(42).use { calc ->
+            val r = calc.getResultOrNull()
+            assertEquals(CalcResult(42, "Result: 42"), r)
+        }
+    }
+
+    @Test
+    fun `nullable CalcResult return - null`() {
+        Calculator(0).use { calc ->
+            assertNull(calc.getResultOrNull())
+        }
+    }
+
     // ── commonMain data class (CalcResult) ──────────────────────────────────
 
     @Test

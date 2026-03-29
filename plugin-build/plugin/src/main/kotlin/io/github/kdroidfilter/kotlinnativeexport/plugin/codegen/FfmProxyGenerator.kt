@@ -43,6 +43,15 @@ class FfmProxyGenerator {
     private fun needsConfinedArena(params: List<KneParam>, returnType: KneType): Boolean =
         params.any { it.type.isStringLike() } || returnType.isStringLike()
 
+    private fun isDataClassReturn(type: KneType): Boolean =
+        type is KneType.DATA_CLASS || (type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS)
+
+    private fun extractDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
+        is KneType.DATA_CLASS -> type
+        is KneType.NULLABLE -> type.inner as? KneType.DATA_CLASS
+        else -> null
+    }
+
     private fun classHasCallbacks(cls: KneClass): Boolean =
         cls.methods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } } ||
         cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
@@ -503,16 +512,17 @@ class FfmProxyGenerator {
         // Allocate callback stubs in persistent arena (survives async calls)
         appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
 
-        val returnsDataClass = fn.returnType is KneType.DATA_CLASS
-        val hasDataClassParams = fn.params.any { it.type is KneType.DATA_CLASS }
-        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType) || returnsDataClass ||
-            hasDataClassParams && fn.params.any { it.type is KneType.DATA_CLASS && it.type.fields.any { f -> f.type == KneType.STRING } }
+        val returnDc = extractDataClass(fn.returnType)
+        val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
+        val hasAnyDcParams = fn.params.any { extractDataClass(it.type) != null }
+        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType) || returnDc != null ||
+            hasAnyDcParams && fn.params.any { dc -> val d = extractDataClass(dc.type); d != null && d.fields.any { f -> f.type == KneType.STRING } }
 
-        if (needsConfinedArena || returnsDataClass) {
+        if (needsConfinedArena || returnDc != null) {
             appendLine("        Arena.ofConfined().use { arena ->")
             appendStringInvokeArgsAlloc("            ", fn.params)
-            if (returnsDataClass) {
-                appendDataClassReturnProxy("            ", fn, handleName)
+            if (returnDc != null) {
+                appendDataClassReturnProxy("            ", fn, handleName, returnsNullableDc)
             } else {
                 val invokeArgs = buildClassInvokeArgsExpanded(fn)
                 appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
@@ -528,8 +538,8 @@ class FfmProxyGenerator {
     }
 
     /** Generate the return-via-out-params pattern for DATA_CLASS return types. */
-    private fun StringBuilder.appendDataClassReturnProxy(indent: String, fn: KneFunction, handleName: String) {
-        val dc = fn.returnType as KneType.DATA_CLASS
+    private fun StringBuilder.appendDataClassReturnProxy(indent: String, fn: KneFunction, handleName: String, nullable: Boolean = false) {
+        val dc = extractDataClass(fn.returnType)!!
 
         // Allocate out-params for each field
         dc.fields.forEach { f ->
@@ -553,8 +563,14 @@ class FfmProxyGenerator {
             }
         }.joinToString(", ")
 
-        appendLine("${indent}$handleName.invoke($paramArgs)")
-        appendLine("${indent}KneRuntime.checkError()")
+        if (nullable) {
+            appendLine("${indent}val _isPresent = $handleName.invoke($paramArgs) as Int")
+            appendLine("${indent}KneRuntime.checkError()")
+            appendLine("${indent}if (_isPresent == 0) return null")
+        } else {
+            appendLine("${indent}$handleName.invoke($paramArgs)")
+            appendLine("${indent}KneRuntime.checkError()")
+        }
 
         // Read fields and construct data class
         val ctorArgs = dc.fields.joinToString(", ") { f ->
@@ -587,14 +603,18 @@ class FfmProxyGenerator {
 
     /** Expand a single param into invoke args. DATA_CLASS becomes N args (one per field). */
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
-        if (p.type !is KneType.DATA_CLASS) return listOf(buildJvmInvokeArg(p.name, p.type))
-        return p.type.fields.map { f ->
+        val dc = extractDataClass(p.type)
+        if (dc == null) return listOf(buildJvmInvokeArg(p.name, p.type))
+        val isNullable = p.type is KneType.NULLABLE
+        val accessPrefix = if (isNullable) "${p.name}?." else "${p.name}."
+        val fieldArgs = dc.fields.map { f ->
             when (f.type) {
-                KneType.STRING -> "${p.name}_${f.name}Seg" // allocated in appendStringInvokeArgsAlloc
-                KneType.BOOLEAN -> "if (${p.name}.${f.name}) 1 else 0"
-                else -> "${p.name}.${f.name}"
+                KneType.STRING -> "${p.name}_${f.name}Seg"
+                KneType.BOOLEAN -> "if (${accessPrefix}${f.name} == true) 1 else 0"
+                else -> "${accessPrefix}${f.name} ?: 0"
             }
         }
+        return if (isNullable) listOf("if (${p.name} == null) 1 else 0") + fieldArgs else fieldArgs
     }
 
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
@@ -787,11 +807,15 @@ class FfmProxyGenerator {
     // ── Descriptor builders ──────────────────────────────────────────────────
 
     private fun buildMethodDescriptor(fn: KneFunction): String {
+        val returnDc = extractDataClass(fn.returnType)
+        val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
         val paramLayouts = buildList {
             add("JAVA_LONG") // handle
             fn.params.forEach { p ->
-                if (p.type is KneType.DATA_CLASS) {
-                    p.type.fields.forEach { f -> add(f.type.ffmLayout) }
+                val dc = extractDataClass(p.type)
+                if (dc != null) {
+                    if (p.type is KneType.NULLABLE) add("JAVA_INT") // isNull flag
+                    dc.fields.forEach { f -> add(f.type.ffmLayout) }
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -799,8 +823,8 @@ class FfmProxyGenerator {
             if (fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
-            if (fn.returnType is KneType.DATA_CLASS) {
-                (fn.returnType as KneType.DATA_CLASS).fields.forEach { f ->
+            if (returnDc != null) {
+                returnDc.fields.forEach { f ->
                     if (f.type == KneType.STRING) {
                         add("ADDRESS"); add("JAVA_INT")
                     } else {
@@ -809,7 +833,11 @@ class FfmProxyGenerator {
                 }
             }
         }
-        val effectiveReturn = if (fn.returnType is KneType.DATA_CLASS) KneType.UNIT else fn.returnType
+        val effectiveReturn = when {
+            returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
+            returnDc != null -> KneType.UNIT
+            else -> fn.returnType
+        }
         return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
@@ -921,10 +949,16 @@ class FfmProxyGenerator {
         params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner == KneType.STRING }.forEach { p ->
             appendLine("${indent}val ${p.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}) else MemorySegment.NULL")
         }
-        // Allocate String fields from data class params
-        params.filter { it.type is KneType.DATA_CLASS }.forEach { p ->
-            (p.type as KneType.DATA_CLASS).fields.filter { it.type == KneType.STRING }.forEach { f ->
-                appendLine("${indent}val ${p.name}_${f.name}Seg = arena.allocateFrom(${p.name}.${f.name})")
+        // Allocate String fields from data class params (including nullable)
+        params.forEach { p ->
+            val dc = extractDataClass(p.type) ?: return@forEach
+            val isNullable = p.type is KneType.NULLABLE
+            dc.fields.filter { it.type == KneType.STRING }.forEach { f ->
+                if (isNullable) {
+                    appendLine("${indent}val ${p.name}_${f.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}.${f.name}) else MemorySegment.NULL")
+                } else {
+                    appendLine("${indent}val ${p.name}_${f.name}Seg = arena.allocateFrom(${p.name}.${f.name})")
+                }
             }
         }
     }
