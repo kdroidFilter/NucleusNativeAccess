@@ -15,6 +15,7 @@ data class KneDataClass(
     val simpleName: String,
     val fqName: String,
     val fields: List<KneParam>,
+    val isCommon: Boolean = false,
 ) : Serializable
 
 data class KneClass(

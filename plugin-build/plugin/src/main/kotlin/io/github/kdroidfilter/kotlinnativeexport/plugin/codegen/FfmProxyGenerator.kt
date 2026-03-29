@@ -60,7 +60,7 @@ class FfmProxyGenerator {
         files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures)
         files["KotlinNativeException.kt"] = generateException(jvmPackage)
 
-        module.dataClasses.forEach { dc ->
+        module.dataClasses.filter { !it.isCommon }.forEach { dc ->
             files["${dc.simpleName}.kt"] = generateDataClassFile(dc, jvmPackage)
         }
 

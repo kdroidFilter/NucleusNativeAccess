@@ -25,6 +25,10 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val nativeSources: ConfigurableFileCollection
 
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val commonSources: ConfigurableFileCollection
+
     @get:Input
     abstract val libName: Property<String>
 
@@ -43,8 +47,9 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
             return
         }
 
-        logger.lifecycle("kne: Parsing ${ktFiles.size} native source file(s)...")
-        val module = KotlinSourceParser().parse(ktFiles, libName.get())
+        val commonKtFiles = commonSources.asFileTree.filter { it.extension == "kt" }.files
+        logger.lifecycle("kne: Parsing ${ktFiles.size} native + ${commonKtFiles.size} common source file(s)...")
+        val module = KotlinSourceParser().parse(ktFiles, libName.get(), commonKtFiles)
 
         if (module.classes.isEmpty() && module.enums.isEmpty() && module.functions.isEmpty()) {
             logger.lifecycle("kne: No public classes, enums, or functions found, skipping.")

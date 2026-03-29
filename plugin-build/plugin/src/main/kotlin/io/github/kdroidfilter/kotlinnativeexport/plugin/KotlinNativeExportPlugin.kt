@@ -66,6 +66,10 @@ class KotlinNativeExportPlugin : Plugin<Project> {
         }
         val userNativeSources = project.files(userNativeSrcDirs)
 
+        // Collect commonMain sources for data class discovery
+        val commonMainDir = project.projectDir.resolve("src/commonMain/kotlin")
+        val commonSources = project.files(if (commonMainDir.exists()) commonMainDir else null)
+
         // ── Code-generation tasks ────────────────────────────────────────────
 
         val generateNativeBridges = project.tasks.register(
@@ -75,6 +79,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
             task.group = "kne"
             task.description = "Generate Kotlin/Native @CName bridge functions"
             task.nativeSources.from(userNativeSources)
+            task.commonSources.from(commonSources)
             task.libName.set(libName)
             task.outputDir.set(nativeBridgesDir)
         }
@@ -86,6 +91,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
             task.group = "kne"
             task.description = "Generate Kotlin/JVM FFM proxy classes"
             task.nativeSources.from(userNativeSources)
+            task.commonSources.from(commonSources)
             task.libName.set(libName)
             task.jvmPackage.set(pkg)
             task.outputDir.set(jvmProxiesDir)

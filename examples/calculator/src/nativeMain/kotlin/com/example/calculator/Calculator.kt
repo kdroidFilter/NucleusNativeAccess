@@ -127,7 +127,7 @@ class Calculator(initial: Int = 0) {
         return predicate(accumulator)
     }
 
-    // ── Data class support ────────────────────────────────────────────────
+    // ── Data class support (nativeMain-only) ───────────────────────────────
 
     fun getPoint(): Point = Point(accumulator, accumulator * 2)
 
@@ -141,6 +141,16 @@ class Calculator(initial: Int = 0) {
     fun setFromNamed(nv: NamedValue) {
         label = nv.name
         accumulator = nv.value
+    }
+
+    // ── Data class support (commonMain) ─────────────────────────────────
+
+    fun getResult(): CalcResult = CalcResult(accumulator, "Result: $accumulator")
+
+    fun applyResult(r: CalcResult): Int {
+        accumulator = r.value
+        label = r.description
+        return accumulator
     }
 
     // ── Callback support ────────────────────────────────────────────────────

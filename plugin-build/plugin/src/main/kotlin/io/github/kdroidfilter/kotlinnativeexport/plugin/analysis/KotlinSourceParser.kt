@@ -51,13 +51,21 @@ class KotlinSourceParser {
         private val SKIP_MODIFIERS = setOf("private", "internal", "protected")
     }
 
-    fun parse(files: Collection<File>, libName: String): KneModule {
+    fun parse(files: Collection<File>, libName: String, commonFiles: Collection<File> = emptyList()): KneModule {
         val ktFiles = files.filter { it.extension == "kt" }
+        val commonKtFiles = commonFiles.filter { it.extension == "kt" }
 
         // Pre-scan: collect all class, enum, and data class names for type resolution
+        // Scan both native and common sources for type discovery
         val knownClasses = mutableMapOf<String, String>()
         val knownEnums = mutableMapOf<String, String>()
         val knownDataClasses = mutableMapOf<String, Pair<String, List<KneParam>>>()
+        val commonDataClassNames = mutableSetOf<String>()
+        for (file in commonKtFiles) {
+            prescanTypes(file, knownClasses, knownEnums, knownDataClasses)
+            // Track which data classes come from commonMain
+            knownDataClasses.keys.forEach { commonDataClassNames.add(it) }
+        }
         for (file in ktFiles) {
             prescanTypes(file, knownClasses, knownEnums, knownDataClasses)
         }
@@ -69,13 +77,24 @@ class KotlinSourceParser {
         val functions = mutableListOf<KneFunction>()
         val packages = mutableSetOf<String>()
 
+        // Only parse nativeMain files for classes/methods/functions
+        // (commonMain data classes are discovered via prescan but not parsed for methods)
         for (file in ktFiles) {
-            val result = parseFile(file, knownTypes)
+            val result = parseFile(file, knownTypes, commonDataClassNames)
             classes.addAll(result.classes)
             dataClasses.addAll(result.dataClasses)
             enums.addAll(result.enums)
             functions.addAll(result.functions)
             result.packageName?.let { packages.add(it) }
+        }
+
+        // Add common data classes that are referenced in native code
+        // (they appear in knownDataClasses from prescan but weren't in nativeMain parseFile)
+        for (name in commonDataClassNames) {
+            val dcInfo = knownDataClasses[name] ?: continue
+            if (dataClasses.none { it.simpleName == name }) {
+                dataClasses.add(KneDataClass(simpleName = name, fqName = dcInfo.first, fields = dcInfo.second, isCommon = true))
+            }
         }
 
         return KneModule(libName = libName, packages = packages, classes = classes, dataClasses = dataClasses, enums = enums, functions = functions)
@@ -168,7 +187,7 @@ class KotlinSourceParser {
         val packageName: String?,
     )
 
-    private fun parseFile(file: File, knownTypes: TypeMaps): ParseResult {
+    private fun parseFile(file: File, knownTypes: TypeMaps, commonDataClassNames: Set<String> = emptySet()): ParseResult {
         val classes = mutableListOf<KneClass>()
         val dataClasses = mutableListOf<KneDataClass>()
         val enums = mutableListOf<KneEnum>()
@@ -267,7 +286,10 @@ class KotlinSourceParser {
                         // Data class: add to dataClasses, skip body parsing
                         val dcInfo = knownTypes.dataClasses[name]
                         if (dcInfo != null) {
-                            dataClasses.add(KneDataClass(simpleName = name, fqName = dcInfo.first, fields = dcInfo.second))
+                            dataClasses.add(KneDataClass(
+                                simpleName = name, fqName = dcInfo.first, fields = dcInfo.second,
+                                isCommon = name in commonDataClassNames,
+                            ))
                         }
                     } else if (braceDepth == 0 && !isDataClass) {
                         currentClassName = name

@@ -772,6 +772,67 @@ class CalculatorTest {
         }
     }
 
+    // ── commonMain data class (CalcResult) ──────────────────────────────────
+
+    @Test
+    fun `common data class return - CalcResult`() {
+        Calculator(42).use { calc ->
+            val r = calc.getResult()
+            assertEquals(42, r.value)
+            assertEquals("Result: 42", r.description)
+        }
+    }
+
+    @Test
+    fun `common data class return - zero`() {
+        Calculator(0).use { calc ->
+            val r = calc.getResult()
+            assertEquals(0, r.value)
+            assertEquals("Result: 0", r.description)
+        }
+    }
+
+    @Test
+    fun `common data class param - applyResult`() {
+        Calculator(0).use { calc ->
+            val result = calc.applyResult(CalcResult(99, "injected"))
+            assertEquals(99, result)
+            assertEquals(99, calc.current)
+            assertEquals("injected", calc.label)
+        }
+    }
+
+    @Test
+    fun `common data class roundtrip`() {
+        Calculator(7).use { calc ->
+            calc.label = "test"
+            val r = calc.getResult()
+            assertEquals(7, r.value)
+            Calculator(0).use { other ->
+                other.applyResult(r)
+                assertEquals(7, other.current)
+                assertEquals("Result: 7", other.label)
+            }
+        }
+    }
+
+    @Test
+    fun `common data class equality works`() {
+        Calculator(5).use { calc ->
+            val r1 = calc.getResult()
+            val r2 = calc.getResult()
+            assertEquals(r1, r2) // data class equals
+        }
+    }
+
+    @Test
+    fun `common data class with unicode string`() {
+        Calculator(0).use { calc ->
+            calc.applyResult(CalcResult(1, "café ☕"))
+            assertEquals("café ☕", calc.label)
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Phase 4: Callbacks / Lambdas (FFM upcall stubs)
     // ═══════════════════════════════════════════════════════════════════════════
