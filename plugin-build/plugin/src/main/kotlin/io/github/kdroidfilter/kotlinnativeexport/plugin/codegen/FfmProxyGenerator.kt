@@ -272,6 +272,27 @@ class FfmProxyGenerator {
             appendLine("        return Arena.ofAuto().allocateFrom(_fn.invoke($invokeConvertedArgs))")
         } else if (sig.returnType is KneType.ENUM) {
             appendLine("        return _fn.invoke($invokeConvertedArgs).ordinal")
+        } else if (sig.returnType is KneType.DATA_CLASS) {
+            val dc = sig.returnType
+            appendLine("        val _result = _fn.invoke($invokeConvertedArgs)")
+            appendLine("        val _arena = Arena.ofAuto()")
+            val structSize = dc.fields.sumOf { fieldSize(it.type) }
+            appendLine("        val _buf = _arena.allocate(${structSize}.toLong())")
+            var offset = 0
+            dc.fields.forEach { f ->
+                when (f.type) {
+                    KneType.INT -> { appendLine("        _buf.set(JAVA_INT, ${offset}.toLong(), _result.${f.name})"); offset += 4 }
+                    KneType.LONG -> { appendLine("        _buf.set(JAVA_LONG, ${offset}.toLong(), _result.${f.name})"); offset += 8 }
+                    KneType.DOUBLE -> { appendLine("        _buf.set(JAVA_DOUBLE, ${offset}.toLong(), _result.${f.name})"); offset += 8 }
+                    KneType.FLOAT -> { appendLine("        _buf.set(JAVA_FLOAT, ${offset}.toLong(), _result.${f.name})"); offset += 4 }
+                    KneType.BOOLEAN -> { appendLine("        _buf.set(JAVA_INT, ${offset}.toLong(), if (_result.${f.name}) 1 else 0)"); offset += 4 }
+                    KneType.SHORT -> { appendLine("        _buf.set(JAVA_SHORT, ${offset}.toLong(), _result.${f.name})"); offset += 2 }
+                    KneType.BYTE -> { appendLine("        _buf.set(JAVA_BYTE, ${offset}.toLong(), _result.${f.name})"); offset += 1 }
+                    KneType.STRING -> { appendLine("        _buf.set(ADDRESS, ${offset}.toLong(), _arena.allocateFrom(_result.${f.name}))"); offset += 8 }
+                    else -> offset += 8
+                }
+            }
+            appendLine("        return _buf")
         } else {
             appendLine("        return _fn.invoke($invokeConvertedArgs)")
         }
@@ -323,6 +344,7 @@ class FfmProxyGenerator {
         KneType.SHORT -> "Short"
         KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
+        is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
         else -> "Int"
     }
 
@@ -330,6 +352,7 @@ class FfmProxyGenerator {
     private fun upcallMethodTypeArg(type: KneType): String = when (type) {
         KneType.UNIT -> "Void.TYPE"
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
+        is KneType.DATA_CLASS -> "java.lang.foreign.MemorySegment::class.java"
         else -> "${upcallJvmType(type)}::class.javaPrimitiveType"
     }
 
@@ -343,7 +366,16 @@ class FfmProxyGenerator {
         KneType.BYTE -> "JAVA_BYTE"
         KneType.SHORT -> "JAVA_SHORT"
         KneType.STRING -> "ADDRESS"
+        is KneType.DATA_CLASS -> "ADDRESS" // struct pointer
         else -> "JAVA_INT"
+    }
+
+    private fun fieldSize(type: KneType): Int = when (type) {
+        KneType.INT, KneType.FLOAT, KneType.BOOLEAN -> 4
+        KneType.LONG, KneType.DOUBLE, KneType.STRING -> 8
+        KneType.BYTE -> 1
+        KneType.SHORT -> 2
+        else -> 8
     }
 
     // ── Class proxy ──────────────────────────────────────────────────────────

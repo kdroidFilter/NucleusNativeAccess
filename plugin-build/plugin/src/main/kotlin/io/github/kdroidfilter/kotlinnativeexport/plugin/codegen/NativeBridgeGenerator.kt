@@ -533,6 +533,25 @@ class NativeBridgeGenerator {
             appendLine("        _fnPtr.invoke($invokeArgs)?.toKString() ?: \"\"")
         } else if (fnType.returnType is KneType.ENUM) {
             appendLine("        ${fnType.returnType.fqName}.entries[_fnPtr.invoke($invokeArgs)]")
+        } else if (fnType.returnType is KneType.DATA_CLASS) {
+            val dc = fnType.returnType as KneType.DATA_CLASS
+            appendLine("        val _retPtr = _fnPtr.invoke($invokeArgs)!!")
+            var offset = 0
+            val fieldArgs = dc.fields.joinToString(", ") { f ->
+                val expr = when (f.type) {
+                    KneType.INT -> { val r = "(_retPtr + $offset)!!.reinterpret<IntVar>().pointed.value"; offset += 4; r }
+                    KneType.LONG -> { val r = "(_retPtr + $offset)!!.reinterpret<LongVar>().pointed.value"; offset += 8; r }
+                    KneType.DOUBLE -> { val r = "(_retPtr + $offset)!!.reinterpret<DoubleVar>().pointed.value"; offset += 8; r }
+                    KneType.FLOAT -> { val r = "(_retPtr + $offset)!!.reinterpret<FloatVar>().pointed.value"; offset += 4; r }
+                    KneType.BOOLEAN -> { val r = "(_retPtr + $offset)!!.reinterpret<IntVar>().pointed.value != 0"; offset += 4; r }
+                    KneType.SHORT -> { val r = "(_retPtr + $offset)!!.reinterpret<ShortVar>().pointed.value"; offset += 2; r }
+                    KneType.BYTE -> { val r = "(_retPtr + $offset)!!.reinterpret<ByteVar>().pointed.value"; offset += 1; r }
+                    KneType.STRING -> { val r = "(_retPtr + $offset)!!.reinterpret<CPointerVar<ByteVar>>().pointed.value?.toKString() ?: \"\""; offset += 8; r }
+                    else -> { offset += 8; "0" }
+                }
+                "${f.name} = $expr"
+            }
+            appendLine("        ${dc.fqName}($fieldArgs)")
         } else {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         }
@@ -565,6 +584,7 @@ class NativeBridgeGenerator {
         KneType.UNIT -> "Unit"
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.STRING -> "CPointer<ByteVar>?"
+        is KneType.DATA_CLASS -> "CPointer<ByteVar>?" // pointer to struct
         else -> cFunctionParamType(type)
     }
 

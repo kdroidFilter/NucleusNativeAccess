@@ -549,7 +549,7 @@ class KotlinSourceParser {
         )
         val returnType = parseType(returnStr, knownTypes)
         val unsupportedParam = paramTypes.any { it !in supportedCallbackPrimitive && it !is KneType.DATA_CLASS && it !is KneType.ENUM }
-        val unsupportedReturn = returnType !in supportedCallbackReturns && returnType !is KneType.ENUM
+        val unsupportedReturn = returnType !in supportedCallbackReturns && returnType !is KneType.ENUM && returnType !is KneType.DATA_CLASS
         if (unsupportedParam || unsupportedReturn) return null
 
         return KneType.FUNCTION(paramTypes, returnType)

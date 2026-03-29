@@ -931,6 +931,30 @@ class CalculatorTest {
     }
 
     @Test
+    fun `callback (Int) to Point - create point from value`() {
+        Calculator(5).use { calc ->
+            val p = calc.createPoint { v -> Point(v, v * 3) }
+            assertEquals(Point(5, 15), p)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Point - zero`() {
+        Calculator(0).use { calc ->
+            val p = calc.createPoint { v -> Point(v, v) }
+            assertEquals(Point(0, 0), p)
+        }
+    }
+
+    @Test
+    fun `callback (Int) to Point - negative`() {
+        Calculator(-4).use { calc ->
+            val p = calc.createPoint { v -> Point(v, -v) }
+            assertEquals(Point(-4, 4), p)
+        }
+    }
+
+    @Test
     fun `callback (Point) to Int - transform point`() {
         Calculator(5).use { calc ->
             val result = calc.transformPoint { p -> p.x + p.y }

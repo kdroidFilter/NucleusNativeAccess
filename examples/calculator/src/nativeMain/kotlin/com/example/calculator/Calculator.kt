@@ -194,6 +194,10 @@ class Calculator(initial: Int = 0) {
         callback(CalcResult(accumulator, "Result: $accumulator"))
     }
 
+    fun createPoint(factory: (Int) -> Point): Point {
+        return factory(accumulator)
+    }
+
     fun transformPoint(fn: (Point) -> Int): Int {
         accumulator = fn(Point(accumulator, accumulator * 2))
         return accumulator
