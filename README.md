@@ -1,5 +1,7 @@
 # Nucleus Native Access
 
+[![Gradle Plugin Portal](https://img.shields.io/maven-metadata/v?metadataUrl=https%3A%2F%2Fplugins.gradle.org%2Fm2%2Fio%2Fgithub%2Fkdroidfilter%2Fnucleusnativeaccess%2Fio.github.kdroidfilter.nucleusnativeaccess.gradle.plugin%2Fmaven-metadata.xml&label=Gradle%20Plugin%20Portal)](https://plugins.gradle.org/plugin/io.github.kdroidfilter.nucleusnativeaccess)
+
 A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation, callbacks &mdash; everything is transparent to the JVM developer.
 
 Under the hood, the plugin generates [FFM (Foreign Function & Memory API)](https://openjdk.org/jeps/454) bindings inspired by [swift-java](https://github.com/swiftlang/swift-java) and [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone).
@@ -44,7 +46,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     kotlin("multiplatform") version "2.3.20"
-    id("io.github.kdroidfilter.nucleusnativeaccess") version "<version>"
+    id("io.github.kdroidfilter.nucleusnativeaccess") version "0.1.0"
 }
 ```
 

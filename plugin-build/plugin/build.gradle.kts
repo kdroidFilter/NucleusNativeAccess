@@ -1,3 +1,5 @@
+import org.gradle.api.publish.maven.MavenPublication
+
 plugins {
     kotlin("jvm")
     `java-gradle-plugin`
@@ -36,6 +38,12 @@ gradlePlugin {
 gradlePlugin {
     website.set(property("WEBSITE").toString())
     vcsUrl.set(property("VCS_URL").toString())
+}
+
+publishing {
+    publications.withType<MavenPublication>().configureEach {
+        artifactId = "nucleusnativeaccess"
+    }
 }
 
 tasks.register("setupPluginUploadFromEnvironment") {
