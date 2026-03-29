@@ -476,16 +476,17 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class exported from Kotlin/Native, with Compose Desktop UI and Nucleus packaging |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 739 end-to-end tests: all types, callbacks, collections, suspend, Flow, nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
+| [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
 Run them:
 
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 217 tests
-./gradlew :examples:systeminfo:jvmTest    # 7 tests
+./gradlew :examples:calculator:jvmTest    # 739 end-to-end FFM tests
+./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 
 ## Architecture
@@ -501,51 +502,36 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 ├── ir/                          # Intermediate representation (inspired by SirModule)
 │   └── KneIR.kt                 # KneModule, KneClass, KneFunction, KneType...
 ├── analysis/
-│   └── KotlinSourceParser.kt    # Parses .kt files, extracts public API
+│   ├── PsiSourceParser.kt       # Kotlin PSI-based source parser (kotlin-compiler-embeddable)
+│   └── PsiParseWorkAction.kt    # Gradle Worker for isolated PSI classloader
 ├── codegen/
 │   ├── NativeBridgeGenerator.kt # @CName + StableRef bridges (inspired by @_cdecl thunks)
 │   └── FfmProxyGenerator.kt     # JVM proxy classes with FFM (inspired by FFMSwift2JavaGenerator)
 ├── tasks/
-│   ├── GenerateNativeBridgesTask.kt
-│   └── GenerateJvmProxiesTask.kt
+│   └── GenerateNativeBridgesTask.kt  # Single task: PSI parse + native bridges + JVM proxies
 ├── KotlinNativeExportExtension.kt
 └── KotlinNativeExportPlugin.kt
 ```
 
+**Source analysis**: the plugin uses Kotlin PSI (`kotlin-compiler-embeddable`) for proper AST-based parsing, running in an isolated Gradle Worker classloader. This handles nested generics, function types, default parameters, multi-line constructors, and `suspend`/`Flow` detection natively &mdash; no regex.
+
 ## Roadmap
 
-Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, K2 analysis, bridge generation pipeline) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles, memory management).
+Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, bridge generation) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles).
 
 ### Next &mdash; Packaging & deployment
-
-Make the plugin production-ready with zero-config deployment.
 
 - [ ] **Automatic native lib bundling** &mdash; single-JAR deployment
   - [ ] Embed `.so`/`.dylib`/`.dll` in JAR under `META-INF/native/{os}-{arch}/`
   - [ ] `KneRuntime.loadLibrary()`: extract to temp dir at startup, load via `System.load()`
-  - [ ] Detect GraalVM native-image: skip extraction, use `SymbolLookup.loaderLookup()` (swift-java pattern)
+  - [ ] Detect GraalVM native-image: skip extraction, use `SymbolLookup.loaderLookup()`
 
-- [ ] **GraalVM reachability-metadata generation** &mdash; auto-generate for native-image
-  - [ ] Generate `reachability-metadata.json` listing all FFM downcall descriptors
-  - [ ] Output to `META-INF/native-image/{groupId}/{artifactId}/` in JAR
-  - [ ] Register generated proxy classes for reflection if needed
+- [ ] **GraalVM reachability-metadata generation**
+  - [ ] Generate `reachability-metadata.json` for FFM downcall descriptors
+  - [ ] Output to `META-INF/native-image/{groupId}/{artifactId}/`
 
-- [ ] **Multi-target support** &mdash; fat JARs with per-platform native libs
-  - [ ] Detect all configured `KotlinNativeTarget`s in the project
-  - [ ] Bundle each platform's shared lib under `META-INF/native/{os}-{arch}/`
-  - [ ] `KneRuntime`: detect current OS/arch at startup, load correct variant
-
-### Phase 5 &mdash; Analysis robustness ✅
-
-- [x] **Kotlin PSI parser** &mdash; replaced regex parser with proper AST-based parsing via `kotlin-compiler-embeddable`
-  - [x] Uses `KotlinCoreApplicationEnvironment` + `KtPsiFactory` for proper Kotlin file parsing
-  - [x] Gradle Worker API with `classLoaderIsolation` for PSI environment isolation
-  - [x] Handles nested generics, function types, default params, multi-line constructors natively
-  - [x] No regex, no `splitAtTopLevelCommas`, no brace counting
-
-### Future considerations
-
-- **Suspend functions / coroutines** &mdash; swift-java maps `async` to `CompletableFuture`, kotlin-swift-export maps `suspend` to Swift `async/await`. A similar approach could map `suspend` to `CompletableFuture` on JVM, but this requires significant runtime support.
+- [ ] **Multi-target fat JARs**
+  - [ ] Bundle per-platform native libs, detect OS/arch at startup
 
 ### Design philosophy
 
