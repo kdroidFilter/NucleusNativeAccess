@@ -1,9 +1,14 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlinx.cinterop.BetaInteropApi::class, kotlin.experimental.ExperimentalNativeApi::class)
 
 package com.example.systeminfo
 
 import kotlinx.cinterop.*
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import platform.AppKit.*
+import platform.darwin.NSObject
+import platform.Foundation.NSSelectorFromString
 import platform.Foundation.NSProcessInfo
 import platform.UserNotifications.*
 import platform.darwin.dispatch_async
@@ -11,9 +16,20 @@ import platform.darwin.dispatch_get_main_queue
 import platform.darwin.sysctlbyname
 import platform.posix.*
 
+// Global emitter — staticCFunction-style constraint: target/action can't capture locals
+private var trayClickEmitter: ((Int) -> Unit)? = null
+
+private class TrayClickTarget : NSObject() {
+    @ObjCAction
+    fun itemClicked(sender: NSMenuItem) {
+        trayClickEmitter?.invoke(sender.tag.toInt())
+    }
+}
+
 actual class SystemDesktop {
 
     private var statusItem: NSStatusItem? = null
+    private var clickTarget: TrayClickTarget? = null
 
     actual fun sendNotification(title: String, body: String, icon: String): Boolean {
         val content = UNMutableNotificationContent().apply {
@@ -81,17 +97,27 @@ actual class SystemDesktop {
             val item = bar.statusItemWithLength(NSVariableStatusItemLength)
             item.button?.title = "\uD83D\uDCBB"
 
+            val target = TrayClickTarget()
+            val action = NSSelectorFromString("itemClicked:")
             val menu = NSMenu()
-            menu.addItemWithTitle("Hostname: ${getHostname()}", action = null, keyEquivalent = "")
-            menu.addItemWithTitle("CPU: ${getCpuModel()}", action = null, keyEquivalent = "")
-            menu.addItemWithTitle("Cores: ${getCpuCoreCount()}", action = null, keyEquivalent = "")
-            menu.addItemWithTitle("Memory: ${getAvailableMemoryMB()} MB / ${getTotalMemoryMB()} MB", action = null, keyEquivalent = "")
-            menu.addItemWithTitle("Uptime: ${formatUptime(getUptime())}", action = null, keyEquivalent = "")
+
+            fun addClickableItem(title: String, tag: Int) {
+                val menuItem = menu.addItemWithTitle(title, action = action, keyEquivalent = "")
+                menuItem?.target = target
+                menuItem?.setTag(tag.toLong())
+            }
+
+            addClickableItem("Hostname: ${getHostname()}", 0)
+            addClickableItem("CPU: ${getCpuModel()}", 1)
+            addClickableItem("Cores: ${getCpuCoreCount()}", 2)
+            addClickableItem("Memory: ${getAvailableMemoryMB()} MB / ${getTotalMemoryMB()} MB", 3)
+            addClickableItem("Uptime: ${formatUptime(getUptime())}", 4)
             menu.addItem(NSMenuItem.separatorItem())
-            menu.addItemWithTitle("Kernel: ${getKernelVersion()}", action = null, keyEquivalent = "")
+            addClickableItem("Kernel: ${getKernelVersion()}", 6)
 
             item.menu = menu
             statusItem = item
+            clickTarget = target
         }
         return true
     }
@@ -101,13 +127,24 @@ actual class SystemDesktop {
         dispatch_async(dispatch_get_main_queue()) {
             NSStatusBar.systemStatusBar.removeStatusItem(item)
             statusItem = null
+            clickTarget = null
         }
         return true
     }
 
-    actual fun updateTrayLabel(index: Int, label: String): Boolean = false
+    actual fun updateTrayLabel(index: Int, label: String): Boolean {
+        val menu = statusItem?.menu ?: return false
+        val menuItem = menu.itemAtIndex(index.toLong()) ?: return false
+        dispatch_async(dispatch_get_main_queue()) {
+            menuItem.setTitle(label)
+        }
+        return true
+    }
 
-    actual fun trayClicks(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.emptyFlow()
+    actual fun trayClicks(): Flow<Int> = callbackFlow {
+        trayClickEmitter = { index -> trySend(index) }
+        awaitClose { trayClickEmitter = null }
+    }
 
     private fun formatUptime(seconds: Double): String {
         if (seconds < 0) return "N/A"
