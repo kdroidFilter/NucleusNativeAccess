@@ -44,6 +44,15 @@ kotlin {
         }
     }
 
+    // cinterop with Win32 Shell API (tray icon + toast notifications)
+    if (hostOs.startsWith("Windows")) {
+        nativeTarget.compilations["main"].cinterops {
+            val wintray by creating {
+                defFile(project.file("src/nativeInterop/cinterop/wintray.def"))
+            }
+        }
+    }
+
     jvm()
 
     sourceSets {
