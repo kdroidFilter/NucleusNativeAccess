@@ -284,6 +284,7 @@ class PsiSourceParser {
                 "List", "MutableList" -> if (typeArgs.size == 1) KneType.LIST(typeArgs[0]) else null
                 "Set", "MutableSet" -> if (typeArgs.size == 1) KneType.SET(typeArgs[0]) else null
                 "Map", "MutableMap" -> if (typeArgs.size == 2) KneType.MAP(typeArgs[0], typeArgs[1]) else null
+                "Flow" -> if (typeArgs.size == 1) KneType.FLOW(typeArgs[0]) else null
                 else -> knownEnums[name]?.let { KneType.ENUM(it, name) }
                     ?: knownDataClasses[name]?.let { KneType.DATA_CLASS(it.first, name, it.second) }
                     ?: knownClasses[name]?.let { KneType.OBJECT(it, name) }

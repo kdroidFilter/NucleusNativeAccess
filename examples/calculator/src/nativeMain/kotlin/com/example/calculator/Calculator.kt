@@ -347,6 +347,36 @@ class Calculator(initial: Int = 0) {
         return if (accumulator != 0) accumulator else null
     }
 
+    // ── Flow support ─────────────────────────────────────────────────────────
+
+    fun countUp(max: Int): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flow {
+        for (i in 1..max) { kotlinx.coroutines.delay(5); emit(i) }
+    }
+
+    fun tickStrings(count: Int): kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.flow {
+        repeat(count) { kotlinx.coroutines.delay(3); emit("tick_$it") }
+    }
+
+    fun failingFlow(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flow {
+        emit(1); emit(2); error("flow boom")
+    }
+
+    fun infiniteFlow(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flow {
+        var i = 0; while (true) { kotlinx.coroutines.delay(5); emit(i++) }
+    }
+
+    fun emptyIntFlow(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.emptyFlow()
+
+    fun singleFlow(): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flowOf(accumulator)
+
+    fun enumFlow(): kotlinx.coroutines.flow.Flow<Operation> = kotlinx.coroutines.flow.flow {
+        Operation.entries.forEach { emit(it) }
+    }
+
+    fun boolFlow(): kotlinx.coroutines.flow.Flow<Boolean> = kotlinx.coroutines.flow.flow {
+        emit(true); emit(false); emit(accumulator > 0)
+    }
+
     // ── Object in callbacks ────────────────────────────────────────────────────
 
     fun onSelfReady(callback: (Calculator) -> Unit) {

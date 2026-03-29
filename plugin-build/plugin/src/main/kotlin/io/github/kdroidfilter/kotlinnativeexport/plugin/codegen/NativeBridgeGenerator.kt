@@ -57,8 +57,11 @@ class NativeBridgeGenerator {
 
         val hasSuspend = module.classes.any { cls -> cls.methods.any { it.isSuspend } || cls.companionMethods.any { it.isSuspend } } ||
             module.functions.any { it.isSuspend }
-        if (hasSuspend) {
+        val hasFlow = module.classes.any { cls -> cls.methods.any { it.returnType is KneType.FLOW } } ||
+            module.functions.any { it.returnType is KneType.FLOW }
+        if (hasSuspend || hasFlow) {
             appendLine("import kotlinx.coroutines.*")
+            if (hasFlow) appendLine("import kotlinx.coroutines.flow.*")
         }
 
         module.packages.forEach { pkg ->
@@ -147,6 +150,7 @@ class NativeBridgeGenerator {
         is KneType.LIST -> "0"
         is KneType.SET -> "0"
         is KneType.MAP -> "0"
+        is KneType.FLOW -> ""
     }
 
     // ── Classes ──────────────────────────────────────────────────────────────
@@ -199,9 +203,10 @@ class NativeBridgeGenerator {
         appendLine("}")
         appendLine()
 
-        // Methods (dispatch suspend vs regular)
+        // Methods (dispatch suspend / flow / regular)
         cls.methods.forEach { method ->
             if (method.isSuspend) appendSuspendMethod(method, cls, p)
+            else if (method.returnType is KneType.FLOW) appendFlowMethod(method, cls, p)
             else appendMethod(method, cls, p)
         }
 
@@ -1399,6 +1404,73 @@ class NativeBridgeGenerator {
                 appendLine("            }")
             }
             else -> appendLine("            _contFn.invoke(1, $resultExpr.toLong())")
+        }
+    }
+
+    // ── Flow support ────────────────────────────────────────────────────────
+
+    /** Generate a Flow-returning method bridge. */
+    private fun StringBuilder.appendFlowMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val symbolName = "${prefix}_${cls.simpleName}_${fn.name}"
+        val flowType = fn.returnType as KneType.FLOW
+        val elemType = flowType.elementType
+        val paramList = buildExpandedParamList(fn.params)
+        val allParams = "handle: Long${if (paramList.isNotEmpty()) ", $paramList" else ""}, _nextPtr: Long, _errorPtr: Long, _completePtr: Long, _cancelOut: CPointer<LongVar>?"
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($allParams) {")
+        appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+
+        appendObjectParamConversions(fn)
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
+
+        appendLine("    val _job = Job()")
+        appendLine("    val _jobRef = StableRef.create(_job)")
+        appendLine("    _cancelOut?.pointed?.value = _jobRef.asCPointer().toLong()")
+
+        appendLine("    CoroutineScope(_job + Dispatchers.Default).launch {")
+        appendLine("        try {")
+        appendLine("            val _flow = obj.${fn.name}($callArgs)")
+        appendLine("            _flow.collect { _value ->")
+        appendLine("                val _nextFn = _nextPtr.toCPointer<CFunction<(Long) -> Unit>>()!!")
+        appendFlowElementEncode("_value", elemType)
+        appendLine("            }")
+        appendLine("            val _completeFn = _completePtr.toCPointer<CFunction<() -> Unit>>()!!")
+        appendLine("            _completeFn.invoke()")
+        appendLine("        } catch (_e: CancellationException) {")
+        appendLine("            // silently cancelled — JVM side already knows")
+        appendLine("        } catch (_e: Throwable) {")
+        appendLine("            val _errorFn = _errorPtr.toCPointer<CFunction<(Long) -> Unit>>()!!")
+        appendLine("            val _msgRef = StableRef.create(_e.message ?: _e::class.simpleName ?: \"Unknown error\")")
+        appendLine("            _errorFn.invoke(_msgRef.asCPointer().toLong())")
+        appendLine("        } finally {")
+        appendLine("            _jobRef.dispose()")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Encode a flow element value and call _nextFn. Reuses suspend encoding logic. */
+    private fun StringBuilder.appendFlowElementEncode(valueExpr: String, elemType: KneType) {
+        when (elemType) {
+            KneType.INT -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
+            KneType.LONG -> appendLine("                _nextFn.invoke($valueExpr)")
+            KneType.SHORT -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
+            KneType.BYTE -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
+            KneType.FLOAT -> appendLine("                _nextFn.invoke($valueExpr.toRawBits().toLong())")
+            KneType.DOUBLE -> appendLine("                _nextFn.invoke($valueExpr.toRawBits())")
+            KneType.BOOLEAN -> appendLine("                _nextFn.invoke(if ($valueExpr) 1L else 0L)")
+            KneType.STRING -> {
+                appendLine("                val _ref = StableRef.create($valueExpr)")
+                appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
+            }
+            is KneType.OBJECT -> {
+                appendLine("                val _ref = StableRef.create($valueExpr)")
+                appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
+            }
+            is KneType.ENUM -> appendLine("                _nextFn.invoke($valueExpr.ordinal.toLong())")
+            else -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
         }
     }
 }

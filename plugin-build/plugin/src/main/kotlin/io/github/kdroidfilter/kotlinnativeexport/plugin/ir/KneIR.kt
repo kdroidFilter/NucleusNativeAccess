@@ -76,6 +76,7 @@ sealed class KneType : Serializable {
     data class LIST(val elementType: KneType) : KneType()
     data class SET(val elementType: KneType) : KneType()
     data class MAP(val keyType: KneType, val valueType: KneType) : KneType()
+    data class FLOW(val elementType: KneType) : KneType()
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -105,6 +106,7 @@ sealed class KneType : Serializable {
             is LIST -> "ADDRESS" // pointer to element array + JAVA_INT size
             is SET -> "ADDRESS"  // same encoding as LIST
             is MAP -> "ADDRESS"  // keys pointer (+ values pointer + size handled in expansion)
+            is FLOW -> "" // void — result delivered via callbacks (like suspend)
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -128,6 +130,7 @@ sealed class KneType : Serializable {
             is LIST -> "List<${elementType.jvmTypeName}>"
             is SET -> "Set<${elementType.jvmTypeName}>"
             is MAP -> "Map<${keyType.jvmTypeName}, ${valueType.jvmTypeName}>"
+            is FLOW -> "kotlinx.coroutines.flow.Flow<${elementType.jvmTypeName}>"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -159,6 +162,7 @@ sealed class KneType : Serializable {
             is LIST -> collectionPointerType(elementType)
             is SET -> collectionPointerType(elementType)
             is MAP -> collectionPointerType(keyType) // keys pointer type; values handled in expansion
+            is FLOW -> "Unit" // void — callbacks deliver values
         }
 
     /** The native pointer type for out-param usage (e.g. IntVar for Int). */
