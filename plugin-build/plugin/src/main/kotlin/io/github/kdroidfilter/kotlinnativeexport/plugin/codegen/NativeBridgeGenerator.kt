@@ -139,7 +139,7 @@ class NativeBridgeGenerator {
         val n = cls.simpleName
         val fq = cls.fqName
 
-        // Constructor
+        // Constructor (full — all params)
         val ctorArgs = cls.constructor.params.joinToString(", ") { param ->
             "${param.name}: ${param.type.nativeBridgeType}"
         }
@@ -153,6 +153,22 @@ class NativeBridgeGenerator {
         appendTryCatchEnd(KneType.LONG) // Long handle
         appendLine("}")
         appendLine()
+
+        // Constructor overloads — drop trailing default params one at a time
+        val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+        for (drop in 1..trailingDefaults) {
+            val requiredParams = cls.constructor.params.dropLast(drop)
+            val suffix = requiredParams.size.toString()
+            val oArgs = requiredParams.joinToString(", ") { "${it.name}: ${it.type.nativeBridgeType}" }
+            val oCall = requiredParams.joinToString(", ") { "${it.name} = ${buildParamConversion(it.name, it.type)}" }
+            appendLine("@CName(\"${p}_${n}_new$suffix\")")
+            appendLine("fun `${p}_${n}_new$suffix`($oArgs): Long {")
+            appendTryCatchStart()
+            appendLine("    return StableRef.create($fq($oCall)).asCPointer().toLong()")
+            appendTryCatchEnd(KneType.LONG)
+            appendLine("}")
+            appendLine()
+        }
 
         // Dispose
         appendLine("@CName(\"${p}_${n}_dispose\")")

@@ -53,6 +53,7 @@ data class KneProperty(
 data class KneParam(
     val name: String,
     val type: KneType,
+    val hasDefault: Boolean = false,
 ) : Serializable
 
 sealed class KneType : Serializable {

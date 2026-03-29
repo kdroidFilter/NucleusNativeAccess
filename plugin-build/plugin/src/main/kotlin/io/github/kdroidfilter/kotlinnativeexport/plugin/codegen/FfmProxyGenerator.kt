@@ -610,6 +610,18 @@ class FfmProxyGenerator {
         appendLine("            KneRuntime.handle(\"${p}_${n}_new\",")
         appendLine("                FunctionDescriptor.of(JAVA_LONG$ctorLayouts))")
         appendLine("        }")
+
+        // Handles for constructor overloads (trailing default params dropped)
+        val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+        for (drop in 1..trailingDefaults) {
+            val requiredParams = cls.constructor.params.dropLast(drop)
+            val suffix = requiredParams.size.toString()
+            val overloadLayouts = buildLayouts(requiredParams.map { it.type })
+            appendLine("        private val NEW_HANDLE_$suffix: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_${n}_new$suffix\",")
+            appendLine("                FunctionDescriptor.of(JAVA_LONG$overloadLayouts))")
+            appendLine("        }")
+        }
         appendLine("        private val DISPOSE_HANDLE: MethodHandle by lazy {")
         appendLine("            KneRuntime.handle(\"${p}_${n}_dispose\",")
         appendLine("                FunctionDescriptor.ofVoid(JAVA_LONG))")
@@ -688,6 +700,31 @@ class FfmProxyGenerator {
             appendLine("            return fromNativeHandle(h)")
         }
         appendLine("        }")
+        appendLine()
+
+        // Constructor overloads for default parameters
+        for (drop in 1..trailingDefaults) {
+            val requiredParams = cls.constructor.params.dropLast(drop)
+            val suffix = requiredParams.size.toString()
+            val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            appendLine()
+            appendLine("        operator fun invoke($overloadParams): $n {")
+            if (requiredParams.any { it.type.isStringLike() || it.type.isFunctionType() }) {
+                appendLine("            Arena.ofConfined().use { arena ->")
+                appendStringInvokeArgsAlloc("                ", requiredParams)
+                val args = buildCtorInvokeArgs(requiredParams)
+                appendLine("                val h = NEW_HANDLE_$suffix.invoke($args) as Long")
+                appendLine("                KneRuntime.checkError()")
+                appendLine("                return fromNativeHandle(h)")
+                appendLine("            }")
+            } else {
+                val args = buildCtorInvokeArgs(requiredParams)
+                appendLine("            val h = NEW_HANDLE_$suffix.invoke($args) as Long")
+                appendLine("            KneRuntime.checkError()")
+                appendLine("            return fromNativeHandle(h)")
+            }
+            appendLine("        }")
+        }
         appendLine()
 
         appendLine("        internal fun fromNativeHandle(h: Long): $n {")

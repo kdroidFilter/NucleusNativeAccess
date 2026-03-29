@@ -520,10 +520,11 @@ class RegexSourceParser : SourceParser {
 
     private fun parseCtorParams(paramsStr: String, knownTypes: TypeMaps): List<KneParam> {
         if (paramsStr.isBlank()) return emptyList()
-        return paramsStr.split(",").mapNotNull { raw ->
+        return splitAtTopLevelCommas(paramsStr).mapNotNull { raw ->
             val s = raw.trim()
             val m = CTOR_PARAM_RE.find(s) ?: return@mapNotNull null
-            KneParam(name = m.groupValues[1], type = parseType(m.groupValues[2].trim(), knownTypes))
+            val hasDefault = s.contains(Regex("""\s*=\s*""")) && s.indexOf('=') > s.indexOf(':')
+            KneParam(name = m.groupValues[1], type = parseType(m.groupValues[2].trim(), knownTypes), hasDefault = hasDefault)
         }
     }
 

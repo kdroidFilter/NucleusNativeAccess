@@ -117,7 +117,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (503 end-to-end FFM tests)
+### Types — test coverage (511 end-to-end FFM tests)
 
 Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all tests cross the real native boundary.
 
@@ -153,6 +153,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (130+ exported symbols)
 | Methods (fun) | ✅ | instance methods with any supported param/return types |
 | Properties (val/var) | ✅ | getters + setters, all supported types |
 | Constructors | ✅ | primary constructor with supported param types |
+| Constructor default params | ✅ | generates overloads for trailing default parameters |
 | Companion objects | ✅ | static methods and properties on JVM proxy |
 | Top-level functions | ✅ | grouped into a singleton `object` on JVM |
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
@@ -276,7 +277,6 @@ calc.add(5) // works normally after exception
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | `List<DataClass>` as collection element | Complex field decomposition | Use Object handles or primitive/String/Enum elements |
-| Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 

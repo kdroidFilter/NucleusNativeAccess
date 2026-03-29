@@ -4108,4 +4108,68 @@ class CalculatorTest {
             c2.close()
         }
     }
+
+    // ── Constructor default parameters ──────────────────────────────────────
+
+    @Test fun `default param - no-arg constructor uses default`() {
+        Calculator().use { calc ->
+            assertEquals(0, calc.current) // default initial = 0
+        }
+    }
+
+    @Test fun `default param - no-arg then add`() {
+        Calculator().use { calc ->
+            calc.add(42)
+            assertEquals(42, calc.current)
+        }
+    }
+
+    @Test fun `default param - no-arg vs explicit zero`() {
+        Calculator().use { c1 ->
+            Calculator(0).use { c2 ->
+                assertEquals(c1.current, c2.current)
+            }
+        }
+    }
+
+    @Test fun `default param - explicit overrides default`() {
+        Calculator(99).use { calc ->
+            assertEquals(99, calc.current)
+        }
+    }
+
+    @Test fun `default param - no-arg full lifecycle`() {
+        Calculator().use { calc ->
+            assertEquals(0, calc.current)
+            calc.add(10)
+            assertEquals(10, calc.current)
+            calc.multiply(3)
+            assertEquals(30, calc.current)
+            assertEquals("Calculator(current=30)", calc.describe())
+        }
+    }
+
+    @Test fun `default param - no-arg with collections`() {
+        Calculator().use { calc ->
+            assertEquals(listOf(0, 0, 0), calc.getScores())
+            calc.sumAll(listOf(1, 2, 3))
+            assertEquals(6, calc.current)
+        }
+    }
+
+    @Test fun `default param - no-arg with callbacks`() {
+        Calculator().use { calc ->
+            var received = emptyList<Int>()
+            calc.onScoresReady { received = it }
+            assertEquals(listOf(0, 0, 0), received)
+        }
+    }
+
+    @Test fun `default param - no-arg with nullable`() {
+        Calculator().use { calc ->
+            assertNull(calc.getScoresOrNull()) // 0 → null
+            calc.add(5)
+            assertEquals(listOf(5, 10), calc.getScoresOrNull())
+        }
+    }
 }
