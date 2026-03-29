@@ -4,8 +4,10 @@ package com.example.systeminfo
 
 import kotlinx.cinterop.*
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
 import platform.windows.*
 import wintray.*
 
@@ -118,6 +120,13 @@ actual class SystemDesktop {
         awaitClose {
             wintray_set_click_callback(null)
             trayClickEmitter = null
+        }
+    }
+
+    actual fun memoryFlow(intervalMs: Long): Flow<MemoryInfo> = flow {
+        while (true) {
+            emit(MemoryInfo(getTotalMemoryMB(), getAvailableMemoryMB()))
+            delay(intervalMs)
         }
     }
 

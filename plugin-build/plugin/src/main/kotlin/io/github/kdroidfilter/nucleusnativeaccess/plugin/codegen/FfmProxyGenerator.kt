@@ -121,6 +121,21 @@ class FfmProxyGenerator {
                 }
                 reg(getParams, null)
             }
+
+            // Flow<DC> reader handles
+            cls.methods.forEach { m ->
+                val rt = m.returnType
+                if (rt is KneType.FLOW && rt.elementType is KneType.DATA_CLASS) {
+                    val dc = rt.elementType
+                    val readParams = buildList {
+                        add("long long") // handle
+                        flattenDcFields(dc, "").forEach { (_, type) ->
+                            when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("void*"); add("int") }; else -> add("void*") }
+                        }
+                    }
+                    reg(readParams, null)
+                }
+            }
         }
 
         // Top-level functions
@@ -997,6 +1012,24 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
+        // Flow<DC> reader handles
+        val dcFlowTypes = mutableSetOf<KneType.DATA_CLASS>()
+        cls.methods.forEach { m -> if (m.returnType is KneType.FLOW && (m.returnType as KneType.FLOW).elementType is KneType.DATA_CLASS) dcFlowTypes.add((m.returnType as KneType.FLOW).elementType as KneType.DATA_CLASS) }
+        cls.companionMethods.forEach { m -> if (m.returnType is KneType.FLOW && (m.returnType as KneType.FLOW).elementType is KneType.DATA_CLASS) dcFlowTypes.add((m.returnType as KneType.FLOW).elementType as KneType.DATA_CLASS) }
+        for (dc in dcFlowTypes) {
+            val dn = dc.simpleName.uppercase()
+            val flatFields = flattenDcFields(dc, "")
+            val readLayouts = buildList {
+                add("JAVA_LONG") // handle
+                flatFields.forEach { (_, type) ->
+                    when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }; else -> add("ADDRESS") }
+                }
+            }.joinToString(", ")
+            appendLine("        private val FLOWDC_${dn}_READ_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_flowdc_${dc.simpleName}_read\", FunctionDescriptor.ofVoid($readLayouts))")
+            appendLine("        }")
+        }
+
         // Factory
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
@@ -1148,6 +1181,31 @@ class FfmProxyGenerator {
             KneType.STRING -> appendLine("${indent}trySend(KneRuntime.readStringFromRef(_value))")
             is KneType.OBJECT -> appendLine("${indent}trySend(${elemType.simpleName}.fromNativeHandle(_value))")
             is KneType.ENUM -> appendLine("${indent}trySend(${elemType.simpleName}.entries[_value.toInt()])")
+            is KneType.DATA_CLASS -> {
+                appendLine("${indent}Arena.ofConfined().use { _dcArena ->")
+                val flatFields = flattenDcFields(elemType, "out")
+                flatFields.forEach { (name, type) ->
+                    when (type) {
+                        KneType.STRING, KneType.BYTE_ARRAY ->
+                            appendLine("${indent}    val $name = _dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                        else ->
+                            appendLine("${indent}    val $name = _dcArena.allocate(${type.ffmLayout})")
+                    }
+                }
+                val readArgs = buildList {
+                    add("_value")
+                    flatFields.forEach { (name, type) ->
+                        when (type) {
+                            KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }
+                            else -> add(name)
+                        }
+                    }
+                }.joinToString(", ")
+                val dn = elemType.simpleName.uppercase()
+                appendLine("${indent}    FLOWDC_${dn}_READ_HANDLE.invoke($readArgs)")
+                appendLine("${indent}    trySend(${buildDcCtorFromOutParams(elemType, "out")})")
+                appendLine("${indent}}")
+            }
             else -> appendLine("${indent}trySend(_value.toInt())")
         }
     }

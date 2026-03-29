@@ -4,8 +4,10 @@ package com.example.systeminfo
 
 import kotlinx.cinterop.*
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
 import libnotify.*
 import platform.posix.*
 import systray.*
@@ -118,6 +120,13 @@ actual class SystemDesktop {
         val h = (seconds / 3600).toInt()
         val m = ((seconds % 3600) / 60).toInt()
         return "${h}h ${m}m"
+    }
+
+    actual fun memoryFlow(intervalMs: Long): Flow<MemoryInfo> = flow {
+        while (true) {
+            emit(MemoryInfo(getTotalMemoryMB(), getAvailableMemoryMB()))
+            delay(intervalMs)
+        }
     }
 
     private fun readProcValue(path: String, key: String): Long = memScoped {
