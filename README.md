@@ -238,13 +238,11 @@ calc.add(5) // works normally after exception
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types |
 | Nested/inner classes | Parser limitation | Use top-level classes |
-| Data class fields: `Enum`, `Object`, other data classes | Not yet implemented | Use primitives + String fields |
-| Data class as callback return | ✅ **Supported** | &mdash; |
-| Nullable data class (`DataClass?`) | ✅ **Supported** | &mdash; |
+| Data class fields: `Enum`, `Object`, nested data class | Not yet implemented | Use primitives + String fields |
 | Object (class) in callbacks | Not yet implemented | Use data class or primitives |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
-| Collections (`List`, `Map`, etc.) | Not yet implemented | Use `ByteArray` for binary data, data classes for structured data |
+| Collections (`List`, `Map`, `Set`) | Not yet implemented | Use `ByteArray` for binary, data class for structured |
 | Constructor default parameters | Parser limitation | Define overloads manually |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
