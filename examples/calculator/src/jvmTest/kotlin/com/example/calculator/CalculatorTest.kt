@@ -1372,6 +1372,66 @@ class CalculatorTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Callbacks: all primitive types (battle-test each type individually)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `callback Long param and return`() {
+        Calculator(10).use { calc ->
+            val result = calc.withLong { it * 3L }
+            assertEquals(30L, result)
+        }
+    }
+
+    @Test
+    fun `callback Long large value`() {
+        Calculator(1).use { calc ->
+            val result = calc.withLong { it + 1_000_000_000L }
+            assertEquals(1_000_000_001L, result)
+        }
+    }
+
+    @Test
+    fun `callback Double param and return`() {
+        Calculator(7).use { calc ->
+            val result = calc.withDouble { it * 1.5 }
+            assertEquals(10.5, result, 0.001)
+        }
+    }
+
+    @Test
+    fun `callback Double precision`() {
+        Calculator(0).use { calc ->
+            val result = calc.withDouble { 3.141592653589793 }
+            assertEquals(3.141592653589793, result, 1e-10)
+        }
+    }
+
+    @Test
+    fun `callback Float param and return`() {
+        Calculator(5).use { calc ->
+            val result = calc.withFloat { it + 0.5f }
+            assertEquals(5.5f, result, 0.01f)
+        }
+    }
+
+    @Test
+    fun `callback Short param and return`() {
+        Calculator(100).use { calc ->
+            val result = calc.withShort { (it * 2).toShort() }
+            assertEquals(200.toShort(), result)
+        }
+    }
+
+    @Test
+    fun `callback Byte param and return`() {
+        Calculator(10).use { calc ->
+            val result = calc.withByte { (it + 5).toByte() }
+            assertEquals(15.toByte(), result)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Edge cases: primitives at boundaries
     // ═══════════════════════════════════════════════════════════════════════════
 

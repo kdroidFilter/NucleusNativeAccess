@@ -223,6 +223,12 @@ class Calculator(initial: Int = 0) {
         return lastOperation
     }
 
+    fun withLong(fn: (Long) -> Long): Long = fn(accumulator.toLong())
+    fun withDouble(fn: (Double) -> Double): Double = fn(accumulator.toDouble())
+    fun withFloat(fn: (Float) -> Float): Float = fn(accumulator.toFloat())
+    fun withShort(fn: (Short) -> Short): Short = fn(accumulator.toShort())
+    fun withByte(fn: (Byte) -> Byte): Byte = fn(accumulator.toByte())
+
     fun onPointComputed(callback: (Point) -> Unit) {
         callback(Point(accumulator, accumulator * 2))
     }
