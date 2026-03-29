@@ -533,28 +533,6 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/kotlinnativeexport/pl
 
 **Source analysis**: the plugin uses Kotlin PSI (`kotlin-compiler-embeddable`) for proper AST-based parsing, running in an isolated Gradle Worker classloader. This handles nested generics, function types, default parameters, multi-line constructors, and `suspend`/`Flow` detection natively &mdash; no regex.
 
-## Roadmap
-
-Design references: [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone) (SIR model, bridge generation) and [swift-java](https://github.com/swiftlang/swift-java) (FFM proxy generation, upcall handles).
-
-### Done
-
-- [x] **Automatic native lib bundling** &mdash; single-JAR deployment
-  - [x] Embed `.so`/`.dylib`/`.dll` in JAR under `kne/native/{os}-{arch}/`
-  - [x] `KneRuntime.loadLibrary()`: three-tier loading (library path, JAR extraction to `~/.cache/kne/`, loader lookup)
-  - [x] GraalVM native-image fallback via `SymbolLookup.loaderLookup()`
-
-- [x] **GraalVM reachability metadata generation**
-  - [x] `reflect-config.json` for all generated proxy classes
-  - [x] `resource-config.json` for bundled native library resources
-  - [x] `reachability-metadata.json` with FFM foreign downcall descriptors
-  - [x] Output to `META-INF/native-image/kne/{libName}/`
-
-### Next
-
-- [ ] **Multi-target fat JARs**
-  - [ ] Bundle per-platform native libs, detect OS/arch at startup
-
 ### Design philosophy
 
 This plugin binds **only what must cross the native boundary** &mdash; platform-specific APIs (cinterop, POSIX, C libraries), performance-critical native code, and types that cannot exist in common Kotlin.
