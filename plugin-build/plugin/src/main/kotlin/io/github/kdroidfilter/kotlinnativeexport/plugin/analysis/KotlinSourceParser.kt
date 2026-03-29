@@ -12,12 +12,12 @@ import io.github.kdroidfilter.kotlinnativeexport.plugin.ir.KneType
 import java.io.File
 
 /**
- * Parses Kotlin source files to extract public API declarations.
+ * Regex-based parser for Kotlin source files.
  *
- * Inspired by swift-export-standalone's module translation approach:
- * reads source declarations to build an intermediate representation.
+ * Extracts public API declarations using regex patterns and brace counting.
+ * This is the fallback parser — prefer PsiSourceParser for robust AST-based parsing.
  */
-class KotlinSourceParser {
+class RegexSourceParser : SourceParser {
 
     companion object {
         private val PACKAGE_RE = Regex("""^package\s+([\w.]+)""")
@@ -51,7 +51,7 @@ class KotlinSourceParser {
         private val SKIP_MODIFIERS = setOf("private", "internal", "protected")
     }
 
-    fun parse(files: Collection<File>, libName: String, commonFiles: Collection<File> = emptyList()): KneModule {
+    override fun parse(files: Collection<File>, libName: String, commonFiles: Collection<File>): KneModule {
         val ktFiles = files.filter { it.extension == "kt" }
         val commonKtFiles = commonFiles.filter { it.extension == "kt" }
 

@@ -1,6 +1,6 @@
 package io.github.kdroidfilter.kotlinnativeexport.plugin.tasks
 
-import io.github.kdroidfilter.kotlinnativeexport.plugin.analysis.KotlinSourceParser
+import io.github.kdroidfilter.kotlinnativeexport.plugin.analysis.RegexSourceParser
 import io.github.kdroidfilter.kotlinnativeexport.plugin.codegen.FfmProxyGenerator
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.ConfigurableFileCollection
@@ -52,7 +52,7 @@ abstract class GenerateJvmProxiesTask : DefaultTask() {
 
         val commonKtFiles = commonSources.asFileTree.filter { it.extension == "kt" }.files
         logger.lifecycle("kne: Parsing ${ktFiles.size} native + ${commonKtFiles.size} common source file(s) for JVM proxies...")
-        val module = KotlinSourceParser().parse(ktFiles, libName.get(), commonKtFiles)
+        val module = RegexSourceParser().parse(ktFiles, libName.get(), commonKtFiles)
 
         if (module.classes.isEmpty() && module.enums.isEmpty() && module.functions.isEmpty()) {
             logger.lifecycle("kne: No public API found, skipping.")
