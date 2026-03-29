@@ -10,6 +10,8 @@ data class TaggedPoint(val point: Point, val tag: Operation)
 
 data class Rect(val topLeft: Point, val bottomRight: Point)
 
+data class CalculatorSnapshot(val calc: Calculator, val label: String)
+
 // ── Enum ────────────────────────────────────────────────────────────────────
 
 enum class Operation {
@@ -169,6 +171,14 @@ class Calculator(initial: Int = 0) {
     }
 
     fun getRect(): Rect = Rect(Point(0, 0), Point(accumulator, accumulator))
+
+    fun snapshot(): CalculatorSnapshot = CalculatorSnapshot(this, label.ifEmpty { "snapshot" })
+
+    fun restoreFrom(snap: CalculatorSnapshot): Int {
+        accumulator = snap.calc.current
+        label = snap.label
+        return accumulator
+    }
 
     fun getPointOrNull(): Point? = if (accumulator != 0) Point(accumulator, accumulator * 2) else null
 

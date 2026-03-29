@@ -813,6 +813,57 @@ class CalculatorTest {
         }
     }
 
+    // ── data class with Object field ──────────────────────────────────────
+
+    @Test
+    fun `data class with Object field - snapshot return`() {
+        Calculator(42).use { calc ->
+            calc.label = "test"
+            val snap = calc.snapshot()
+            assertEquals(42, snap.calc.current)
+            assertEquals("test", snap.label)
+            snap.calc.close()
+        }
+    }
+
+    @Test
+    fun `data class with Object field - snapshot then modify original`() {
+        Calculator(10).use { calc ->
+            val snap = calc.snapshot()
+            calc.add(20)
+            // snapshot's calc is the SAME object (StableRef), so current reflects changes
+            assertEquals(30, snap.calc.current)
+            snap.calc.close()
+        }
+    }
+
+    @Test
+    fun `data class with Object field - restore from snapshot`() {
+        Calculator(100).use { calc ->
+            calc.label = "original"
+            Calculator(42).use { other ->
+                other.label = "other"
+                val snap = other.snapshot()
+                val result = calc.restoreFrom(snap)
+                assertEquals(42, result)
+                assertEquals("other", calc.label)
+                snap.calc.close()
+            }
+        }
+    }
+
+    @Test
+    fun `data class with Object field - param`() {
+        Calculator(0).use { calc ->
+            Calculator(77).use { source ->
+                source.label = "from-source"
+                val result = calc.restoreFrom(CalculatorSnapshot(source, "injected"))
+                assertEquals(77, result)
+                assertEquals("injected", calc.label)
+            }
+        }
+    }
+
     // ── data class with enum field — edge cases ────────────────────────────
 
     @Test

@@ -133,7 +133,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `enum class` | ✅ | ✅ | ✅ | ✅ param + return | ordinal mapping, auto-generates JVM enum |
 | Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
 | `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding (incl. `DataClass?`) |
-| `data class` | ✅ | ✅ | &mdash; | ✅ param + return | field decomposition (primitive, String, Enum, nested DC) |
+| `data class` | ✅ | ✅ | &mdash; | ✅ param + return | field decomposition (all types: primitive, String, Enum, Object, nested DC) |
 | `ByteArray` | ✅ | ✅ | &mdash; | ❌ | pointer + size pattern, raw byte transfer |
 | `(T) -> R` (lambda) | ✅ | &mdash; | &mdash; | &mdash; | FFM upcall stubs, persistent arena |
 
@@ -238,7 +238,7 @@ calc.add(5) // works normally after exception
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types |
 | Nested/inner classes | Parser limitation | Use top-level classes |
-| Data class fields: `Object` (class ref) | Not yet implemented | Use primitives, String, Enum, or nested data class |
+| Data class fields: nested collections | Not yet implemented | Use flat fields or `ByteArray` |
 | Object (class) in callbacks | Not yet implemented | Use data class or primitives |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
@@ -354,7 +354,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 187 tests
+./gradlew :examples:calculator:jvmTest    # 197 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
