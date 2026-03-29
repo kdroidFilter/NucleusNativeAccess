@@ -130,7 +130,7 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 | `Short` | ✅ | ✅ | ✅ | ✅ param + return | direct pass-through |
 | `String` | ✅ | ✅ | ✅ | ✅ param + return | output-buffer pattern for returns |
 | `Unit` | &mdash; | ✅ | &mdash; | ✅ return only | `FunctionDescriptor.ofVoid(...)` |
-| `enum class` | ✅ | ✅ | ✅ | ❌ | ordinal mapping, auto-generates JVM enum |
+| `enum class` | ✅ | ✅ | ✅ | ✅ param + return | ordinal mapping, auto-generates JVM enum |
 | Classes | ✅ | ✅ | &mdash; | ❌ | opaque handle via `StableRef` |
 | `T?` (nullable) | ✅ | ✅ | ✅ | ❌ | sentinel-based null encoding |
 | `data class` | ✅ | ✅ | &mdash; | ✅ param only | field decomposition (primitive + String fields) |
@@ -159,8 +159,8 @@ JVM lambdas cross the FFM boundary via upcall stubs. The plugin generates all th
 **Lifecycle**: each proxy object holds a persistent `Arena.ofShared()`. Upcall stubs live as long as the object &mdash; async callbacks (event handlers, listeners) work out of the box. The arena is freed on `close()` or GC.
 
 **Supported callback signatures**:
-- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `data class`
-- Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`
+- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `data class`
+- Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`
 - Multi-param: `(T, U) -> R` with any supported types
 - Data class params are decomposed into individual fields at C ABI level
 
@@ -240,7 +240,7 @@ calc.add(5) // works normally after exception
 | Data class fields: `Enum`, `Object`, other data classes | Not yet implemented | Use primitives + String fields |
 | Data class as callback return | Not yet implemented | Return individual fields or use out-param pattern |
 | Nullable data class (`DataClass?`) | Not yet implemented | Use non-null with sentinel values |
-| Enum/Object in callbacks | Not yet implemented | Use ordinal `Int` for enums |
+| Object (class) in callbacks | Not yet implemented | Use data class or primitives |
 | Lambda as return type | Callback param only, not return | Return a class with methods instead |
 | Suspend functions / coroutines | Different runtimes | Use callbacks for async patterns |
 | `ByteArray` / collections | Not yet implemented | Use individual elements or C buffers |
@@ -355,7 +355,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 163 tests
+./gradlew :examples:calculator:jvmTest    # 168 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
