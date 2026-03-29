@@ -354,7 +354,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 197 tests
+./gradlew :examples:calculator:jvmTest    # 210 tests
 ./gradlew :examples:systeminfo:jvmTest    # 7 tests
 ```
 
