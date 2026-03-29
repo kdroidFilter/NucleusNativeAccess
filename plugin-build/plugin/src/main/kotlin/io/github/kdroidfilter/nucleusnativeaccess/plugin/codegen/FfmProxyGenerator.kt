@@ -129,6 +129,51 @@ class FfmProxyGenerator {
         return descriptors
     }
 
+    /**
+     * Collect all unique FFM upcall descriptors required by the generated code.
+     * Returns a set of (parameterTypes, returnType) pairs in GraalVM reachability-metadata format.
+     * null returnType means void.
+     */
+    fun collectGraalVmUpcalls(module: KneModule): Set<Pair<List<String>, String?>> {
+        val descriptors = mutableSetOf<Pair<List<String>, String?>>()
+
+        fun reg(params: List<String>, ret: String?) {
+            descriptors.add(params.map { LAYOUT_TO_GRAAL[it] ?: it } to ret?.let { LAYOUT_TO_GRAAL[it] ?: it })
+        }
+
+        val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } || module.functions.any { it.isSuspend }
+        val hasFlow = module.classes.any { c -> c.methods.any { it.returnType is KneType.FLOW } } || module.functions.any { it.returnType is KneType.FLOW }
+
+        if (hasSuspend || hasFlow) {
+            // SUSPEND_CONT_DESC: (Int, Long) -> void
+            reg(listOf("JAVA_INT", "JAVA_LONG"), null)
+            // SUSPEND_EXC_DESC: (Long) -> void
+            reg(listOf("JAVA_LONG"), null)
+        }
+
+        if (hasFlow) {
+            // FLOW_COMPLETE_DESC: () -> void
+            reg(emptyList(), null)
+        }
+
+        // Lambda callback upcalls
+        for (sig in collectCallbackSignatures(module)) {
+            val flatLayouts = mutableListOf<String>()
+            sig.paramTypes.forEach { t ->
+                when (t) {
+                    is KneType.DATA_CLASS -> t.fields.forEach { f -> flatLayouts.add(upcallLayout(f.type)) }
+                    is KneType.LIST, is KneType.SET -> { flatLayouts.add("ADDRESS"); flatLayouts.add("JAVA_INT") }
+                    is KneType.MAP -> { flatLayouts.add("ADDRESS"); flatLayouts.add("ADDRESS"); flatLayouts.add("JAVA_INT") }
+                    else -> flatLayouts.add(upcallLayout(t))
+                }
+            }
+            val ret = if (sig.returnType == KneType.UNIT) null else upcallLayout(sig.returnType)
+            reg(flatLayouts, ret)
+        }
+
+        return descriptors
+    }
+
     private fun KneType.returnsViaBuffer(): Boolean =
         this == KneType.STRING || this == KneType.BYTE_ARRAY ||
         (this is KneType.NULLABLE && (inner == KneType.STRING || inner == KneType.BYTE_ARRAY))

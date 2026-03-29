@@ -57,7 +57,7 @@ abstract class PsiParseWorkAction : WorkAction<PsiParseWorkAction.Params> {
 
     /**
      * Generates GraalVM reachability metadata under META-INF/native-image/kne/.
-     * Includes reflection config, resource config, and FFM foreign downcall descriptors.
+     * Includes reflection config, resource config, and FFM foreign downcall/upcall descriptors.
      */
     private fun generateGraalVmMetadata(
         resourcesRoot: java.io.File,
@@ -103,15 +103,28 @@ abstract class PsiParseWorkAction : WorkAction<PsiParseWorkAction.Params> {
 }
 """)
 
-        // reachability-metadata.json — FFM foreign downcall descriptors
-        val downcallEntries = downcalls.joinToString(",\n") { (params, ret) ->
-            val paramStr = params.joinToString(", ") { "\"$it\"" }
-            if (ret != null) {
-                """      { "parameterTypes": [$paramStr], "returnType": "$ret" }"""
-            } else {
-                """      { "parameterTypes": [$paramStr], "returnType": "void" }"""
+        // reachability-metadata.json — FFM foreign downcall + upcall descriptors
+        fun formatEntries(descriptors: Set<Pair<List<String>, String?>>): String =
+            descriptors.joinToString(",\n") { (params, ret) ->
+                val paramStr = params.joinToString(", ") { "\"$it\"" }
+                val retStr = ret ?: "void"
+                """      { "parameterTypes": [$paramStr], "returnType": "$retStr" }"""
             }
+
+        val downcallEntries = formatEntries(downcalls)
+
+        // Collect FFM upcall descriptors (suspend/flow stubs + lambda callbacks)
+        val upcalls = generator.collectGraalVmUpcalls(module)
+        val upcallSection = if (upcalls.isNotEmpty()) {
+            val upcallEntries = formatEntries(upcalls)
+            """,
+    "upcalls": [
+$upcallEntries
+    ]"""
+        } else {
+            ""
         }
+
         metaDir.resolve("reachability-metadata.json").writeText("""{
   "reflection": [
 ${classNames.joinToString(",\n") { """    { "type": "$it", "allDeclaredConstructors": true, "allDeclaredMethods": true }""" }}
@@ -122,7 +135,7 @@ ${classNames.joinToString(",\n") { """    { "type": "$it", "allDeclaredConstruct
   "foreign": {
     "downcalls": [
 $downcallEntries
-    ]
+    ]$upcallSection
   }
 }
 """)

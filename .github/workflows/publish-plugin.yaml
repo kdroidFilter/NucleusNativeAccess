@@ -20,3 +20,8 @@ jobs:
       - name: Publish on Plugin Portal
         run: ./gradlew --project-dir plugin-build setupPluginUploadFromEnvironment publishPlugins
         if: success()
+      - name: Create GitHub Release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" --generate-notes --title "${{ github.ref_name }}"
