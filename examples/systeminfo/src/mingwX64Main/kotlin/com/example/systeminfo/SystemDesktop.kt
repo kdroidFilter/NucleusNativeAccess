@@ -130,7 +130,80 @@ actual class SystemDesktop {
         }
     }
 
-    actual suspend fun captureScreen(): ByteArray = ByteArray(0)
+    actual suspend fun captureScreen(): ByteArray = memScoped {
+        val hScreen = GetDC(null) ?: return ByteArray(0)
+        val hDC = CreateCompatibleDC(hScreen) ?: return ByteArray(0).also { ReleaseDC(null, hScreen) }
+
+        val width = GetSystemMetrics(SM_CXSCREEN)
+        val height = GetSystemMetrics(SM_CYSCREEN)
+
+        val hBitmap = CreateCompatibleBitmap(hScreen, width, height) ?: run {
+            DeleteDC(hDC)
+            ReleaseDC(null, hScreen)
+            return ByteArray(0)
+        }
+
+        val oldObj = SelectObject(hDC, hBitmap)
+        BitBlt(hDC, 0, 0, width, height, hScreen, 0, 0, SRCCOPY)
+        SelectObject(hDC, oldObj)
+
+        val bmi = alloc<BITMAPINFO>()
+        bmi.bmiHeader.apply {
+            biSize = sizeOf<BITMAPINFOHEADER>().toUInt()
+            biWidth = width
+            biHeight = -height // Top-down
+            biPlanes = 1u
+            biBitCount = 24u
+            biCompression = BI_RGB.toUInt()
+        }
+
+        val rowSize = ((width * 24 + 31) / 32) * 4
+        val dataSize = rowSize * height
+        val pixels = nativeHeap.allocArray<ByteVar>(dataSize)
+
+        try {
+            if (GetDIBits(hDC, hBitmap, 0u, height.toUInt(), pixels, bmi.ptr, DIB_RGB_COLORS.toUInt()) == 0) {
+                return ByteArray(0)
+            }
+
+            val fileHeaderSize = 14
+            val infoHeaderSize = 40
+            val fileSize = fileHeaderSize + infoHeaderSize + dataSize
+            val result = ByteArray(fileSize)
+
+            // Bitmap File Header
+            result[0] = 'B'.code.toByte()
+            result[1] = 'M'.code.toByte()
+            writeInt(result, 2, fileSize)
+            writeInt(result, 10, fileHeaderSize + infoHeaderSize)
+
+            // Bitmap Info Header
+            writeInt(result, 14, infoHeaderSize)
+            writeInt(result, 18, width)
+            writeInt(result, 22, height)
+            result[26] = 1
+            result[28] = 24
+            writeInt(result, 34, dataSize)
+
+            // Pixels
+            val pixelArray = pixels.readBytes(dataSize)
+            pixelArray.copyInto(result, fileHeaderSize + infoHeaderSize)
+
+            return result
+        } finally {
+            nativeHeap.free(pixels)
+            DeleteObject(hBitmap)
+            DeleteDC(hDC)
+            ReleaseDC(null, hScreen)
+        }
+    }
+
+    private fun writeInt(array: ByteArray, offset: Int, value: Int) {
+        array[offset] = (value and 0xFF).toByte()
+        array[offset + 1] = ((value shr 8) and 0xFF).toByte()
+        array[offset + 2] = ((value shr 16) and 0xFF).toByte()
+        array[offset + 3] = ((value shr 24) and 0xFF).toByte()
+    }
 
     private fun formatUptime(seconds: Double): String {
         if (seconds < 0) return "N/A"
