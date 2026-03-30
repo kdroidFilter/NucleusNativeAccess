@@ -14,6 +14,7 @@ import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.SkipWhenEmpty
 import org.gradle.api.tasks.TaskAction
 import org.gradle.work.DisableCachingByDefault
+import org.gradle.api.model.ObjectFactory
 import org.gradle.workers.WorkerExecutor
 import javax.inject.Inject
 
@@ -21,6 +22,7 @@ import javax.inject.Inject
 abstract class GenerateNativeBridgesTask : DefaultTask() {
 
     @get:Inject abstract val workerExecutor: WorkerExecutor
+    @get:Inject abstract val objectFactory: ObjectFactory
 
     @get:InputFiles @get:SkipWhenEmpty @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val nativeSources: ConfigurableFileCollection
@@ -47,7 +49,9 @@ abstract class GenerateNativeBridgesTask : DefaultTask() {
         logger.lifecycle("kne: Parsing ${ktFiles.size} native + ${commonKtFiles.size} common source file(s) [PSI]...")
 
         val pluginJarUrl = PsiParseWorkAction::class.java.protectionDomain?.codeSource?.location
-        val pluginJar = pluginJarUrl?.let { project.files(java.io.File(it.toURI())) } ?: project.files()
+        val pluginJar = objectFactory.fileCollection().apply {
+            pluginJarUrl?.let { from(java.io.File(it.toURI())) }
+        }
 
         val workQueue = workerExecutor.classLoaderIsolation { spec ->
             spec.classpath.from(psiClasspath)
