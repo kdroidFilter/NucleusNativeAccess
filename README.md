@@ -491,28 +491,68 @@ For GraalVM native-image builds, the native `.so`/`.dylib` must be placed next t
 
 ### Using with Compose Desktop / Nucleus
 
+The Compose compiler plugin and Nucleus Native Access both add Kotlin/Native targets, but Compose doesn't support arbitrary native compilations (e.g. `linuxX64`, `mingwX64` for FFM bridges). **The recommended approach is to put your native code in a separate Gradle module** without the Compose compiler plugin:
+
+```
+my-app/
+├── native/              ← Kotlin/Native + nucleusnativeaccess (no Compose)
+│   └── build.gradle.kts
+├── app/                 ← Compose Desktop + depends on :native
+│   └── build.gradle.kts
+└── settings.gradle.kts
+```
+
+**`:native/build.gradle.kts`** — native bridge module:
+
+```kotlin
+plugins {
+    kotlin("multiplatform") version "2.3.20"
+    id("io.github.kdroidfilter.nucleusnativeaccess")
+}
+
+kotlin {
+    jvmToolchain(25)
+    linuxX64()  // or macosArm64(), mingwX64()
+    jvm()
+}
+
+kotlinNativeExport {
+    nativeLibName = "mylib"
+    nativePackage = "com.example.mylib"
+}
+```
+
+**`:app/build.gradle.kts`** — Compose Desktop module:
+
 ```kotlin
 plugins {
     kotlin("multiplatform") version "2.3.20"
     id("org.jetbrains.compose") version "1.10.2"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
     id("io.github.kdroidfilter.nucleus") version "1.7.2"
-    id("io.github.kdroidfilter.nucleusnativeaccess")
 }
 
-// Compose compiler only targets JVM (native sources have no @Composable)
-composeCompiler {
-    targetKotlinPlatforms.set(
-        setOf(org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType.jvm)
-    )
+kotlin {
+    jvmToolchain(25)
+    jvm()
+
+    sourceSets {
+        val jvmMain by getting {
+            dependencies {
+                implementation(compose.desktop.currentOs)
+                implementation(project(":native"))
+            }
+        }
+    }
 }
 
-// No java.library.path needed — native lib is auto-extracted from JAR
 nucleus.application {
     mainClass = "com.example.MainKt"
     jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 }
 ```
+
+This avoids any conflict between the Compose compiler and Kotlin/Native targets used for FFM bridges.
 
 ### Using with C interop (e.g. libnotify)
 
