@@ -43,6 +43,10 @@ kotlin {
             val systray by creating {
                 defFile(project.file("src/nativeInterop/cinterop/systray.def"))
             }
+            val gio by creating {
+                defFile(project.file("src/nativeInterop/cinterop/gio.def"))
+            }
+
         }
     }
 

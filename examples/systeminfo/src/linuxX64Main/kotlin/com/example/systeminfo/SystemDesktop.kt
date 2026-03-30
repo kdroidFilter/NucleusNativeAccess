@@ -2,7 +2,9 @@
 
 package com.example.systeminfo
 
+import gio.*
 import kotlinx.cinterop.*
+import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -115,7 +117,24 @@ actual class SystemDesktop {
         }
     }
 
-    actual suspend fun captureScreen(): ByteArray = ByteArray(0)
+    actual suspend fun captureScreen(): ByteArray = withContext(Dispatchers.Default) {
+        val pathPtr = capture_screenshot_portal() ?: return@withContext byteArrayOf()
+        val path = pathPtr.toKString()
+        free(pathPtr)
+
+        val file = fopen(path, "rb") ?: return@withContext byteArrayOf()
+        fseek(file, 0, SEEK_END)
+        val size = ftell(file)
+        fseek(file, 0, SEEK_SET)
+
+        val buffer = ByteArray(size.toInt())
+        buffer.usePinned { pinned ->
+            fread(pinned.addressOf(0), 1u, size.toULong(), file)
+        }
+        fclose(file)
+        remove(path)
+        buffer
+    }
 
     private fun formatUptime(seconds: Double): String {
         if (seconds < 0) return "N/A"

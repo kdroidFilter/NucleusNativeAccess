@@ -40,7 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev
+          sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
 
       - name: Plugin tests
         run: ./gradlew --project-dir plugin-build :nucleusnativeaccess:check

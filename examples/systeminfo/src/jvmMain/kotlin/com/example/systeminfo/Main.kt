@@ -209,7 +209,7 @@ fun SystemInfoScreen() {
 
         Text("Screen Capture", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Text(
-            "Screenshot via native CGWindowListCreateImage (macOS only).",
+            "Screenshot via native API (macOS: CoreGraphics, Linux: XDG ScreenCast + PipeWire).",
             fontSize = 12.sp, color = Color.Gray,
         )
 
