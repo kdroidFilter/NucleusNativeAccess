@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +36,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.jetbrains.skia.Image as SkiaImage
 
 fun main() {
     io.github.kdroidfilter.nucleus.graalvm.GraalVmInitializer.initialize()
@@ -42,7 +52,7 @@ fun main() {
         Window(
             onCloseRequest = ::exitApplication,
             title = "Native System Info (via FFM)",
-            state = rememberWindowState(width = 500.dp, height = 620.dp),
+            state = rememberWindowState(width = 500.dp, height = 800.dp),
         ) {
             MaterialTheme(colors = darkColors()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -191,6 +201,59 @@ fun SystemInfoScreen() {
             modifier = Modifier.fillMaxWidth().height(48.dp),
         ) {
             Text("Refresh", color = Color.White)
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Divider(color = Color.DarkGray)
+        Spacer(Modifier.height(8.dp))
+
+        Text("Screen Capture", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text(
+            "Screenshot via native API (macOS: CoreGraphics, Linux: XDG ScreenCast + PipeWire).",
+            fontSize = 12.sp, color = Color.Gray,
+        )
+
+        var screenshotBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+        var screenshotError by remember { mutableStateOf<String?>(null) }
+        var capturing by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+
+        Button(
+            onClick = {
+                if (!capturing) {
+                    capturing = true
+                    scope.launch {
+                        val bytes = desktop.captureScreen()
+                        if (bytes.isEmpty()) {
+                            screenshotError = "Not supported on this platform or permission not granted"
+                            screenshotBitmap = null
+                        } else {
+                            screenshotError = null
+                            screenshotBitmap = SkiaImage.makeFromEncoded(bytes).toComposeImageBitmap()
+                        }
+                        capturing = false
+                    }
+                }
+            },
+            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF6A1B9A)),
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            enabled = !capturing,
+        ) {
+            Text(if (capturing) "Capturing..." else "Capture screen", color = Color.White)
+        }
+
+        if (screenshotError != null) {
+            Text(screenshotError!!, color = Color(0xFFEF5350), fontSize = 12.sp)
+        }
+
+        if (screenshotBitmap != null) {
+            Image(
+                bitmap = screenshotBitmap!!,
+                contentDescription = "Screenshot",
+                contentScale = ContentScale.FillWidth,
+                modifier = Modifier.fillMaxWidth()
+                    .border(1.dp, Color.DarkGray, MaterialTheme.shapes.small),
+            )
         }
     }
 }

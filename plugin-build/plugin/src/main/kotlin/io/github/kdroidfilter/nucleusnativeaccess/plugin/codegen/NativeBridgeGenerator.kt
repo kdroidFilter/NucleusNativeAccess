@@ -1357,6 +1357,16 @@ class NativeBridgeGenerator {
         appendLine("    return bytes.size")
         appendLine("}")
         appendLine()
+
+        // Read a ByteArray from a StableRef handle
+        appendLine("@CName(\"${prefix}_kne_readByteArrayRef\")")
+        appendLine("fun `${prefix}_kne_readByteArrayRef`(handle: Long, outBuf: CPointer<ByteVar>?, outLen: Int): Int {")
+        appendLine("    val bytes = handle.toCPointer<COpaque>()!!.asStableRef<ByteArray>().get()")
+        appendLine("    val writeLen = minOf(bytes.size, outLen)")
+        appendLine("    bytes.forEachIndexed { i, b -> if (i < writeLen) outBuf?.set(i, b) }")
+        appendLine("    return bytes.size")
+        appendLine("}")
+        appendLine()
     }
 
     /** Generate a suspend function bridge (instance method). */
@@ -1419,6 +1429,10 @@ class NativeBridgeGenerator {
             KneType.DOUBLE -> appendLine("            _contFn.invoke(1, $resultExpr.toRawBits())")
             KneType.BOOLEAN -> appendLine("            _contFn.invoke(1, if ($resultExpr) 1L else 0L)")
             KneType.STRING -> {
+                appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            KneType.BYTE_ARRAY -> {
                 appendLine("            val _ref = StableRef.create($resultExpr)")
                 appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
             }

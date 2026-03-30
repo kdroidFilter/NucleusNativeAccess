@@ -472,6 +472,70 @@ class SuspendFunctionTest {
         calcs.forEach { it.close() }
     }
 
+    // ── Suspend ByteArray ────────────────────────────────────────────────────
+
+    @Test fun `suspend - delayedByteArray basic`() = runBlocking {
+        Calculator(42).use { calc ->
+            val result = calc.delayedByteArray()
+            assertEquals("acc=42", result.decodeToString())
+        }
+    }
+
+    @Test fun `suspend - delayedByteArray after mutation`() = runBlocking {
+        Calculator(0).use { calc ->
+            calc.delayedAdd(10, 20)
+            val result = calc.delayedByteArray()
+            assertEquals("acc=30", result.decodeToString())
+        }
+    }
+
+    @Test fun `suspend - delayedByteArrayNullable non-null`() = runBlocking {
+        Calculator(5).use { calc ->
+            val result = calc.delayedByteArrayNullable()
+            assertEquals("pos=5", result?.decodeToString())
+        }
+    }
+
+    @Test fun `suspend - delayedByteArrayNullable null`() = runBlocking {
+        Calculator(0).use { calc ->
+            assertNull(calc.delayedByteArrayNullable())
+        }
+    }
+
+    @Test fun `suspend - delayedLargeByteArray small`() = runBlocking {
+        Calculator(0).use { calc ->
+            val result = calc.delayedLargeByteArray(100)
+            assertEquals(100, result.size)
+            assertEquals(0.toByte(), result[0])
+            assertEquals(99.toByte(), result[99])
+        }
+    }
+
+    @Test fun `suspend - delayedLargeByteArray exceeds initial buffer`() = runBlocking {
+        Calculator(0).use { calc ->
+            val size = 16_000 // exceeds 8192 STRING_BUF_SIZE
+            val result = calc.delayedLargeByteArray(size)
+            assertEquals(size, result.size)
+            // Verify contents are correct across the whole array
+            for (i in result.indices) {
+                assertEquals((i % 256).toByte(), result[i], "Mismatch at index $i")
+            }
+        }
+    }
+
+    @Test fun `suspend - concurrent ByteArray calls`() = runBlocking {
+        Calculator(1).use { calc ->
+            val results = (1..20).map { i ->
+                async(Dispatchers.Default) {
+                    calc.delayedLargeByteArray(i * 100)
+                }
+            }.awaitAll()
+            results.forEachIndexed { idx, bytes ->
+                assertEquals((idx + 1) * 100, bytes.size)
+            }
+        }
+    }
+
     @Test fun `suspend cross - suspend with collections`() = runBlocking {
         Calculator(5).use { calc ->
             calc.delayedAdd(0, 5)

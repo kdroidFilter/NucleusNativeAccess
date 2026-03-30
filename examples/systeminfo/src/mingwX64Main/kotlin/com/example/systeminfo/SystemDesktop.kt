@@ -1,4 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)
+// WinRT and COM definitions moved to ToastProvider.kt
+
+@file:OptIn(
+    kotlinx.cinterop.ExperimentalForeignApi::class,
+    kotlin.experimental.ExperimentalNativeApi::class
+)
 
 package com.example.systeminfo
 
@@ -9,15 +14,24 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import platform.windows.*
-import wintray.*
+import platform.posix.*
 
-// Global required because staticCFunction cannot capture variables (Kotlin/Native limitation)
-private var trayClickEmitter: ((Int) -> Unit)? = null
+// --- Tray and UI Constants ---
+private const val WM_TRAY_CB = 1049u
+private const val WC_TRAY = "KNETrayWnd"
+private const val ID_TRAY = 1u
+private const val ID_MENU_BASE = 1000u
+private const val MAX_ITEMS = 32
+
+// --- Globals ---
+private var trayManager: TrayManager? = null
+
+// --- Implementation of actual class ---
 
 actual class SystemDesktop {
 
     actual fun sendNotification(title: String, body: String, icon: String): Boolean {
-        return wintray_notify(title, body) != 0
+        return toastShow(title, body)
     }
 
     actual fun getHostname(): String = memScoped {
@@ -90,7 +104,9 @@ actual class SystemDesktop {
         }
     }
 
-    actual fun showSystemTray(): Boolean = memScoped {
+    actual fun showSystemTray(): Boolean {
+        if (trayManager != null) return false
+        val manager = TrayManager()
         val labels = listOf(
             "Hostname: ${getHostname()}",
             "CPU: ${getCpuModel()}",
@@ -99,26 +115,29 @@ actual class SystemDesktop {
             "Uptime: ${formatUptime(getUptime())}",
             "Kernel: ${getKernelVersion()}"
         )
-        val cLabels = allocArray<CPointerVar<ByteVar>>(labels.size)
-        labels.forEachIndexed { i, label -> cLabels[i] = label.cstr.ptr }
-        wintray_show(cLabels, labels.size) != 0
+        if (manager.start(labels)) {
+            trayManager = manager
+            return true
+        }
+        return false
     }
 
     actual fun hideSystemTray(): Boolean {
-        return wintray_hide() != 0
+        val manager = trayManager ?: return false
+        if (manager.stop()) {
+            trayManager = null
+            return true
+        }
+        return false
     }
 
     actual fun updateTrayLabel(index: Int, label: String): Boolean {
-        return wintray_update_label(index, label) != 0
+        return trayManager?.updateLabel(index, label) ?: false
     }
 
     actual fun trayClicks(): Flow<Int> = callbackFlow {
         trayClickEmitter = { index -> trySend(index) }
-        wintray_set_click_callback(staticCFunction { index ->
-            trayClickEmitter?.invoke(index)
-        })
         awaitClose {
-            wintray_set_click_callback(null)
             trayClickEmitter = null
         }
     }
@@ -128,6 +147,81 @@ actual class SystemDesktop {
             emit(MemoryInfo(getTotalMemoryMB(), getAvailableMemoryMB()))
             delay(intervalMs)
         }
+    }
+
+    actual suspend fun captureScreen(): ByteArray = memScoped {
+        val hScreen = GetDC(null) ?: return ByteArray(0)
+        val hDC = CreateCompatibleDC(hScreen) ?: return ByteArray(0).also { ReleaseDC(null, hScreen) }
+
+        val width = GetSystemMetrics(SM_CXSCREEN)
+        val height = GetSystemMetrics(SM_CYSCREEN)
+
+        val hBitmap = CreateCompatibleBitmap(hScreen, width, height) ?: run {
+            DeleteDC(hDC)
+            ReleaseDC(null, hScreen)
+            return ByteArray(0)
+        }
+
+        val oldObj = SelectObject(hDC, hBitmap)
+        BitBlt(hDC, 0, 0, width, height, hScreen, 0, 0, SRCCOPY)
+        SelectObject(hDC, oldObj)
+
+        val bmi = alloc<BITMAPINFO>()
+        bmi.bmiHeader.apply {
+            biSize = sizeOf<BITMAPINFOHEADER>().toUInt()
+            biWidth = width
+            biHeight = -height // Top-down
+            biPlanes = 1u
+            biBitCount = 24u
+            biCompression = BI_RGB.toUInt()
+        }
+
+        val rowSize = ((width * 24 + 31) / 32) * 4
+        val dataSize = rowSize * height
+        val pixels = nativeHeap.allocArray<ByteVar>(dataSize)
+
+        try {
+            if (GetDIBits(hDC, hBitmap, 0u, height.toUInt(), pixels, bmi.ptr, DIB_RGB_COLORS.toUInt()) == 0) {
+                return ByteArray(0)
+            }
+
+            val fileHeaderSize = 14
+            val infoHeaderSize = 40
+            val fileSize = fileHeaderSize + infoHeaderSize + dataSize
+            val result = ByteArray(fileSize)
+
+            // Bitmap File Header
+            result[0] = 'B'.code.toByte()
+            result[1] = 'M'.code.toByte()
+            writeInt(result, 2, fileSize)
+            writeInt(result, 10, fileHeaderSize + infoHeaderSize)
+
+            // Bitmap Info Header
+            writeInt(result, 14, infoHeaderSize)
+            writeInt(result, 18, width)
+            writeInt(result, 22, height)
+            result[26] = 1
+            result[28] = 24
+            writeInt(result, 34, dataSize)
+
+            // Pixels
+            val pixelArray = pixels.readBytes(dataSize)
+            pixelArray.copyInto(result, fileHeaderSize + infoHeaderSize)
+
+            return result
+        } finally {
+            nativeHeap.free(pixels)
+            DeleteObject(hBitmap)
+            DeleteDC(hDC)
+            ReleaseDC(null, hScreen)
+        }
+    }
+
+    private fun writeInt(array: ByteArray, offset: Int, value: Int) {
+        array[offset] = (value and 0xFF).toByte()
+        array[offset + 1] = ((value shr 8) and 0xFF).toByte()
+        array[offset + 2] = ((value shr 16) and 0xFF).toByte()
+        array[offset + 3] = ((value shr 24) and 0xFF).toByte()
     }
 
     private fun formatUptime(seconds: Double): String {

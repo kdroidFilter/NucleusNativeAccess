@@ -31,7 +31,11 @@ kotlin {
     val nativeTarget = when (hostTarget) {
         "linuxX64" -> linuxX64()
         "macosArm64" -> macosArm64()
-        else -> mingwX64()
+        else -> mingwX64 {
+            binaries.all {
+                linkerOpts("-lole32", "-lshell32", "-luser32", "-lgdi32", "-ladvapi32", "-luxtheme")
+            }
+        }
     }
 
     // cinterop with libnotify (real Linux native notifications via D-Bus)
@@ -43,6 +47,10 @@ kotlin {
             val systray by creating {
                 defFile(project.file("src/nativeInterop/cinterop/systray.def"))
             }
+            val gio by creating {
+                defFile(project.file("src/nativeInterop/cinterop/gio.def"))
+            }
+
         }
     }
 
@@ -62,6 +70,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.runtime)
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
                 implementation("io.github.kdroidfilter:nucleus.graalvm-runtime:1.7.2")
             }
         }

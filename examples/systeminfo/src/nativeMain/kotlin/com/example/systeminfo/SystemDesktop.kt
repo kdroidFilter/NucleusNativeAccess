@@ -21,4 +21,5 @@ expect class SystemDesktop() {
     fun updateTrayLabel(index: Int, label: String): Boolean
     fun trayClicks(): kotlinx.coroutines.flow.Flow<Int>
     fun memoryFlow(intervalMs: Long = 1000L): kotlinx.coroutines.flow.Flow<MemoryInfo>
+    suspend fun captureScreen(): ByteArray
 }

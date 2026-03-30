@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (770+ end-to-end FFM tests)
+### Types — test coverage (780+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 770+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 53 suspend function tests with cancellation, and 50+ Flow tests (including `Flow<DataClass>`).
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 780+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 60 suspend function tests with cancellation (incl. ByteArray), and 50+ Flow tests (including `Flow<DataClass>`).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -141,7 +141,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Nested classes | ✅ | ✅ | ✅ | &mdash; | &mdash; | exported as `Outer_Inner`, supports 3+ nesting levels |
 | `T?` (nullable) | ✅ 3t | ✅ 8t | ✅ 3t | ❌ | &mdash; | sentinel-based null encoding (incl. `DataClass?`) |
 | `data class` | ✅ 4t | ✅ 6t | &mdash; | ✅ 5t | ✅ 3t | all field types: primitive, String, Enum, Object, nested DC |
-| `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern |
+| `ByteArray` | ✅ 2t | ✅ 2t | &mdash; | ❌ | &mdash; | pointer + size pattern, suspend ✅ |
 | `List<T>` | ✅ 26t | ✅ 17t | &mdash; | ✅ 12t | ✅ 5t | Int, Long, Double, Float, Short, Byte, Boolean, String, Enum, Object |
 | `List<DC>` | &mdash; | ✅ 15t | &mdash; | &mdash; | &mdash; | opaque handle + size/get/dispose bridges (Point, NamedValue, TaggedPoint) |
 | `List<T>?` | ✅ 7t | ✅ 8t | &mdash; | &mdash; | &mdash; | -1 count = null sentinel |
@@ -167,7 +167,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
-| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (53 tests) |
+| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (60 tests, incl. ByteArray) |
 | Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (50+ tests, incl. DataClass) |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
@@ -191,7 +191,7 @@ val result = calc.fetchData("test")  // suspends the coroutine
 
 **Cancellation**: JVM coroutine cancel → `Job.cancel()` on native side. Native `CancellationException` → JVM `CancellationException`. Bidirectional, automatic.
 
-**Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`, `Object`, nullable variants.
+**Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `ByteArray`, `Unit`, `enum class`, `Object`, nullable variants.
 
 ### Flow&lt;T&gt;
 
@@ -385,17 +385,59 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 
 ## What's NOT supported
 
+### Language features
+
 | Feature | Reason | Alternative |
 |---------|--------|-------------|
 | Interfaces | Can live in `commonMain` | Define in shared KMP code |
 | Inheritance / open classes | Can live in `commonMain` | Define in shared KMP code |
 | Sealed classes | Can live in `commonMain` | Define in shared KMP code |
 | Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
-| Lambda as return type | Callback param only, not return | Return a class with methods instead |
-| `suspend` with DataClass return | DC field extraction from StableRef | Use primitive/String/Enum/Object returns |
-| `List<DataClass>` as param | Requires native list creation bridge | Use `List<DC>` as return only |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
+
+### Suspend function limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| `suspend fun(): DataClass` | DC field extraction from StableRef not yet implemented | Return individual fields or use non-suspend |
+| `suspend fun(): List<T>` / `Set<T>` / `Map<K,V>` | Collection serialization via continuation callback | Return collections from non-suspend functions |
+
+### Flow element limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| `Flow<ByteArray>` | ByteArray encoding via onNext callback | Use `Flow<String>` with Base64, or non-Flow return |
+| `Flow<List<T>>` / `Flow<Set<T>>` / `Flow<Map<K,V>>` | Nested collection serialization | Flatten into individual elements |
+
+### Callback limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| Lambda as return type | Callback supported as param only | Return a class with methods instead |
+| Nullable callback params | Sentinel encoding not supported for CB params | Use non-null wrapper or default value |
+| `ByteArray` as callback param | Buffer lifecycle across callback boundary | Pass as `String` (Base64) or use non-callback API |
+
+### Collection limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| `List<DataClass>` as param | Requires native list creation bridge | Use `List<DC>` as return only |
+| `ByteArray` in `List` / `Set` / `Map` | Nested buffer management | Use `List<String>` with encoding |
+| Nested collections (`List<List<T>>`) | Multi-level pointer management | Flatten into single collection |
+
+### Property limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| `List<T>` / `Set<T>` / `Map<K,V>` as property | Collection properties not yet wired | Use getter methods instead |
+
+### Data class field limitations
+
+| Unsupported | Reason | Alternative |
+|-------------|--------|-------------|
+| `ByteArray` field | Buffer out-param not wired for DC fields | Use `String` (Base64) or separate method |
+| `List<T>` / `Set<T>` / `Map<K,V>` field | Collection out-param not wired for DC fields | Use separate getter methods |
 
 ## Configuration reference
 
@@ -519,7 +561,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 770+ end-to-end tests: all types, callbacks, collections, suspend, Flow (incl. DataClass), nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 780+ end-to-end tests: all types, callbacks, collections, suspend, Flow (incl. DataClass), nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -528,7 +570,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 770+ end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 780+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 

@@ -53,4 +53,16 @@ class SystemDesktopTest {
             assertTrue(desktop.getKernelVersion().isNotBlank())
         }
     }
+
+    @Test
+    fun `capture screen is not empty and starts with BM`() {
+        SystemDesktop().use { desktop ->
+            kotlinx.coroutines.runBlocking {
+                val screen = desktop.captureScreen()
+                assertTrue(screen.isNotEmpty())
+                assertTrue(screen[0] == 'B'.toByte())
+                assertTrue(screen[1] == 'M'.toByte())
+            }
+        }
+    }
 }

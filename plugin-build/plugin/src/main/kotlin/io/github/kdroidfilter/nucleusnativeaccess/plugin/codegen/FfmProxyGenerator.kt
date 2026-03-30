@@ -456,10 +456,33 @@ class FfmProxyGenerator {
             appendLine("    }")
             appendLine("    fun readStringFromRef(handle: Long): String {")
             appendLine("        Arena.ofConfined().use { arena ->")
-            appendLine("            val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-            appendLine("            READ_STRING_REF_HANDLE.invoke(handle, buf, $STRING_BUF_SIZE)")
+            appendLine("            var _bufSize = $STRING_BUF_SIZE")
+            appendLine("            var _buf = arena.allocate(_bufSize.toLong())")
+            appendLine("            val _len = READ_STRING_REF_HANDLE.invoke(handle, _buf, _bufSize) as Int")
+            appendLine("            if (_len >= _bufSize) {")
+            appendLine("                _bufSize = _len + 1")
+            appendLine("                _buf = arena.allocate(_bufSize.toLong())")
+            appendLine("                READ_STRING_REF_HANDLE.invoke(handle, _buf, _bufSize)")
+            appendLine("            }")
             appendLine("            DISPOSE_REF_HANDLE.invoke(handle)")
-            appendLine("            return buf.getString(0)")
+            appendLine("            return _buf.getString(0)")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    val READ_BYTEARRAY_REF_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_readByteArrayRef\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    fun readByteArrayFromRef(handle: Long): ByteArray {")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            var _bufSize = $STRING_BUF_SIZE")
+            appendLine("            var _buf = arena.allocate(_bufSize.toLong())")
+            appendLine("            val _len = READ_BYTEARRAY_REF_HANDLE.invoke(handle, _buf, _bufSize) as Int")
+            appendLine("            if (_len > _bufSize) {")
+            appendLine("                _bufSize = _len")
+            appendLine("                _buf = arena.allocate(_bufSize.toLong())")
+            appendLine("                READ_BYTEARRAY_REF_HANDLE.invoke(handle, _buf, _bufSize)")
+            appendLine("            }")
+            appendLine("            DISPOSE_REF_HANDLE.invoke(handle)")
+            appendLine("            return _buf.asSlice(0, _len.toLong()).toArray(JAVA_BYTE)")
             appendLine("        }")
             appendLine("    }")
         }
@@ -568,7 +591,7 @@ class FfmProxyGenerator {
                     KneType.STRING -> {
                         appendLine("        val _list$i = mutableListOf<String>()")
                         appendLine("        var _off$i = 0L")
-                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                        appendLine("        val _seg$i = p${i}_ptr.reinterpret(Long.MAX_VALUE)")
                         appendLine("        repeat(p${i}_size) { _list${i}.add(_seg${i}.getString(_off${i})); _off$i += _list${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
                     }
                     KneType.BOOLEAN -> {
@@ -594,7 +617,7 @@ class FfmProxyGenerator {
         val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
-                KneType.STRING -> "p$i.reinterpret(8192).getString(0)"
+                KneType.STRING -> "p$i.reinterpret(Long.MAX_VALUE).getString(0)"
                 is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
                 is KneType.OBJECT -> "${t.simpleName}.fromNativeHandle(p$i)"
                 is KneType.DATA_CLASS -> {
@@ -602,7 +625,7 @@ class FfmProxyGenerator {
                         val pName = "p${i}_${f.name}"
                         when (f.type) {
                             KneType.BOOLEAN -> "${f.name} = $pName != 0"
-                            KneType.STRING -> "${f.name} = $pName.reinterpret(8192).getString(0)"
+                            KneType.STRING -> "${f.name} = $pName.reinterpret(Long.MAX_VALUE).getString(0)"
                             else -> "${f.name} = $pName"
                         }
                     }
@@ -785,7 +808,7 @@ class FfmProxyGenerator {
             KneType.STRING -> {
                 appendLine("        val _${role}${i} = mutableListOf<String>()")
                 appendLine("        var _${role}Off${i} = 0L")
-                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(${STRING_BUF_SIZE}.toLong())")
+                appendLine("        val _${role}Seg${i} = $ptrName.reinterpret(Long.MAX_VALUE)")
                 appendLine("        repeat(p${i}_size) { _${role}${i}.add(_${role}Seg${i}.getString(_${role}Off${i})); _${role}Off$i += _${role}${i}.last().toByteArray(Charsets.UTF_8).size + 1 }")
             }
             KneType.BOOLEAN -> {
@@ -1268,6 +1291,7 @@ class FfmProxyGenerator {
             KneType.DOUBLE -> appendLine("${indent}_cont.resume(Double.fromBits(_value))")
             KneType.BOOLEAN -> appendLine("${indent}_cont.resume(_value != 0L)")
             KneType.STRING -> appendLine("${indent}_cont.resume(KneRuntime.readStringFromRef(_value))")
+            KneType.BYTE_ARRAY -> appendLine("${indent}_cont.resume(KneRuntime.readByteArrayFromRef(_value))")
             is KneType.OBJECT -> appendLine("${indent}_cont.resume(${type.simpleName}.fromNativeHandle(_value))")
             is KneType.ENUM -> appendLine("${indent}_cont.resume(${type.simpleName}.entries[_value.toInt()])")
             is KneType.DATA_CLASS -> {
@@ -1384,12 +1408,11 @@ class FfmProxyGenerator {
         return "${dc.simpleName}($args)"
     }
 
-    /** Build invoke args with DATA_CLASS params expanded into individual fields. */
+    /** Build invoke args with DATA_CLASS params expanded into individual fields (without output buffer args). */
     private fun buildClassInvokeArgsExpanded(fn: KneFunction): String {
         val args = buildList {
             add("handle")
             fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
-            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
         }
         return args.joinToString(", ")
     }
@@ -1452,15 +1475,11 @@ class FfmProxyGenerator {
         val needsArena = prop.type.returnsViaBuffer()
         if (needsArena) {
             appendLine("            Arena.ofConfined().use { arena ->")
-            appendLine("                val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+            appendStringReadWithRetry("                ", getHandleName, "handle")
             if (prop.type is KneType.NULLABLE) {
-                appendLine("                val len = $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE) as Int")
-                appendLine("                KneRuntime.checkError()")
-                appendLine("                return if (len < 0) null else buf.getString(0)")
+                appendLine("                return if (_len < 0) null else _buf.getString(0)")
             } else {
-                appendLine("                $getHandleName.invoke(handle, buf, $STRING_BUF_SIZE)")
-                appendLine("                KneRuntime.checkError()")
-                appendLine("                return buf.getString(0)")
+                appendLine("                return _buf.getString(0)")
             }
             appendLine("            }")
         } else {
@@ -1515,15 +1534,11 @@ class FfmProxyGenerator {
         val needsArena = prop.type.returnsViaBuffer()
         if (needsArena) {
             appendLine("                Arena.ofConfined().use { arena ->")
-            appendLine("                    val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+            appendStringReadWithRetry("                    ", getHandleName, "")
             if (prop.type is KneType.NULLABLE) {
-                appendLine("                    val len = $getHandleName.invoke(buf, $STRING_BUF_SIZE) as Int")
-                appendLine("                    KneRuntime.checkError()")
-                appendLine("                    return if (len < 0) null else buf.getString(0)")
+                appendLine("                    return if (_len < 0) null else _buf.getString(0)")
             } else {
-                appendLine("                    $getHandleName.invoke(buf, $STRING_BUF_SIZE)")
-                appendLine("                    KneRuntime.checkError()")
-                appendLine("                    return buf.getString(0)")
+                appendLine("                    return _buf.getString(0)")
             }
             appendLine("                }")
         } else {
@@ -1830,7 +1845,6 @@ class FfmProxyGenerator {
         val args = buildList {
             add("handle")
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
         }
         return args.joinToString(", ")
     }
@@ -1846,7 +1860,6 @@ class FfmProxyGenerator {
     private fun buildTopLevelInvokeArgs(fn: KneFunction): String {
         val args = buildList {
             fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
-            if (fn.returnType.returnsViaBuffer()) { add("buf"); add("$STRING_BUF_SIZE") }
         }
         return args.joinToString(", ")
     }
@@ -2124,16 +2137,12 @@ class FfmProxyGenerator {
                 appendLine("${indent}KneRuntime.checkError()")
             }
             KneType.STRING -> {
-                appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                appendLine("${indent}$handleName.invoke($invokeArgs)")
-                appendLine("${indent}KneRuntime.checkError()")
-                appendLine("${indent}return buf.getString(0)")
+                appendStringReadWithRetry(indent, handleName, invokeArgs)
+                appendLine("${indent}return _buf.getString(0)")
             }
             KneType.BYTE_ARRAY -> {
-                appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                appendLine("${indent}val len = $handleName.invoke($invokeArgs) as Int")
-                appendLine("${indent}KneRuntime.checkError()")
-                appendLine("${indent}return buf.asSlice(0, len.toLong()).toArray(JAVA_BYTE)")
+                appendStringReadWithRetry(indent, handleName, invokeArgs)
+                appendLine("${indent}return _buf.asSlice(0, _len.toLong()).toArray(JAVA_BYTE)")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
@@ -2203,6 +2212,29 @@ class FfmProxyGenerator {
         }
     }
 
+    /**
+     * Emits the retry-read pattern for string output buffers (JetBrains-style):
+     * allocate initial buffer, call handle, if truncated retry with exact size.
+     * After this call, generated locals `_buf` and `_len` are in scope.
+     */
+    private fun StringBuilder.appendStringReadWithRetry(
+        indent: String,
+        handleName: String,
+        invokeArgs: String,
+    ) {
+        val bufArgs = if (invokeArgs.isEmpty()) "_buf, _bufSize" else "$invokeArgs, _buf, _bufSize"
+        appendLine("${indent}var _bufSize = $STRING_BUF_SIZE")
+        appendLine("${indent}var _buf = arena.allocate(_bufSize.toLong())")
+        appendLine("${indent}val _len = $handleName.invoke($bufArgs) as Int")
+        appendLine("${indent}KneRuntime.checkError()")
+        appendLine("${indent}if (_len >= _bufSize) {")
+        appendLine("${indent}    _bufSize = _len + 1")
+        appendLine("${indent}    _buf = arena.allocate(_bufSize.toLong())")
+        appendLine("${indent}    $handleName.invoke($bufArgs)")
+        appendLine("${indent}    KneRuntime.checkError()")
+        appendLine("${indent}}")
+    }
+
     private fun StringBuilder.appendNullableCallAndReturn(
         indent: String,
         type: KneType.NULLABLE,
@@ -2211,10 +2243,8 @@ class FfmProxyGenerator {
     ) {
         when (type.inner) {
             KneType.STRING -> {
-                appendLine("${indent}val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                appendLine("${indent}val len = $handleName.invoke($invokeArgs) as Int")
-                appendLine("${indent}KneRuntime.checkError()")
-                appendLine("${indent}return if (len < 0) null else buf.getString(0)")
+                appendStringReadWithRetry(indent, handleName, invokeArgs)
+                appendLine("${indent}return if (_len < 0) null else _buf.getString(0)")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
