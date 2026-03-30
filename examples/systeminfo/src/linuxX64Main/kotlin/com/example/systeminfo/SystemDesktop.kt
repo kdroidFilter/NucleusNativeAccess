@@ -115,6 +115,8 @@ actual class SystemDesktop {
         }
     }
 
+    actual suspend fun captureScreen(): ByteArray = ByteArray(0)
+
     private fun formatUptime(seconds: Double): String {
         if (seconds < 0) return "N/A"
         val h = (seconds / 3600).toInt()

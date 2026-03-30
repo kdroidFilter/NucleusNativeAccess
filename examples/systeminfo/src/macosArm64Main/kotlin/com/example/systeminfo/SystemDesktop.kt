@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import platform.AppKit.*
+import platform.CoreGraphics.*
 import platform.darwin.NSObject
 import platform.Foundation.NSSelectorFromString
 import platform.Foundation.NSProcessInfo
@@ -152,6 +153,37 @@ actual class SystemDesktop {
         while (true) {
             emit(MemoryInfo(getTotalMemoryMB(), getAvailableMemoryMB()))
             delay(intervalMs)
+        }
+    }
+
+    actual suspend fun captureScreen(): ByteArray = memScoped {
+        if (!CGPreflightScreenCaptureAccess()) {
+            CGRequestScreenCaptureAccess()
+            return@memScoped ByteArray(0)
+        }
+
+        val rect = alloc<CGRect>()
+        rect.origin.x = CGRectInfinite.origin.x
+        rect.origin.y = CGRectInfinite.origin.y
+        rect.size.width = CGRectInfinite.size.width
+        rect.size.height = CGRectInfinite.size.height
+        val cgImage = CGWindowListCreateImage(
+            rect.readValue(),
+            kCGWindowListOptionOnScreenOnly,
+            kCGNullWindowID,
+            kCGWindowImageDefault,
+        ) ?: return@memScoped ByteArray(0)
+
+        val bitmapRep = NSBitmapImageRep(cGImage = cgImage)
+        CGImageRelease(cgImage)
+
+        val pngData = bitmapRep.representationUsingType(
+            NSBitmapImageFileType.NSBitmapImageFileTypePNG,
+            properties = emptyMap<Any?, Any>(),
+        ) ?: return@memScoped ByteArray(0)
+
+        ByteArray(pngData.length.toInt()) { index ->
+            (pngData.bytes!!.reinterpret<ByteVar>() + index)!!.pointed.value
         }
     }
 

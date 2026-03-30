@@ -62,6 +62,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.runtime)
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
                 implementation("io.github.kdroidfilter:nucleus.graalvm-runtime:1.7.2")
             }
         }
