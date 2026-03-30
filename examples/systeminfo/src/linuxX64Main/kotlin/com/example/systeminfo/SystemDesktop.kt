@@ -4,29 +4,23 @@ package com.example.systeminfo
 
 import gio.*
 import kotlinx.cinterop.*
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
-import platform.posix.*
+import kotlinx.coroutines.withContext
 import libnotify.notify_init
 import libnotify.notify_notification_new
 import libnotify.notify_notification_show
-import systray.systray_show_dbus
-import systray.systray_hide_dbus
-import systray.systray_update_label
-import systray.systray_set_click_callback
+import platform.posix.*
 import kotlin.time.Duration.Companion.milliseconds
 
 // Context for D-Bus signal callback
 private class ScreenshotContext(val loop: CPointer<GMainLoop>?) {
     var path: String? = null
 }
-
-// Global required because staticCFunction cannot capture variables (Kotlin/Native limitation)
-private var trayClickEmitter: ((Int) -> Unit)? = null
 
 actual class SystemDesktop {
 
@@ -95,7 +89,7 @@ actual class SystemDesktop {
         buf.toKString().trim().substringBefore("(").trim()
     }
 
-    actual fun showSystemTray(): Boolean = memScoped {
+    actual fun showSystemTray(): Boolean {
         val labels = listOf(
             "Hostname: ${getHostname()}",
             "CPU: ${getCpuModel()}",
@@ -104,26 +98,27 @@ actual class SystemDesktop {
             "Uptime: ${formatUptime(getUptime())}",
             "Kernel: ${getKernelVersion()}"
         )
-        val cLabels = allocArray<CPointerVar<ByteVar>>(labels.size)
-        labels.forEachIndexed { i, label -> cLabels[i] = label.cstr.ptr }
-        systray_show_dbus("System Info", cLabels, labels.size) != 0
+        if (currentTrayManager == null) {
+            currentTrayManager = TrayManager()
+        }
+        currentTrayManager?.start("System Info", labels)
+        return true
     }
 
     actual fun hideSystemTray(): Boolean {
-        return systray_hide_dbus() != 0
+        currentTrayManager?.stop()
+        currentTrayManager = null
+        return true
     }
 
     actual fun updateTrayLabel(index: Int, label: String): Boolean {
-        return systray_update_label(index, label) != 0
+        currentTrayManager?.updateLabel(index, label)
+        return true
     }
 
     actual fun trayClicks(): Flow<Int> = callbackFlow {
         trayClickEmitter = { index -> trySend(index) }
-        systray_set_click_callback(staticCFunction { index ->
-            trayClickEmitter?.invoke(index)
-        })
         awaitClose {
-            systray_set_click_callback(null)
             trayClickEmitter = null
         }
     }
@@ -267,18 +262,20 @@ actual class SystemDesktop {
 
         if (path == null) return@withContext byteArrayOf()
 
-        val file = fopen(path, "rb") ?: return@withContext byteArrayOf()
-        fseek(file, 0, SEEK_END)
-        val size = ftell(file)
-        fseek(file, 0, SEEK_SET)
-
-        val buffer = ByteArray(size.toInt())
-        buffer.usePinned { pinned ->
-            fread(pinned.addressOf(0), 1u, size.toULong(), file)
+        memScoped {
+            val contents = alloc<CPointerVar<ByteVar>>()
+            val length = alloc<gsizeVar>()
+            val ok = g_file_get_contents(path, contents.ptr, length.ptr, null)
+            remove(path)
+            if (ok == 0 || contents.value == null) return@withContext byteArrayOf()
+            val size = length.value.toInt()
+            val buffer = ByteArray(size)
+            buffer.usePinned { pinned ->
+                memcpy(pinned.addressOf(0), contents.value, size.toULong())
+            }
+            g_free(contents.value)
+            buffer
         }
-        fclose(file)
-        remove(path)
-        buffer
     }
 
     private fun formatUptime(seconds: Double): String {
