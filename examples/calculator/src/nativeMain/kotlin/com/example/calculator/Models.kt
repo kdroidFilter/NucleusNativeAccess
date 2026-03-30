@@ -19,3 +19,7 @@ data class StyledPoint(val point: Point, val style: Style)
 data class TaggedRect(val rect: Rect, val tag: Operation, val name: String)
 
 data class DeepNested(val tagged: TaggedPoint, val style: Style, val scale: Double)
+
+data class Address(val street: String, val city: String)
+
+data class Person(val name: String, val age: Int, val address: Address)

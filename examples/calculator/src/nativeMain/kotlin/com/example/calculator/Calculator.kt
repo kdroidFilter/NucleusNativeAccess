@@ -678,6 +678,42 @@ class Calculator(initial: Int = 0) {
         callback(listOf(base, base * 2, base * 3), "computed_$base")
     }
 
+    // ── List<DataClass> as param ─────────────────────────────────────────
+
+    fun sumPoints(points: List<Point>): Int {
+        accumulator = points.sumOf { it.x + it.y }
+        return accumulator
+    }
+
+    fun sumPointsOrNull(points: List<Point>?): Int {
+        accumulator = points?.sumOf { it.x + it.y } ?: -1
+        return accumulator
+    }
+
+    fun countTaggedPoints(items: List<TaggedPoint>): Int {
+        return items.size
+    }
+
+    fun describeNamedValues(items: List<NamedValue>): String {
+        return items.joinToString(", ") { "${it.name}=${it.value}" }
+    }
+
+    fun sumRects(rects: List<Rect>): Int {
+        return rects.sumOf { it.topLeft.x + it.topLeft.y + it.bottomRight.x + it.bottomRight.y }
+    }
+
+    fun firstPointOrDefault(points: List<Point>): Point {
+        return points.firstOrNull() ?: Point(0, 0)
+    }
+
+    fun describePersons(persons: List<Person>): String {
+        return persons.joinToString("; ") { "${it.name}(${it.age}) @ ${it.address.street}, ${it.address.city}" }
+    }
+
+    fun oldestPersonAge(persons: List<Person>): Int {
+        return persons.maxOfOrNull { it.age } ?: -1
+    }
+
     // ── Nullable collections ────────────────────────────────────────────────
 
     fun getScoresOrNull(): List<Int>? = if (accumulator != 0) listOf(accumulator, accumulator * 2) else null
