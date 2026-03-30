@@ -163,12 +163,13 @@ class KotlinNativeExportPlugin : Plugin<Project> {
             val linkTaskName = "link${libCap}ReleaseShared$targetCap"
             val nativeLibResourceDir = project.layout.buildDirectory.dir("generated/kne/nativeLib")
 
+            val buildDir = project.layout.buildDirectory
             val copyNativeLib = project.tasks.register("copyKneNativeLib") { task ->
                 task.group = "kne"
                 task.description = "Copy native shared library into JVM resources for JAR bundling"
-                task.dependsOn(project.tasks.matching { it.name == linkTaskName })
+                task.dependsOn(linkTaskName)
                 task.doLast {
-                    val releaseDir = project.layout.buildDirectory
+                    val releaseDir = buildDir
                         .dir("bin/$targetName/${libName}ReleaseShared").get().asFile
                     val nativeFile = releaseDir.listFiles()?.firstOrNull { f ->
                         f.extension in listOf("so", "dylib", "dll")
@@ -177,7 +178,7 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                         val destDir = nativeLibResourceDir.get().asFile.resolve("kne/native/$platform")
                         destDir.mkdirs()
                         nativeFile.copyTo(destDir.resolve(nativeFile.name), overwrite = true)
-                        project.logger.lifecycle("kne: Bundled ${nativeFile.name} → kne/native/$platform/")
+                        task.logger.lifecycle("kne: Bundled ${nativeFile.name} → kne/native/$platform/")
                     }
                 }
             }
