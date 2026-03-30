@@ -178,6 +178,32 @@ class FfmProxyGenerator {
             }
         }
 
+        // List<DC> param create/add handles
+        val dcListParamTypesGraal = mutableSetOf<KneType.DATA_CLASS>()
+        fun scanDcListParamGraal(type: KneType) {
+            val inner = when (type) { is KneType.NULLABLE -> type.inner; else -> type }
+            when (inner) {
+                is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) dcListParamTypesGraal.add(inner.elementType)
+                is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) dcListParamTypesGraal.add(inner.elementType)
+                else -> {}
+            }
+        }
+        for (cls in module.classes) {
+            cls.methods.forEach { m -> m.params.forEach { scanDcListParamGraal(it.type) } }
+            cls.companionMethods.forEach { m -> m.params.forEach { scanDcListParamGraal(it.type) } }
+        }
+        module.functions.forEach { fn -> fn.params.forEach { scanDcListParamGraal(it.type) } }
+        for (dc in dcListParamTypesGraal) {
+            reg(listOf("int"), "long long") // create(capacity) -> handle
+            val addParams = buildList {
+                add("long long") // handle
+                flattenDcFields(dc, "").forEach { (_, type) ->
+                    when (type) { KneType.STRING -> add("void*"); KneType.BYTE_ARRAY -> { add("void*"); add("int") }; else -> add(LAYOUT_TO_GRAAL[type.ffmLayout] ?: type.ffmLayout) }
+                }
+            }
+            reg(addParams, null) // add(handle, fields...) -> void
+        }
+
         // Top-level functions
         for (fn in module.functions) regFromDescriptor(buildTopLevelDescriptor(fn))
 
@@ -1075,6 +1101,35 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
+        // List<DC> param create/add handles
+        val dcListParamTypes = mutableSetOf<KneType.DATA_CLASS>()
+        fun scanForDcListParam(type: KneType) {
+            val inner = when (type) { is KneType.NULLABLE -> type.inner; else -> type }
+            when (inner) {
+                is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) dcListParamTypes.add(inner.elementType)
+                is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) dcListParamTypes.add(inner.elementType)
+                else -> {}
+            }
+        }
+        cls.methods.forEach { m -> m.params.forEach { scanForDcListParam(it.type) } }
+        cls.companionMethods.forEach { m -> m.params.forEach { scanForDcListParam(it.type) } }
+        for (dc in dcListParamTypes) {
+            val dn = dc.simpleName.uppercase()
+            appendLine("        private val LISTPARAM_${dn}_CREATE_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_listparam_${dc.simpleName}_create\", FunctionDescriptor.of(JAVA_LONG, JAVA_INT))")
+            appendLine("        }")
+            val flatFields = flattenDcFields(dc, "")
+            val addLayouts = buildList {
+                add("JAVA_LONG") // handle
+                flatFields.forEach { (_, type) ->
+                    when (type) { KneType.STRING -> add("ADDRESS"); KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }; else -> add(type.ffmLayout) }
+                }
+            }.joinToString(", ")
+            appendLine("        private val LISTPARAM_${dn}_ADD_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_listparam_${dc.simpleName}_add\", FunctionDescriptor.ofVoid($addLayouts))")
+            appendLine("        }")
+        }
+
         // Flow<DC> reader handles
         val dcFlowTypes = mutableSetOf<KneType.DATA_CLASS>()
         cls.methods.forEach { m -> if (m.returnType is KneType.FLOW && (m.returnType as KneType.FLOW).elementType is KneType.DATA_CLASS) dcFlowTypes.add((m.returnType as KneType.FLOW).elementType as KneType.DATA_CLASS) }
@@ -1699,16 +1754,23 @@ class FfmProxyGenerator {
     private fun buildExpandedInvokeArgs(p: KneParam): List<String> {
         if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
         val isNullableColl = p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner.let { it is KneType.LIST || it is KneType.SET || it is KneType.MAP }
-        if (p.type is KneType.LIST) return listOf("${p.name}Seg", "${p.name}.size")
-        if (p.type is KneType.SET) return listOf("${p.name}Seg", "${p.name}.size")
+        if (p.type is KneType.LIST) {
+            return if ((p.type as KneType.LIST).elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
+            else listOf("${p.name}Seg", "${p.name}.size")
+        }
+        if (p.type is KneType.SET) {
+            return if ((p.type as KneType.SET).elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
+            else listOf("${p.name}Seg", "${p.name}.size")
+        }
         if (p.type is KneType.MAP) return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
         if (isNullableColl) {
             val inner = (p.type as KneType.NULLABLE).inner
-            val sizeExpr = "if (${p.name} == null) -1 else ${p.name}.size"
             return when (inner) {
-                is KneType.LIST -> listOf("${p.name}Seg", sizeExpr)
-                is KneType.SET -> listOf("${p.name}Seg", sizeExpr)
-                is KneType.MAP -> listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", sizeExpr)
+                is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
+                    else listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
+                is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
+                    else listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
+                is KneType.MAP -> listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "if (${p.name} == null) -1 else ${p.name}.size")
                 else -> listOf(buildJvmInvokeArg(p.name, p.type))
             }
         }
@@ -1936,7 +1998,8 @@ class FfmProxyGenerator {
                 } else if (p.type.isCollection()) {
                     val inner = p.type.unwrapCollection()
                     when (inner) {
-                        is KneType.LIST, is KneType.SET -> { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) add("JAVA_LONG") else { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) add("JAVA_LONG") else { add("ADDRESS"); add("JAVA_INT") }
                         is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
                         else -> {}
                     }
@@ -2066,7 +2129,8 @@ class FfmProxyGenerator {
                 else if (p.type.isCollection()) {
                     val inner = p.type.unwrapCollection()
                     when (inner) {
-                        is KneType.LIST, is KneType.SET -> { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) add("JAVA_LONG") else { add("ADDRESS"); add("JAVA_INT") }
+                        is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) add("JAVA_LONG") else { add("ADDRESS"); add("JAVA_INT") }
                         is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
                         else -> add(p.type.ffmLayout)
                     }
@@ -2179,7 +2243,9 @@ class FfmProxyGenerator {
             val inner = p.type.unwrapCollection()
             when (inner) {
                 is KneType.LIST -> {
-                    if (isNullable) {
+                    if (inner.elementType is KneType.DATA_CLASS) {
+                        appendListDcParamAlloc(indent, p.name, inner.elementType as KneType.DATA_CLASS, isNullable)
+                    } else if (isNullable) {
                         appendLine("${indent}val ${p.name}Unwrapped = ${p.name} ?: emptyList()")
                         appendListParamAlloc(indent, p.name, inner.elementType, srcExpr = "${p.name}Unwrapped")
                     } else {
@@ -2187,12 +2253,21 @@ class FfmProxyGenerator {
                     }
                 }
                 is KneType.SET -> {
-                    if (isNullable) {
-                        appendLine("${indent}val ${p.name}AsList = ${p.name}?.toList() ?: emptyList()")
+                    if (inner.elementType is KneType.DATA_CLASS) {
+                        if (isNullable) {
+                            appendLine("${indent}val ${p.name}AsList = ${p.name}?.toList()")
+                        } else {
+                            appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
+                        }
+                        appendListDcParamAlloc(indent, p.name, inner.elementType as KneType.DATA_CLASS, isNullable, srcExpr = "${p.name}AsList")
                     } else {
-                        appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
+                        if (isNullable) {
+                            appendLine("${indent}val ${p.name}AsList = ${p.name}?.toList() ?: emptyList()")
+                        } else {
+                            appendLine("${indent}val ${p.name}AsList = ${p.name}.toList()")
+                        }
+                        appendListParamAlloc(indent, p.name, inner.elementType, srcExpr = "${p.name}AsList")
                     }
-                    appendListParamAlloc(indent, p.name, inner.elementType, srcExpr = "${p.name}AsList")
                 }
                 is KneType.MAP -> {
                     if (isNullable) {
@@ -2235,6 +2310,55 @@ class FfmProxyGenerator {
             }
         }
     }
+
+    /** Allocate a native list handle for List<DC> param by creating + adding elements one by one. */
+    private fun StringBuilder.appendListDcParamAlloc(indent: String, name: String, dc: KneType.DATA_CLASS, nullable: Boolean, srcExpr: String = name) {
+        val dn = dc.simpleName.uppercase()
+        val src = if (nullable) "${name}Unwrapped" else srcExpr
+        if (nullable) {
+            appendLine("${indent}val ${name}Unwrapped = $srcExpr ?: emptyList()")
+        }
+        appendLine("${indent}val ${name}Handle = if (${if (nullable) "$srcExpr == null" else "false"}) 0L else {")
+        appendLine("${indent}    val _h = LISTPARAM_${dn}_CREATE_HANDLE.invoke($src.size) as Long")
+        appendLine("${indent}    for (_elem in $src) {")
+        // Collect flat fields with their accessor paths
+        val fieldsWithPaths = buildDcFieldsWithAccessPaths(dc, "_elem")
+        // Allocate String segments
+        fieldsWithPaths.filter { it.type == KneType.STRING }.forEach { f ->
+            appendLine("${indent}        val ${f.segName} = arena.allocateFrom(${f.accessExpr})")
+        }
+        // Build ADD invoke args
+        val addArgs = buildList {
+            add("_h")
+            fieldsWithPaths.forEach { f ->
+                when (f.type) {
+                    KneType.STRING -> add(f.segName)
+                    KneType.BOOLEAN -> add("if (${f.accessExpr}) 1 else 0")
+                    is KneType.ENUM -> add("${f.accessExpr}.ordinal")
+                    is KneType.OBJECT -> add("${f.accessExpr}.handle")
+                    else -> add(f.accessExpr)
+                }
+            }
+        }.joinToString(", ")
+        appendLine("${indent}        LISTPARAM_${dn}_ADD_HANDLE.invoke($addArgs)")
+        appendLine("${indent}    }")
+        appendLine("${indent}    _h")
+        appendLine("${indent}}")
+    }
+
+    private data class DcFieldAccess(val accessExpr: String, val segName: String, val type: KneType)
+
+    /** Recursively build flat field access paths for a DC, mapping each leaf field to its accessor chain. */
+    private fun buildDcFieldsWithAccessPaths(dc: KneType.DATA_CLASS, objExpr: String): List<DcFieldAccess> =
+        dc.fields.flatMap { f ->
+            val access = "$objExpr.${f.name}"
+            if (f.type is KneType.DATA_CLASS) {
+                buildDcFieldsWithAccessPaths(f.type, access)
+            } else {
+                val safeName = access.replace(".", "_").removePrefix("_elem_")
+                listOf(DcFieldAccess(access, "_${safeName}Seg", f.type))
+            }
+        }
 
     private fun StringBuilder.appendMapParamAlloc(indent: String, name: String, type: KneType.MAP, srcExpr: String = name) {
         appendLine("${indent}val ${name}KeysList = ${srcExpr}.keys.toList()")

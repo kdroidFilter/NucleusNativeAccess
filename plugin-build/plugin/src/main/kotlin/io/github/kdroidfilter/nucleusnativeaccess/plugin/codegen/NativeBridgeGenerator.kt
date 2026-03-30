@@ -103,6 +103,10 @@ class NativeBridgeGenerator {
         if (suspendCollTypes.isNotEmpty()) {
             appendSuspendCollectionReaderBridges(module.libName, suspendCollTypes)
         }
+
+        // Generate create/add bridges for List<DC> params
+        val dcTypesInListParams = collectDcListParamTypes(module)
+        dcTypesInListParams.forEach { dc -> appendListDcParamBridges(dc, module.libName) }
     }
 
     // ── Error query functions ────────────────────────────────────────────────
@@ -317,8 +321,16 @@ class NativeBridgeGenerator {
                 p.type.isCollection() -> {
                     val inner = p.type.unwrapCollection()
                     when (inner) {
-                        is KneType.LIST -> listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
-                        is KneType.SET -> listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
+                        is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) {
+                            listOf("${p.name}: Long") // opaque StableRef handle for List<DC>
+                        } else {
+                            listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
+                        }
+                        is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) {
+                            listOf("${p.name}: Long") // opaque StableRef handle for Set<DC>
+                        } else {
+                            listOf("${p.name}: ${KneType.collectionPointerType(inner.elementType)}", "${p.name}_size: Int")
+                        }
                         is KneType.MAP -> listOf(
                             "${p.name}_keys: ${KneType.collectionPointerType(inner.keyType)}",
                             "${p.name}_values: ${KneType.collectionPointerType(inner.valueType)}",
@@ -777,14 +789,38 @@ class NativeBridgeGenerator {
             val inner = if (isNullable) (p.type as KneType.NULLABLE).inner else p.type
             when (inner) {
                 is KneType.LIST -> {
-                    if (isNullable) {
+                    if (inner.elementType is KneType.DATA_CLASS) {
+                        val dcFq = (inner.elementType as KneType.DATA_CLASS).fqName
+                        if (isNullable) {
+                            appendLine("    val ${p.name}List: List<$dcFq>? = if (${p.name} == 0L) null else {")
+                            appendLine("        val _ref = ${p.name}.toCPointer<COpaque>()!!.asStableRef<MutableList<$dcFq>>()")
+                            appendLine("        val _tmp = _ref.get().toList(); _ref.dispose(); _tmp")
+                            appendLine("    }")
+                        } else {
+                            appendLine("    val _${p.name}Ref = ${p.name}.toCPointer<COpaque>()!!.asStableRef<MutableList<$dcFq>>()")
+                            appendLine("    val ${p.name}List = _${p.name}Ref.get().toList()")
+                            appendLine("    _${p.name}Ref.dispose()")
+                        }
+                    } else if (isNullable) {
                         appendLine("    val ${p.name}List = if (${p.name}_size < 0) null else {")
                         appendCollectionParamReadInner(p.name, inner.elementType, "List")
                         appendLine("    }")
                     } else appendCollectionParamRead(p.name, inner.elementType, "List")
                 }
                 is KneType.SET -> {
-                    if (isNullable) {
+                    if (inner.elementType is KneType.DATA_CLASS) {
+                        val dcFq = (inner.elementType as KneType.DATA_CLASS).fqName
+                        if (isNullable) {
+                            appendLine("    val ${p.name}Set: Set<$dcFq>? = if (${p.name} == 0L) null else {")
+                            appendLine("        val _ref = ${p.name}.toCPointer<COpaque>()!!.asStableRef<MutableList<$dcFq>>()")
+                            appendLine("        val _tmp = _ref.get().toSet(); _ref.dispose(); _tmp")
+                            appendLine("    }")
+                        } else {
+                            appendLine("    val _${p.name}Ref = ${p.name}.toCPointer<COpaque>()!!.asStableRef<MutableList<$dcFq>>()")
+                            appendLine("    val ${p.name}Set = _${p.name}Ref.get().toSet()")
+                            appendLine("    _${p.name}Ref.dispose()")
+                        }
+                    } else if (isNullable) {
                         appendLine("    val ${p.name}Set = if (${p.name}_size < 0) null else {")
                         appendCollectionParamReadInner(p.name, inner.elementType, "List")
                         appendLine("    .toSet() }")
@@ -1332,6 +1368,56 @@ class NativeBridgeGenerator {
         appendLine("fun `${prefix}_list_${n}_dispose`(handle: Long) {")
         appendLine("    if (handle == 0L) return")
         appendLine("    try { handle.toCPointer<COpaque>()?.asStableRef<List<$fq>>()?.dispose() } catch (_: Throwable) {}")
+        appendLine("}")
+        appendLine()
+    }
+
+    // ── List<DataClass> parameter bridges ───────────────────────────────────
+
+    /** Collect all DATA_CLASS types used as List/Set param elements. */
+    private fun collectDcListParamTypes(module: KneModule): Set<KneType.DATA_CLASS> {
+        val result = mutableSetOf<KneType.DATA_CLASS>()
+        fun scan(type: KneType) {
+            val inner = when (type) { is KneType.NULLABLE -> type.inner; else -> type }
+            when (inner) {
+                is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) result.add(inner.elementType)
+                is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) result.add(inner.elementType)
+                else -> {}
+            }
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> fn.params.forEach { scan(it.type) } }
+            cls.companionMethods.forEach { fn -> fn.params.forEach { scan(it.type) } }
+        }
+        module.functions.forEach { fn -> fn.params.forEach { scan(it.type) } }
+        return result
+    }
+
+    /** Generate create/add bridges for List<DC> params. */
+    private fun StringBuilder.appendListDcParamBridges(dc: KneType.DATA_CLASS, prefix: String) {
+        val n = dc.simpleName
+        val fq = dc.fqName
+
+        // create — allocates an empty MutableList<DC> as StableRef
+        appendLine("@CName(\"${prefix}_listparam_${n}_create\")")
+        appendLine("fun `${prefix}_listparam_${n}_create`(capacity: Int): Long {")
+        appendLine("    return StableRef.create(ArrayList<$fq>(capacity)).asCPointer().toLong()")
+        appendLine("}")
+        appendLine()
+
+        // add — adds one DC element from expanded fields
+        val flat = flattenDataClassFields(dc, "item")
+        val addParams = flat.joinToString(", ") { (name, type) ->
+            when {
+                type == KneType.STRING -> "$name: CPointer<ByteVar>?"
+                type == KneType.BYTE_ARRAY -> "$name: CPointer<ByteVar>?, ${name}_size: Int"
+                else -> "$name: ${type.nativeBridgeType}"
+            }
+        }
+        appendLine("@CName(\"${prefix}_listparam_${n}_add\")")
+        appendLine("fun `${prefix}_listparam_${n}_add`(handle: Long, $addParams) {")
+        val ctorExpr = buildDataClassCtorExpr(dc, "item")
+        appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<MutableList<$fq>>().get().add($ctorExpr)")
         appendLine("}")
         appendLine()
     }
