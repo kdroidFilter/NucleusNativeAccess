@@ -325,6 +325,21 @@ class Calculator(initial: Int = 0) {
         return if (accumulator != 0) accumulator else null
     }
 
+    suspend fun delayedByteArray(): ByteArray {
+        kotlinx.coroutines.delay(10)
+        return "acc=$accumulator".encodeToByteArray()
+    }
+
+    suspend fun delayedByteArrayNullable(): ByteArray? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator > 0) "pos=$accumulator".encodeToByteArray() else null
+    }
+
+    suspend fun delayedLargeByteArray(size: Int): ByteArray {
+        kotlinx.coroutines.delay(10)
+        return ByteArray(size) { (it % 256).toByte() }
+    }
+
     // ── Flow support ─────────────────────────────────────────────────────────
 
     fun countUp(max: Int): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flow {
