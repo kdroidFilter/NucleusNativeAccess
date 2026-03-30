@@ -340,6 +340,131 @@ class Calculator(initial: Int = 0) {
         return ByteArray(size) { (it % 256).toByte() }
     }
 
+    // ── Suspend DataClass returns ──────────────────────────────────────────
+
+    suspend fun delayedGetPoint(): Point {
+        kotlinx.coroutines.delay(10)
+        return Point(accumulator, accumulator * 2)
+    }
+
+    suspend fun delayedGetPointOrNull(): Point? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator != 0) Point(accumulator, accumulator * 2) else null
+    }
+
+    suspend fun delayedGetNamedValue(): NamedValue {
+        kotlinx.coroutines.delay(10)
+        return NamedValue(label.ifEmpty { "default" }, accumulator)
+    }
+
+    suspend fun delayedGetTaggedPoint(): TaggedPoint {
+        kotlinx.coroutines.delay(10)
+        return TaggedPoint(Point(accumulator, accumulator * 2), lastOperation)
+    }
+
+    suspend fun delayedGetRect(): Rect {
+        kotlinx.coroutines.delay(10)
+        return Rect(Point(0, 0), Point(accumulator, accumulator))
+    }
+
+    suspend fun delayedGetCalcResult(): CalcResult {
+        kotlinx.coroutines.delay(10)
+        return CalcResult(accumulator, "delayed: $accumulator")
+    }
+
+    // ── Suspend Collection returns ──────────────────────────────────────────
+
+    suspend fun delayedGetScores(): List<Int> {
+        kotlinx.coroutines.delay(10)
+        return listOf(accumulator, accumulator * 2, accumulator * 3)
+    }
+
+    suspend fun delayedGetScoresOrNull(): List<Int>? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator != 0) listOf(accumulator, accumulator * 2) else null
+    }
+
+    suspend fun delayedGetLabels(): List<String> {
+        kotlinx.coroutines.delay(10)
+        return listOf(label.ifEmpty { "default" }, "item_$accumulator")
+    }
+
+    suspend fun delayedGetPoints(): List<Point> {
+        kotlinx.coroutines.delay(10)
+        return listOf(Point(accumulator, 0), Point(0, accumulator))
+    }
+
+    suspend fun delayedGetPointsOrNull(): List<Point>? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator != 0) listOf(Point(accumulator, accumulator)) else null
+    }
+
+    suspend fun delayedGetTaggedPoints(): List<TaggedPoint> {
+        kotlinx.coroutines.delay(10)
+        return listOf(
+            TaggedPoint(Point(accumulator, 0), Operation.ADD),
+            TaggedPoint(Point(0, accumulator), lastOperation),
+        )
+    }
+
+    suspend fun delayedGetRects(): List<Rect> {
+        kotlinx.coroutines.delay(10)
+        return listOf(
+            Rect(Point(0, 0), Point(accumulator, accumulator)),
+            Rect(Point(accumulator, 0), Point(0, accumulator)),
+        )
+    }
+
+    suspend fun delayedGetOperations(): List<Operation> {
+        kotlinx.coroutines.delay(10)
+        return Operation.entries.toList()
+    }
+
+    suspend fun delayedGetWeights(): List<Double> {
+        kotlinx.coroutines.delay(10)
+        return listOf(accumulator.toDouble(), accumulator * 1.5)
+    }
+
+    suspend fun delayedGetFlags(): List<Boolean> {
+        kotlinx.coroutines.delay(10)
+        return listOf(accumulator > 0, accumulator % 2 == 0)
+    }
+
+    suspend fun delayedGetUniqueScores(): Set<Int> {
+        kotlinx.coroutines.delay(10)
+        return setOf(accumulator, accumulator * 2, accumulator * 3)
+    }
+
+    suspend fun delayedGetUniqueLabels(): Set<String> {
+        kotlinx.coroutines.delay(10)
+        return setOf(label.ifEmpty { "default" }, "item_$accumulator")
+    }
+
+    suspend fun delayedGetUsedOps(): Set<Operation> {
+        kotlinx.coroutines.delay(10)
+        return setOf(lastOperation, Operation.ADD)
+    }
+
+    suspend fun delayedGetUsedOpsOrNull(): Set<Operation>? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator > 0) setOf(lastOperation) else null
+    }
+
+    suspend fun delayedGetMetadata(): Map<String, Int> {
+        kotlinx.coroutines.delay(10)
+        return mapOf("current" to accumulator, "scale" to scale.toInt())
+    }
+
+    suspend fun delayedGetMetadataOrNull(): Map<String, Int>? {
+        kotlinx.coroutines.delay(10)
+        return if (accumulator != 0) mapOf("val" to accumulator) else null
+    }
+
+    suspend fun delayedGetSquares(): Map<Int, Int> {
+        kotlinx.coroutines.delay(10)
+        return mapOf(1 to 1, 2 to 4, accumulator to accumulator * accumulator)
+    }
+
     // ── Flow support ─────────────────────────────────────────────────────────
 
     fun countUp(max: Int): kotlinx.coroutines.flow.Flow<Int> = kotlinx.coroutines.flow.flow {

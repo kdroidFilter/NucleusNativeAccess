@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (780+ end-to-end FFM tests)
+### Types — test coverage (830+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 780+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 60 suspend function tests with cancellation (incl. ByteArray), and 50+ Flow tests (including `Flow<DataClass>`).
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 830+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -167,7 +167,7 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
-| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (60 tests, incl. ByteArray) |
+| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (110+ tests, incl. ByteArray, DataClass, List, Set, Map) |
 | Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (50+ tests, incl. DataClass) |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
@@ -191,7 +191,7 @@ val result = calc.fetchData("test")  // suspends the coroutine
 
 **Cancellation**: JVM coroutine cancel → `Job.cancel()` on native side. Native `CancellationException` → JVM `CancellationException`. Bidirectional, automatic.
 
-**Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `ByteArray`, `Unit`, `enum class`, `Object`, nullable variants.
+**Supported return types**: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `ByteArray`, `Unit`, `enum class`, `Object`, `data class`, `List<T>`, `Set<T>`, `Map<K,V>`, nullable variants.
 
 ### Flow&lt;T&gt;
 
@@ -396,13 +396,6 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 
-### Suspend function limitations
-
-| Unsupported | Reason | Alternative |
-|-------------|--------|-------------|
-| `suspend fun(): DataClass` | DC field extraction from StableRef not yet implemented | Return individual fields or use non-suspend |
-| `suspend fun(): List<T>` / `Set<T>` / `Map<K,V>` | Collection serialization via continuation callback | Return collections from non-suspend functions |
-
 ### Flow element limitations
 
 | Unsupported | Reason | Alternative |
@@ -601,7 +594,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 780+ end-to-end tests: all types, callbacks, collections, suspend, Flow (incl. DataClass), nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 830+ end-to-end tests: all types, callbacks, collections, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -610,7 +603,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 780+ end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 830+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 

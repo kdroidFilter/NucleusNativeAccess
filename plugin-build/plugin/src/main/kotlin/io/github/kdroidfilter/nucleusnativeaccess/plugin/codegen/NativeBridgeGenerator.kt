@@ -93,6 +93,16 @@ class NativeBridgeGenerator {
         // Generate DC reader bridges for each DC used as Flow element
         val dcTypesInFlows = collectFlowDcTypes(module)
         dcTypesInFlows.forEach { dc -> appendFlowDcBridges(dc, module.libName) }
+
+        // Generate DC reader bridges for each DC used as suspend return
+        val dcTypesInSuspend = collectSuspendDcTypes(module)
+        dcTypesInSuspend.forEach { dc -> appendSuspendDcBridges(dc, module.libName) }
+
+        // Generate collection reader bridges for suspend collection returns
+        val suspendCollTypes = collectSuspendCollectionTypes(module)
+        if (suspendCollTypes.isNotEmpty()) {
+            appendSuspendCollectionReaderBridges(module.libName, suspendCollTypes)
+        }
     }
 
     // ── Error query functions ────────────────────────────────────────────────
@@ -1326,6 +1336,252 @@ class NativeBridgeGenerator {
         appendLine()
     }
 
+    // ── Suspend DataClass reader bridges ────────────────────────────────────
+
+    /** Collect all DATA_CLASS types used as suspend function return types. */
+    private fun collectSuspendDcTypes(module: KneModule): Set<KneType.DATA_CLASS> {
+        val result = mutableSetOf<KneType.DATA_CLASS>()
+        fun scan(fn: KneFunction) {
+            if (!fn.isSuspend) return
+            val dc = when (val rt = fn.returnType) {
+                is KneType.DATA_CLASS -> rt
+                is KneType.NULLABLE -> rt.inner as? KneType.DATA_CLASS
+                else -> null
+            }
+            if (dc != null) result.add(dc)
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { scan(it) }
+            cls.companionMethods.forEach { scan(it) }
+        }
+        module.functions.forEach { scan(it) }
+        return result
+    }
+
+    /** Generate a reader bridge for suspend DataClass returns (reads fields from StableRef, then disposes). */
+    private fun StringBuilder.appendSuspendDcBridges(dc: KneType.DATA_CLASS, prefix: String) {
+        val n = dc.simpleName
+        val fq = dc.fqName
+        val outParams = buildDataClassOutParams(dc, "out")
+
+        appendLine("@CName(\"${prefix}_suspenddc_${n}_read\")")
+        appendLine("fun `${prefix}_suspenddc_${n}_read`(handle: Long$outParams) {")
+        appendLine("    val _item = handle.toCPointer<COpaque>()!!.asStableRef<$fq>().get()")
+        writeDataClassFields("_item", dc, "out")
+        appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<$fq>().dispose()")
+        appendLine("}")
+        appendLine()
+    }
+
+    // ── Suspend collection reader bridges ────────────────────────────────────
+
+    /** Collect all collection types used as suspend function return types. */
+    private fun collectSuspendCollectionTypes(module: KneModule): Set<KneType> {
+        val result = mutableSetOf<KneType>()
+        fun scan(fn: KneFunction) {
+            if (!fn.isSuspend) return
+            val rt = when (val t = fn.returnType) {
+                is KneType.NULLABLE -> t.inner
+                else -> t
+            }
+            when (rt) {
+                is KneType.LIST, is KneType.SET, is KneType.MAP -> result.add(rt)
+                else -> {}
+            }
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { scan(it) }
+            cls.companionMethods.forEach { scan(it) }
+        }
+        module.functions.forEach { scan(it) }
+        return result
+    }
+
+    /** Determine the element layout key for a collection element type. */
+    private fun suspendCollElemKey(type: KneType): String = when (type) {
+        KneType.INT -> "Int"
+        KneType.LONG -> "Long"
+        KneType.DOUBLE -> "Double"
+        KneType.FLOAT -> "Float"
+        KneType.SHORT -> "Short"
+        KneType.BYTE -> "Byte"
+        KneType.BOOLEAN -> "Boolean"
+        KneType.STRING -> "String"
+        is KneType.ENUM -> "Enum"
+        is KneType.OBJECT -> "ObjHandle"
+        else -> "Int" // fallback
+    }
+
+    /** Generate suspend collection reader bridges for all used element types. */
+    private fun StringBuilder.appendSuspendCollectionReaderBridges(prefix: String, types: Set<KneType>) {
+        // Collect unique element layout keys needed (excluding DataClass — handled by list_DC bridges)
+        val elemKeys = mutableSetOf<String>()
+        val mapCombinations = mutableSetOf<Pair<String, String>>()
+        for (type in types) {
+            when (type) {
+                is KneType.LIST -> {
+                    if (type.elementType !is KneType.DATA_CLASS) elemKeys.add(suspendCollElemKey(type.elementType))
+                }
+                is KneType.SET -> {
+                    if (type.elementType !is KneType.DATA_CLASS) elemKeys.add(suspendCollElemKey(type.elementType))
+                }
+                is KneType.MAP -> mapCombinations.add(Pair(suspendCollElemKey(type.keyType), suspendCollElemKey(type.valueType)))
+                else -> {}
+            }
+        }
+
+        // Generate per-element-key list/set reader bridges
+        for (key in elemKeys) {
+            appendSuspendCollReaderForKey(prefix, key)
+        }
+
+        // Generate per-combination map reader bridges
+        for ((kk, vk) in mapCombinations) {
+            appendSuspendMapReader(prefix, kk, vk)
+        }
+    }
+
+    /** Generate a single suspend collection reader bridge for a given element key. */
+    private fun StringBuilder.appendSuspendCollReaderForKey(prefix: String, key: String) {
+        val symbolName = "${prefix}_kne_suspend_readColl$key"
+        when (key) {
+            "String" -> {
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(handle: Long, outBuf: CPointer<ByteVar>?, outBufLen: Int): Int {")
+                appendLine("    val _coll = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get()")
+                appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
+                appendLine("    var _offset = 0")
+                appendLine("    for (_s in _list) {")
+                appendLine("        val _bytes = (_s as String).encodeToByteArray()")
+                appendLine("        if (_offset + _bytes.size + 1 > outBufLen) break")
+                appendLine("        _bytes.forEachIndexed { i, b -> outBuf?.set(_offset + i, b) }")
+                appendLine("        outBuf?.set(_offset + _bytes.size, 0)")
+                appendLine("        _offset += _bytes.size + 1")
+                appendLine("    }")
+                appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+                appendLine("    return _list.size")
+                appendLine("}")
+                appendLine()
+            }
+            "ObjHandle" -> {
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(handle: Long, outBuf: CPointer<LongVar>?, outLen: Int): Int {")
+                appendLine("    val _coll = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get()")
+                appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
+                appendLine("    val _writeLen = minOf(_list.size, outLen)")
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create(_list[i]!!).asCPointer().toLong()")
+                appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+                appendLine("    return _list.size")
+                appendLine("}")
+                appendLine()
+            }
+            else -> {
+                // Int, Long, Double, Float, Short, Byte, Boolean, Enum — all use the same pattern
+                val nativeType = when (key) {
+                    "Long" -> "LongVar"
+                    "Double" -> "DoubleVar"
+                    "Float" -> "FloatVar"
+                    else -> "IntVar" // Int, Short, Byte, Boolean, Enum
+                }
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(handle: Long, outBuf: CPointer<$nativeType>?, outLen: Int): Int {")
+                appendLine("    val _coll = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get()")
+                appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
+                appendLine("    val _writeLen = minOf(_list.size, outLen)")
+                val writeExpr = when (key) {
+                    "Boolean" -> "if (_list[i] as Boolean) 1 else 0"
+                    "Enum" -> "(_list[i] as Enum<*>).ordinal"
+                    "Short" -> "(_list[i] as Short).toInt()"
+                    "Byte" -> "(_list[i] as Byte).toInt()"
+                    "Long" -> "_list[i] as Long"
+                    "Double" -> "_list[i] as Double"
+                    "Float" -> "_list[i] as Float"
+                    else -> "_list[i] as Int"
+                }
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = $writeExpr")
+                appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+                appendLine("    return _list.size")
+                appendLine("}")
+                appendLine()
+            }
+        }
+    }
+
+    /** Generate a suspend map reader bridge for a given (keyKey, valueKey) combination. */
+    private fun StringBuilder.appendSuspendMapReader(prefix: String, keyKey: String, valKey: String) {
+        val symbolName = "${prefix}_kne_suspend_readMap${keyKey}${valKey}"
+
+        // Determine native pointer types for keys and values
+        val keyNativeType = if (keyKey == "String") "ByteVar" else "IntVar"
+        val valNativeType = when (valKey) {
+            "String" -> "ByteVar"
+            "Long" -> "LongVar"
+            "Double" -> "DoubleVar"
+            "Float" -> "FloatVar"
+            else -> "IntVar"
+        }
+
+        val keyParamStr = if (keyKey == "String") {
+            "outKeys: CPointer<ByteVar>?, outKeysLen: Int"
+        } else {
+            "outKeys: CPointer<$keyNativeType>?, outKeysMaxLen: Int"
+        }
+        val valParamStr = if (valKey == "String") {
+            "outVals: CPointer<ByteVar>?, outValsLen: Int"
+        } else {
+            "outVals: CPointer<$valNativeType>?, outValsMaxLen: Int"
+        }
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`(handle: Long, $keyParamStr, $valParamStr): Int {")
+        appendLine("    val _map = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get() as Map<*, *>")
+        appendLine("    val _keys = _map.keys.toList()")
+        appendLine("    val _vals = _map.values.toList()")
+
+        // Write keys
+        if (keyKey == "String") {
+            appendLine("    var _kOff = 0")
+            appendLine("    for (_k in _keys) {")
+            appendLine("        val _bytes = (_k as String).encodeToByteArray()")
+            appendLine("        if (_kOff + _bytes.size + 1 > outKeysLen) break")
+            appendLine("        _bytes.forEachIndexed { i, b -> outKeys?.set(_kOff + i, b) }")
+            appendLine("        outKeys?.set(_kOff + _bytes.size, 0)")
+            appendLine("        _kOff += _bytes.size + 1")
+            appendLine("    }")
+        } else {
+            appendLine("    val _kWriteLen = minOf(_keys.size, outKeysMaxLen)")
+            appendLine("    for (i in 0 until _kWriteLen) outKeys!![i] = _keys[i] as Int")
+        }
+
+        // Write values
+        if (valKey == "String") {
+            appendLine("    var _vOff = 0")
+            appendLine("    for (_v in _vals) {")
+            appendLine("        val _bytes = (_v as String).encodeToByteArray()")
+            appendLine("        if (_vOff + _bytes.size + 1 > outValsLen) break")
+            appendLine("        _bytes.forEachIndexed { i, b -> outVals?.set(_vOff + i, b) }")
+            appendLine("        outVals?.set(_vOff + _bytes.size, 0)")
+            appendLine("        _vOff += _bytes.size + 1")
+            appendLine("    }")
+        } else {
+            val valWriteExpr = when (valKey) {
+                "Long" -> "_vals[i] as Long"
+                "Double" -> "_vals[i] as Double"
+                "Float" -> "_vals[i] as Float"
+                "Enum" -> "(_vals[i] as Enum<*>).ordinal"
+                "Boolean" -> "if (_vals[i] as Boolean) 1 else 0"
+                else -> "_vals[i] as Int"
+            }
+            appendLine("    val _vWriteLen = minOf(_vals.size, outValsMaxLen)")
+            appendLine("    for (i in 0 until _vWriteLen) outVals!![i] = $valWriteExpr")
+        }
+
+        appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+        appendLine("    return _map.size")
+        appendLine("}")
+        appendLine()
+    }
+
     // ── Suspend function support ────────────────────────────────────────────
 
     /** Generate module-level helper bridges for suspend functions. */
@@ -1443,6 +1699,20 @@ class NativeBridgeGenerator {
             is KneType.ENUM -> appendLine("            _contFn.invoke(1, $resultExpr.ordinal.toLong())")
             is KneType.DATA_CLASS -> {
                 appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            is KneType.LIST, is KneType.MAP -> {
+                appendLine("            val _ref = StableRef.create($resultExpr)")
+                appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
+            }
+            is KneType.SET -> {
+                val elem = type.elementType
+                if (elem is KneType.DATA_CLASS) {
+                    // Convert Set<DC> to List<DC> so list_DC_size/get/dispose bridges work
+                    appendLine("            val _ref = StableRef.create(($resultExpr).toList())")
+                } else {
+                    appendLine("            val _ref = StableRef.create($resultExpr)")
+                }
                 appendLine("            _contFn.invoke(1, _ref.asCPointer().toLong())")
             }
             is KneType.NULLABLE -> {
