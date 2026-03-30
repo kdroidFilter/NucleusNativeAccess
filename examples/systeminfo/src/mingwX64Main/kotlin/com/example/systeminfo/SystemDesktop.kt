@@ -1,4 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.experimental.ExperimentalNativeApi::class)
+// WinRT and COM definitions moved to ToastProvider.kt
+
+@file:OptIn(
+    kotlinx.cinterop.ExperimentalForeignApi::class,
+    kotlin.experimental.ExperimentalNativeApi::class
+)
 
 package com.example.systeminfo
 
@@ -9,15 +14,24 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import platform.windows.*
-import wintray.*
+import platform.posix.*
 
-// Global required because staticCFunction cannot capture variables (Kotlin/Native limitation)
-private var trayClickEmitter: ((Int) -> Unit)? = null
+// --- Tray and UI Constants ---
+private const val WM_TRAY_CB = 1049u
+private const val WC_TRAY = "KNETrayWnd"
+private const val ID_TRAY = 1u
+private const val ID_MENU_BASE = 1000u
+private const val MAX_ITEMS = 32
+
+// --- Globals ---
+private var trayManager: TrayManager? = null
+
+// --- Implementation of actual class ---
 
 actual class SystemDesktop {
 
     actual fun sendNotification(title: String, body: String, icon: String): Boolean {
-        return wintray_notify(title, body) != 0
+        return toastShow(title, body)
     }
 
     actual fun getHostname(): String = memScoped {
@@ -90,7 +104,9 @@ actual class SystemDesktop {
         }
     }
 
-    actual fun showSystemTray(): Boolean = memScoped {
+    actual fun showSystemTray(): Boolean {
+        if (trayManager != null) return false
+        val manager = TrayManager()
         val labels = listOf(
             "Hostname: ${getHostname()}",
             "CPU: ${getCpuModel()}",
@@ -99,26 +115,29 @@ actual class SystemDesktop {
             "Uptime: ${formatUptime(getUptime())}",
             "Kernel: ${getKernelVersion()}"
         )
-        val cLabels = allocArray<CPointerVar<ByteVar>>(labels.size)
-        labels.forEachIndexed { i, label -> cLabels[i] = label.cstr.ptr }
-        wintray_show(cLabels, labels.size) != 0
+        if (manager.start(labels)) {
+            trayManager = manager
+            return true
+        }
+        return false
     }
 
     actual fun hideSystemTray(): Boolean {
-        return wintray_hide() != 0
+        val manager = trayManager ?: return false
+        if (manager.stop()) {
+            trayManager = null
+            return true
+        }
+        return false
     }
 
     actual fun updateTrayLabel(index: Int, label: String): Boolean {
-        return wintray_update_label(index, label) != 0
+        return trayManager?.updateLabel(index, label) ?: false
     }
 
     actual fun trayClicks(): Flow<Int> = callbackFlow {
         trayClickEmitter = { index -> trySend(index) }
-        wintray_set_click_callback(staticCFunction { index ->
-            trayClickEmitter?.invoke(index)
-        })
         awaitClose {
-            wintray_set_click_callback(null)
             trayClickEmitter = null
         }
     }

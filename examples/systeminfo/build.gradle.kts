@@ -31,7 +31,11 @@ kotlin {
     val nativeTarget = when (hostTarget) {
         "linuxX64" -> linuxX64()
         "macosArm64" -> macosArm64()
-        else -> mingwX64()
+        else -> mingwX64 {
+            binaries.all {
+                linkerOpts("-lole32", "-lshell32", "-luser32", "-lgdi32", "-ladvapi32", "-luxtheme")
+            }
+        }
     }
 
     // cinterop with libnotify (real Linux native notifications via D-Bus)
