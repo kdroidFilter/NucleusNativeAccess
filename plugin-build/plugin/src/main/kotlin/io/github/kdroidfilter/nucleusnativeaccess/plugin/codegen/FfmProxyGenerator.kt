@@ -136,6 +136,46 @@ class FfmProxyGenerator {
                     reg(readParams, null)
                 }
             }
+
+            // Suspend DC reader handles
+            cls.methods.forEach { m ->
+                if (!m.isSuspend) return@forEach
+                val dc = when (val rt = m.returnType) {
+                    is KneType.DATA_CLASS -> rt
+                    is KneType.NULLABLE -> rt.inner as? KneType.DATA_CLASS
+                    else -> null
+                } ?: return@forEach
+                val readParams = buildList {
+                    add("long long") // handle
+                    flattenDcFields(dc, "").forEach { (_, type) ->
+                        when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("void*"); add("int") }; else -> add("void*") }
+                    }
+                }
+                reg(readParams, null)
+            }
+
+            // Suspend collection reader handles
+            cls.methods.forEach { m ->
+                if (!m.isSuspend) return@forEach
+                val rt = when (val t = m.returnType) {
+                    is KneType.NULLABLE -> t.inner
+                    else -> t
+                }
+                when (rt) {
+                    is KneType.LIST, is KneType.SET -> {
+                        val elemType = when (rt) { is KneType.LIST -> rt.elementType; is KneType.SET -> rt.elementType; else -> return@forEach }
+                        if (elemType !is KneType.DATA_CLASS) {
+                            // handle, outBuf, outLen -> count
+                            reg(listOf("long long", "void*", "int"), "int")
+                        }
+                    }
+                    is KneType.MAP -> {
+                        // handle, keysBuf, keysLen, valsBuf, valsLen -> count
+                        reg(listOf("long long", "void*", "int", "void*", "int"), "int")
+                    }
+                    else -> {}
+                }
+            }
         }
 
         // Top-level functions
@@ -1053,6 +1093,73 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
+        // Suspend DC reader handles
+        val dcSuspendTypes = mutableSetOf<KneType.DATA_CLASS>()
+        fun extractSuspendDc(fn: KneFunction) {
+            if (!fn.isSuspend) return
+            val dc = when (val rt = fn.returnType) {
+                is KneType.DATA_CLASS -> rt
+                is KneType.NULLABLE -> rt.inner as? KneType.DATA_CLASS
+                else -> null
+            }
+            if (dc != null) dcSuspendTypes.add(dc)
+        }
+        cls.methods.forEach { extractSuspendDc(it) }
+        cls.companionMethods.forEach { extractSuspendDc(it) }
+        for (dc in dcSuspendTypes) {
+            val dn = dc.simpleName.uppercase()
+            val flatFields = flattenDcFields(dc, "")
+            val readLayouts = buildList {
+                add("JAVA_LONG") // handle
+                flatFields.forEach { (_, type) ->
+                    when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }; else -> add("ADDRESS") }
+                }
+            }.joinToString(", ")
+            appendLine("        private val SUSPENDDC_${dn}_READ_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_suspenddc_${dc.simpleName}_read\", FunctionDescriptor.ofVoid($readLayouts))")
+            appendLine("        }")
+        }
+
+        // Suspend collection reader handles
+        val suspendCollKeys = mutableSetOf<String>()
+        val suspendMapKeys = mutableSetOf<Pair<String, String>>()
+        fun extractSuspendColl(fn: KneFunction) {
+            if (!fn.isSuspend) return
+            val rt = when (val t = fn.returnType) {
+                is KneType.NULLABLE -> t.inner
+                else -> t
+            }
+            when (rt) {
+                is KneType.LIST -> if (rt.elementType !is KneType.DATA_CLASS) suspendCollKeys.add(suspendCollElemKey(rt.elementType))
+                is KneType.SET -> if (rt.elementType !is KneType.DATA_CLASS) suspendCollKeys.add(suspendCollElemKey(rt.elementType))
+                is KneType.MAP -> suspendMapKeys.add(Pair(suspendCollElemKey(rt.keyType), suspendCollElemKey(rt.valueType)))
+                else -> {}
+            }
+        }
+        cls.methods.forEach { extractSuspendColl(it) }
+        cls.companionMethods.forEach { extractSuspendColl(it) }
+        for (key in suspendCollKeys) {
+            val uk = key.uppercase()
+            val layout = when (key) {
+                "String" -> "ADDRESS, JAVA_INT" // outBuf + outBufLen
+                "Long", "ObjHandle" -> "ADDRESS, JAVA_INT" // outBuf + outLen (LongVar*)
+                "Double" -> "ADDRESS, JAVA_INT"
+                "Float" -> "ADDRESS, JAVA_INT"
+                else -> "ADDRESS, JAVA_INT" // IntVar* for Int, Boolean, Short, Byte, Enum
+            }
+            appendLine("        private val SUSPEND_READCOLL_${uk}_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_kne_suspend_readColl$key\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, $layout))")
+            appendLine("        }")
+        }
+        for ((kk, vk) in suspendMapKeys) {
+            val ukk = kk.uppercase()
+            val uvk = vk.uppercase()
+            // Map reader: handle, keysBuf, keysLen, valsBuf, valsLen -> count
+            appendLine("        private val SUSPEND_READMAP_${ukk}_${uvk}_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_kne_suspend_readMap$kk$vk\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT))")
+            appendLine("        }")
+        }
+
         // Factory
         val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         appendLine()
@@ -1295,8 +1402,38 @@ class FfmProxyGenerator {
             is KneType.OBJECT -> appendLine("${indent}_cont.resume(${type.simpleName}.fromNativeHandle(_value))")
             is KneType.ENUM -> appendLine("${indent}_cont.resume(${type.simpleName}.entries[_value.toInt()])")
             is KneType.DATA_CLASS -> {
-                // TODO: read DC fields from StableRef handle — for now unsupported
-                appendLine("${indent}_cont.resume(null as ${type.simpleName})")
+                appendLine("${indent}Arena.ofConfined().use { _dcArena ->")
+                val flatFields = flattenDcFields(type, "out")
+                flatFields.forEach { (name, ftype) ->
+                    when (ftype) {
+                        KneType.STRING, KneType.BYTE_ARRAY ->
+                            appendLine("${indent}    val $name = _dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                        else ->
+                            appendLine("${indent}    val $name = _dcArena.allocate(${ftype.ffmLayout})")
+                    }
+                }
+                val readArgs = buildList {
+                    add("_value")
+                    flatFields.forEach { (name, ftype) ->
+                        when (ftype) {
+                            KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }
+                            else -> add(name)
+                        }
+                    }
+                }.joinToString(", ")
+                val dn = type.simpleName.uppercase()
+                appendLine("${indent}    SUSPENDDC_${dn}_READ_HANDLE.invoke($readArgs)")
+                appendLine("${indent}    _cont.resume(${buildDcCtorFromOutParams(type, "out")})")
+                appendLine("${indent}}")
+            }
+            is KneType.LIST -> {
+                appendSuspendListDecode(indent, type.elementType, "List")
+            }
+            is KneType.SET -> {
+                appendSuspendListDecode(indent, type.elementType, "Set")
+            }
+            is KneType.MAP -> {
+                appendSuspendMapDecode(indent, type)
             }
             is KneType.NULLABLE -> {
                 appendLine("${indent}if (_hasValue == 0) _cont.resume(null)")
@@ -1306,6 +1443,139 @@ class FfmProxyGenerator {
             }
             else -> appendLine("${indent}_cont.resume(_value.toInt())") // fallback
         }
+    }
+
+    /** Map a collection element type to its suspend reader bridge key (must match NativeBridgeGenerator.suspendCollElemKey). */
+    private fun suspendCollElemKey(type: KneType): String = when (type) {
+        KneType.INT -> "Int"
+        KneType.LONG -> "Long"
+        KneType.DOUBLE -> "Double"
+        KneType.FLOAT -> "Float"
+        KneType.SHORT -> "Short"
+        KneType.BYTE -> "Byte"
+        KneType.BOOLEAN -> "Boolean"
+        KneType.STRING -> "String"
+        is KneType.ENUM -> "Enum"
+        is KneType.OBJECT -> "ObjHandle"
+        else -> "Int"
+    }
+
+    /** Decode a List/Set from a StableRef handle inside a suspend continuation callback. */
+    private fun StringBuilder.appendSuspendListDecode(indent: String, elemType: KneType, collType: String) {
+        if (elemType is KneType.DATA_CLASS) {
+            // Use existing list_DC_size/get/dispose bridges
+            val dn = elemType.simpleName.uppercase()
+            appendLine("${indent}val _listHandle = _value")
+            appendLine("${indent}try {")
+            appendLine("${indent}    val _size = LIST_${dn}_SIZE_HANDLE.invoke(_listHandle) as Int")
+            appendLine("${indent}    val _list = ArrayList<${elemType.simpleName}>(_size)")
+            appendLine("${indent}    Arena.ofConfined().use { dcArena ->")
+            val flatFields = flattenDcFields(elemType, "out")
+            flatFields.forEach { (name, type) ->
+                when (type) {
+                    KneType.STRING, KneType.BYTE_ARRAY ->
+                        appendLine("${indent}        val $name = dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else ->
+                        appendLine("${indent}        val $name = dcArena.allocate(${type.ffmLayout})")
+                }
+            }
+            appendLine("${indent}        for (_i in 0 until _size) {")
+            val getArgs = buildList {
+                add("_listHandle"); add("_i")
+                flatFields.forEach { (name, type) ->
+                    when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }; else -> add(name) }
+                }
+            }.joinToString(", ")
+            appendLine("${indent}            LIST_${dn}_GET_HANDLE.invoke($getArgs)")
+            appendLine("${indent}            _list.add(${buildDcCtorFromOutParams(elemType, "out")})")
+            appendLine("${indent}        }")
+            appendLine("${indent}    }")
+            if (collType == "Set") appendLine("${indent}    _cont.resume(_list.toSet())")
+            else appendLine("${indent}    _cont.resume(_list)")
+            appendLine("${indent}} finally {")
+            appendLine("${indent}    LIST_${dn}_DISPOSE_HANDLE.invoke(_listHandle)")
+            appendLine("${indent}}")
+        } else {
+            val key = suspendCollElemKey(elemType)
+            appendLine("${indent}Arena.ofConfined().use { _collArena ->")
+            if (elemType == KneType.STRING) {
+                appendLine("${indent}    val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
+                appendLine("${indent}    val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, $STRING_BUF_SIZE) as Int")
+                appendLine("${indent}    val _list = mutableListOf<String>()")
+                appendLine("${indent}    var _off = 0L")
+                appendLine("${indent}    repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
+            } else {
+                val layout = KneType.collectionElementLayout(elemType)
+                appendLine("${indent}    val _outBuf = _collArena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                appendLine("${indent}    val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, $MAX_COLLECTION_SIZE) as Int")
+                // Decode elements
+                when (elemType) {
+                    KneType.BOOLEAN ->
+                        appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+                    is KneType.ENUM ->
+                        appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+                    is KneType.OBJECT ->
+                        appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    else ->
+                        appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+                }
+            }
+            if (collType == "Set") appendLine("${indent}    _cont.resume(_list.toSet())")
+            else appendLine("${indent}    _cont.resume(_list)")
+            appendLine("${indent}}")
+        }
+    }
+
+    /** Decode a Map from a StableRef handle inside a suspend continuation callback. */
+    private fun StringBuilder.appendSuspendMapDecode(indent: String, type: KneType.MAP) {
+        val kk = suspendCollElemKey(type.keyType)
+        val vk = suspendCollElemKey(type.valueType)
+        val isKeyString = type.keyType == KneType.STRING
+        val isValString = type.valueType == KneType.STRING
+
+        appendLine("${indent}Arena.ofConfined().use { _mapArena ->")
+        // Allocate key buffer
+        if (isKeyString) {
+            appendLine("${indent}    val _keysBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+        } else {
+            val kLayout = KneType.collectionElementLayout(type.keyType)
+            appendLine("${indent}    val _keysBuf = _mapArena.allocate($kLayout, $MAX_COLLECTION_SIZE.toLong())")
+        }
+        // Allocate value buffer
+        if (isValString) {
+            appendLine("${indent}    val _valsBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+        } else {
+            val vLayout = KneType.collectionElementLayout(type.valueType)
+            appendLine("${indent}    val _valsBuf = _mapArena.allocate($vLayout, $MAX_COLLECTION_SIZE.toLong())")
+        }
+
+        // Invoke reader bridge
+        val keySizeArg = if (isKeyString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+        val valSizeArg = if (isValString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+        appendLine("${indent}    val _count = SUSPEND_READMAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke(_value, _keysBuf, $keySizeArg, _valsBuf, $valSizeArg) as Int")
+
+        // Decode keys
+        if (isKeyString) {
+            appendLine("${indent}    val _keys = mutableListOf<String>()")
+            appendLine("${indent}    var _kOff = 0L")
+            appendLine("${indent}    repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            val kLayout = KneType.collectionElementLayout(type.keyType)
+            appendLine("${indent}    val _keys = List(_count) { _keysBuf.getAtIndex($kLayout, it.toLong()) as ${type.keyType.jvmTypeName} }")
+        }
+
+        // Decode values
+        if (isValString) {
+            appendLine("${indent}    val _vals = mutableListOf<String>()")
+            appendLine("${indent}    var _vOff = 0L")
+            appendLine("${indent}    repeat(_count) { _vals.add(_valsBuf.getString(_vOff)); _vOff += _vals.last().toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            val vLayout = KneType.collectionElementLayout(type.valueType)
+            appendLine("${indent}    val _vals = List(_count) { _valsBuf.getAtIndex($vLayout, it.toLong()) as ${type.valueType.jvmTypeName} }")
+        }
+
+        appendLine("${indent}    _cont.resume(_keys.zip(_vals).toMap())")
+        appendLine("${indent}}")
     }
 
     private fun StringBuilder.appendMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
