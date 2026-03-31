@@ -15,6 +15,8 @@ class RustdocJsonParser {
 
     /** Set during [parse]; used by [resolveType] to build fqNames for struct/enum references. */
     private var currentCrateName: String = ""
+    /** Set during [parse]; enum IDs that have data variants (→ SEALED_ENUM, not ENUM). */
+    private var currentSealedEnumIds: Set<Int> = emptySet()
 
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
@@ -57,6 +59,26 @@ class RustdocJsonParser {
                 inner.has("trait") -> knownTraits[id.toInt()] = name
             }
         }
+
+        // Pre-classify enums: separate sealed (has data variants) from simple (all plain)
+        val sealedEnumIds = mutableSetOf<Int>()
+        for ((id, _) in knownEnums) {
+            val enumItem = index.get(id.toString())?.asJsonObject ?: continue
+            val innerEnum = enumItem.getAsJsonObject("inner")?.getAsJsonObject("enum") ?: continue
+            val varIds = innerEnum.getAsJsonArray("variants") ?: continue
+            for (vId in varIds) {
+                val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+                val variantInner = variantItem.getAsJsonObject("inner") ?: continue
+                if (variantInner.has("variant")) {
+                    val kind = variantInner.getAsJsonObject("variant").get("kind")
+                    if (kind != null && kind.isJsonObject) {
+                        sealedEnumIds.add(id)
+                        break
+                    }
+                }
+            }
+        }
+        currentSealedEnumIds = sealedEnumIds
 
         // Collect inherent impl blocks and map struct id → method items
         data class MethodEntry(val item: JsonObject, val isMutating: Boolean, val docs: String?, val isOverride: Boolean = false)
@@ -175,41 +197,53 @@ class RustdocJsonParser {
             )
         }
 
-        // Build KneEnums
+        // Build KneEnums and KneSealedEnums
         val enums = mutableListOf<KneEnum>()
+        val sealedEnums = mutableListOf<KneSealedEnum>()
         for ((id, name) in knownEnums) {
             val enumItem = index.get(id.toString())?.asJsonObject ?: continue
             val inner = enumItem.getAsJsonObject("inner").getAsJsonObject("enum")
             val variantIds = inner.getAsJsonArray("variants") ?: continue
-            val entries = mutableListOf<String>()
-            for (vId in variantIds) {
-                val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
-                val variantName = variantItem.get("name").safeString() ?: continue
-                // Only include fieldless variants (v1)
-                val variantInner = variantItem.getAsJsonObject("inner")
-                if (variantInner.has("variant")) {
+
+            if (id in sealedEnumIds) {
+                // Build as sealed enum
+                val variants = mutableListOf<KneSealedVariant>()
+                for (vId in variantIds) {
+                    val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+                    val variantName = variantItem.get("name").safeString() ?: continue
+                    val variantInner = variantItem.getAsJsonObject("inner") ?: continue
+                    if (!variantInner.has("variant")) continue
                     val variantData = variantInner.getAsJsonObject("variant")
                     val kind = variantData.get("kind")
-                    // "plain" means no fields
-                    if (kind != null && kind.isJsonPrimitive && kind.asString == "plain") {
-                        entries.add(variantName)
-                    } else if (kind != null && kind.isJsonObject) {
-                        // Skip variants with data (tuple or struct)
-                        continue
-                    } else {
-                        entries.add(variantName)
+                    val parsed = parseVariantFields(kind, index, knownStructs, knownEnums)
+                    if (parsed != null) {
+                        val (fields, isTuple) = parsed
+                        variants.add(KneSealedVariant(variantName, fields, isTuple))
                     }
-                } else {
+                }
+                sealedEnums.add(
+                    KneSealedEnum(
+                        simpleName = name,
+                        fqName = "$crateName.$name",
+                        variants = variants,
+                    )
+                )
+            } else {
+                // Build as simple enum (all variants are fieldless)
+                val entries = mutableListOf<String>()
+                for (vId in variantIds) {
+                    val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+                    val variantName = variantItem.get("name").safeString() ?: continue
                     entries.add(variantName)
                 }
-            }
-            enums.add(
-                KneEnum(
-                    simpleName = name,
-                    fqName = "$crateName.$name",
-                    entries = entries,
+                enums.add(
+                    KneEnum(
+                        simpleName = name,
+                        fqName = "$crateName.$name",
+                        entries = entries,
+                    )
                 )
-            )
+            }
         }
 
         // Build top-level functions (functions in the root module, not inside impl blocks)
@@ -304,8 +338,58 @@ class RustdocJsonParser {
             interfaces = interfaces,
             dataClasses = knownDataClasses.values.toList(),
             enums = enums,
+            sealedEnums = sealedEnums,
             functions = topLevelFunctions,
         )
+    }
+
+    /**
+     * Parses variant fields from a rustdoc JSON variant `kind` value.
+     * Returns (fields, isTuple) or null if unparseable.
+     * - "plain" → (empty, false) (unit variant)
+     * - { "tuple": [fieldId, ...] } → (positional fields, true)
+     * - { "struct": { "fields": [fieldId, ...] } } → (named fields, false)
+     */
+    private fun parseVariantFields(
+        kind: JsonElement?,
+        index: JsonObject,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+    ): Pair<List<KneParam>, Boolean>? {
+        if (kind == null || kind.isJsonNull) return emptyList<KneParam>() to false
+        if (kind.isJsonPrimitive && kind.asString == "plain") return emptyList<KneParam>() to false
+        if (!kind.isJsonObject) return null
+        val kindObj = kind.asJsonObject
+
+        if (kindObj.has("tuple")) {
+            val fieldIds = kindObj.getAsJsonArray("tuple") ?: return null
+            val fields = mutableListOf<KneParam>()
+            for ((i, fid) in fieldIds.withIndex()) {
+                val fieldItem = index.get(fid.asInt.toString())?.asJsonObject ?: return null
+                val fieldTypeJson = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
+                val fieldType = resolveType(fieldTypeJson, knownStructs, knownEnums) ?: return null
+                // Single-field tuple: name it "value"; multi-field: "value0", "value1", ...
+                val fieldName = if (fieldIds.size() == 1) "value" else "value$i"
+                fields.add(KneParam(fieldName, fieldType))
+            }
+            return fields to true
+        }
+
+        if (kindObj.has("struct")) {
+            val structObj = kindObj.getAsJsonObject("struct")
+            val fieldIds = structObj.getAsJsonArray("fields") ?: return null
+            val fields = mutableListOf<KneParam>()
+            for (fid in fieldIds) {
+                val fieldItem = index.get(fid.asInt.toString())?.asJsonObject ?: return null
+                val fieldName = fieldItem.get("name").safeString() ?: return null
+                val fieldTypeJson = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
+                val fieldType = resolveType(fieldTypeJson, knownStructs, knownEnums) ?: return null
+                fields.add(KneParam(fieldName, fieldType))
+            }
+            return fields to false
+        }
+
+        return null
     }
 
     private fun resolveTypeId(typeObj: JsonObject): Int? {
@@ -588,7 +672,11 @@ class RustdocJsonParser {
                     // Check if it's a known data class, enum, or regular struct
                     if (id != null && knownEnums.containsKey(id)) {
                         val name = knownEnums[id]!!
-                        KneType.ENUM("$currentCrateName.$name", name)
+                        if (id in currentSealedEnumIds) {
+                            KneType.SEALED_ENUM("$currentCrateName.$name", name)
+                        } else {
+                            KneType.ENUM("$currentCrateName.$name", name)
+                        }
                     } else if (id != null && knownDataClasses.containsKey(id)) {
                         val dc = knownDataClasses[id]!!
                         KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields)

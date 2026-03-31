@@ -8,6 +8,18 @@ pub enum Operation {
     Multiply,
 }
 
+/// Result of a calculator operation — demonstrates tagged enum (sealed class).
+pub enum CalcResult {
+    /// A successful integer result.
+    Value(i32),
+    /// An error with a message.
+    Error(String),
+    /// A partial result with value and confidence.
+    Partial { value: i32, confidence: f64 },
+    /// No result available.
+    Nothing,
+}
+
 /// Simple 2D point (data class -- all public fields, no complex methods).
 pub struct Point {
     pub x: i32,
@@ -251,6 +263,32 @@ impl Calculator {
             self.accumulator += pt.x + pt.y;
         }
         self.accumulator
+    }
+
+    // ── Sealed enum support ────────────────────────────────────────────
+
+    pub fn try_divide(&self, divisor: i32) -> CalcResult {
+        if divisor == 0 {
+            CalcResult::Error("Division by zero".to_string())
+        } else if self.accumulator == 0 {
+            CalcResult::Nothing
+        } else if self.accumulator % divisor != 0 {
+            let value = self.accumulator / divisor;
+            let confidence = 1.0 - ((self.accumulator % divisor) as f64 / self.accumulator as f64).abs();
+            CalcResult::Partial { value, confidence }
+        } else {
+            CalcResult::Value(self.accumulator / divisor)
+        }
+    }
+
+    pub fn last_result(&self) -> CalcResult {
+        if self.accumulator > 0 {
+            CalcResult::Value(self.accumulator)
+        } else if self.accumulator == 0 {
+            CalcResult::Nothing
+        } else {
+            CalcResult::Error(format!("Negative value: {}", self.accumulator))
+        }
     }
 
     // ── Data class support ────────────────────────────────────────────

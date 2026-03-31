@@ -193,7 +193,7 @@ class NativeBridgeGenerator {
         KneType.SHORT -> "0"
         KneType.STRING -> "0"
         KneType.UNIT -> ""
-        is KneType.OBJECT, is KneType.INTERFACE -> "0L"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0L"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when (type.inner) {
             KneType.STRING -> "-1"

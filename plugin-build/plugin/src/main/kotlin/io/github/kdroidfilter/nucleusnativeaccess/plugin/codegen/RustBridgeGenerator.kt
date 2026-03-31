@@ -39,6 +39,10 @@ class RustBridgeGenerator {
             sb.appendEnum(enum, prefix)
         }
 
+        for (sealed in module.sealedEnums) {
+            sb.appendSealedEnum(sealed, prefix)
+        }
+
         for (fn in module.functions) {
             sb.appendTopLevelFunction(fn, prefix)
         }
@@ -311,7 +315,7 @@ class RustBridgeGenerator {
                     }
                 }
             }
-            is KneType.OBJECT -> {
+            is KneType.OBJECT, is KneType.SEALED_ENUM -> {
                 appendLine("        let result = $expr;")
                 appendLine("        Box::into_raw(Box::new(result)) as i64")
             }
@@ -367,6 +371,166 @@ class RustBridgeGenerator {
         appendLine("    ${enum.entries.size}")
         appendLine("}")
         appendLine()
+    }
+
+    // --- Sealed enums (tagged enums with data variants) ---
+
+    private fun StringBuilder.appendSealedEnum(sealed: KneSealedEnum, prefix: String) {
+        val sym = "${prefix}_${sealed.simpleName}"
+        val rustName = sealed.simpleName
+
+        // dispose(handle)
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_dispose(handle: i64) {")
+        appendLine("    unsafe { drop(Box::from_raw(handle as *mut $rustName)); }")
+        appendLine("}")
+        appendLine()
+
+        // tag(handle) -> i32
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_tag(handle: i64) -> i32 {")
+        appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+        appendLine("    match obj {")
+        for ((i, variant) in sealed.variants.withIndex()) {
+            val pattern = when {
+                variant.fields.isEmpty() -> "$rustName::${variant.name}"
+                variant.isTuple -> "$rustName::${variant.name}(..)"
+                else -> "$rustName::${variant.name} { .. }"
+            }
+            appendLine("        $pattern => $i,")
+        }
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+
+        // Per-variant constructors and field getters
+        for ((i, variant) in sealed.variants.withIndex()) {
+            appendSealedVariantConstructor(sym, rustName, variant, prefix)
+            appendSealedVariantFieldGetters(sym, rustName, variant, prefix)
+        }
+    }
+
+    private fun StringBuilder.appendSealedVariantConstructor(
+        sym: String, rustName: String, variant: KneSealedVariant, prefix: String
+    ) {
+        val fnName = "${sym}_new_${variant.name}"
+        appendLine("#[no_mangle]")
+
+        if (variant.fields.isEmpty()) {
+            // Unit variant: no params
+            appendLine("pub extern \"C\" fn $fnName() -> i64 {")
+            appendLine("    Box::into_raw(Box::new($rustName::${variant.name})) as i64")
+        } else {
+            // Build param list
+            val params = variant.fields.joinToString(", ") { f ->
+                "${f.name}: ${rustCType(f.type)}"
+            }
+            appendLine("pub extern \"C\" fn $fnName($params) -> i64 {")
+            // Convert params
+            for (f in variant.fields) {
+                appendSealedFieldConversion(f)
+            }
+            // Build variant constructor — tuple vs struct syntax
+            if (variant.isTuple) {
+                val args = variant.fields.joinToString(", ") { sealedFieldArgExpr(it) }
+                appendLine("    Box::into_raw(Box::new($rustName::${variant.name}($args))) as i64")
+            } else {
+                val fieldArgs = variant.fields.joinToString(", ") { f ->
+                    "${f.name}: ${sealedFieldArgExpr(f)}"
+                }
+                appendLine("    Box::into_raw(Box::new($rustName::${variant.name} { $fieldArgs })) as i64")
+            }
+        }
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendSealedFieldConversion(f: KneParam) {
+        when (f.type) {
+            KneType.STRING -> {
+                appendLine("    let ${f.name} = unsafe { CStr::from_ptr(${f.name}) }.to_str().unwrap_or(\"\").to_string();")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("    let ${f.name} = ${f.name} != 0;")
+            }
+            else -> {} // Primitives don't need conversion
+        }
+    }
+
+    private fun sealedFieldArgExpr(f: KneParam): String = when (f.type) {
+        KneType.STRING -> f.name // already converted to String above
+        KneType.BOOLEAN -> f.name // already converted to bool above
+        KneType.FLOAT -> "${f.name} as f32" // i32 → f32 not needed, but f32 C param is f32
+        else -> f.name
+    }
+
+    private fun StringBuilder.appendSealedVariantFieldGetters(
+        sym: String, rustName: String, variant: KneSealedVariant, prefix: String
+    ) {
+        for (f in variant.fields) {
+            val fnName = "${sym}_${variant.name}_get_${f.name}"
+            val needsBuf = f.type == KneType.STRING
+
+            appendLine("#[no_mangle]")
+            if (needsBuf) {
+                appendLine("pub extern \"C\" fn $fnName(handle: i64, out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+            } else {
+                appendLine("pub extern \"C\" fn $fnName(handle: i64) -> ${rustCType(f.type)} {")
+            }
+            appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+
+            // Build match pattern and value expression based on tuple vs struct
+            val fieldIndex = variant.fields.indexOf(f)
+            val (fieldPattern, valExpr) = if (variant.isTuple) {
+                // Tuple variant: match positionally
+                if (variant.fields.size == 1) {
+                    "$rustName::${variant.name}(ref _v)" to "_v"
+                } else {
+                    val wildcards = variant.fields.indices.joinToString(", ") { i ->
+                        if (i == fieldIndex) "ref _v$i" else "_"
+                    }
+                    "$rustName::${variant.name}($wildcards)" to "_v$fieldIndex"
+                }
+            } else {
+                // Struct variant: match by field name
+                "$rustName::${variant.name} { ref ${f.name}, .. }" to f.name
+            }
+
+            appendLine("    match obj {")
+            if (needsBuf) {
+                appendLine("        $fieldPattern => {")
+                appendLine("            let bytes = $valExpr.as_bytes();")
+                appendLine("            let len = bytes.len() as i32;")
+                appendLine("            if len < out_buf_len {")
+                appendLine("                unsafe {")
+                appendLine("                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+                appendLine("                    *out_buf.add(bytes.len()) = 0;")
+                appendLine("                }")
+                appendLine("            }")
+                appendLine("            len + 1")
+                appendLine("        }")
+            } else {
+                val returnConvert = when (f.type) {
+                    KneType.BOOLEAN -> "if *$valExpr { 1 } else { 0 }"
+                    else -> "*$valExpr"
+                }
+                appendLine("        $fieldPattern => $returnConvert,")
+            }
+            appendLine("        _ => ${defaultCReturnValue(f.type)}")
+            appendLine("    }")
+            appendLine("}")
+            appendLine()
+        }
+    }
+
+    private fun defaultCReturnValue(type: KneType): String {
+        val v = when (type) {
+            KneType.DOUBLE -> "0.0"
+            KneType.FLOAT -> "0.0"
+            KneType.STRING -> "0"
+            else -> "0"
+        }
+        return "$v,"
     }
 
     // --- Top-level functions ---
@@ -830,6 +994,7 @@ class RustBridgeGenerator {
         KneType.UNIT -> "()"
         is KneType.OBJECT -> "i64" // opaque handle
         is KneType.INTERFACE -> "i64"
+        is KneType.SEALED_ENUM -> "i64" // opaque handle
         is KneType.ENUM -> "i32" // ordinal
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.STRING -> "*const c_char" // null pointer = None
@@ -879,7 +1044,7 @@ class RustBridgeGenerator {
         KneType.STRING -> "0" // byte count = 0
         KneType.UNIT -> "()"
         is KneType.DATA_CLASS -> "()" // out-params pattern, void return
-        is KneType.OBJECT, is KneType.INTERFACE -> "0i64"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.BOOLEAN, KneType.STRING -> "0i32"

@@ -505,4 +505,79 @@ class RustCalculatorParserTest {
         assertNotNull("describe_self should exist", describeSelf)
         assertTrue(describeSelf!!.isOverride)
     }
+
+    // --- Sealed enums (tagged enums with data) ---
+
+    @Test
+    fun `CalcResult is parsed as sealed enum not simple enum`() {
+        // CalcResult has data variants, so it should be in sealedEnums, not enums
+        assertEquals(1, module.enums.size) // Only Operation
+        assertEquals("Operation", module.enums[0].simpleName)
+        val sealed = module.sealedEnums.find { it.simpleName == "CalcResult" }
+        assertNotNull("CalcResult should be a sealed enum", sealed)
+    }
+
+    @Test
+    fun `CalcResult has 4 variants`() {
+        val sealed = module.sealedEnums.first { it.simpleName == "CalcResult" }
+        assertEquals(4, sealed.variants.size)
+        val names = sealed.variants.map { it.name }
+        assertTrue("Value" in names)
+        assertTrue("Error" in names)
+        assertTrue("Partial" in names)
+        assertTrue("Nothing" in names)
+    }
+
+    @Test
+    fun `CalcResult Value variant has single i32 field`() {
+        val sealed = module.sealedEnums.first { it.simpleName == "CalcResult" }
+        val value = sealed.variants.first { it.name == "Value" }
+        assertEquals(1, value.fields.size)
+        assertEquals("value", value.fields[0].name)
+        assertEquals(KneType.INT, value.fields[0].type)
+    }
+
+    @Test
+    fun `CalcResult Error variant has single String field`() {
+        val sealed = module.sealedEnums.first { it.simpleName == "CalcResult" }
+        val error = sealed.variants.first { it.name == "Error" }
+        assertEquals(1, error.fields.size)
+        assertEquals("value", error.fields[0].name)
+        assertEquals(KneType.STRING, error.fields[0].type)
+    }
+
+    @Test
+    fun `CalcResult Partial variant has named struct fields`() {
+        val sealed = module.sealedEnums.first { it.simpleName == "CalcResult" }
+        val partial = sealed.variants.first { it.name == "Partial" }
+        assertEquals(2, partial.fields.size)
+        assertEquals("value", partial.fields[0].name)
+        assertEquals(KneType.INT, partial.fields[0].type)
+        assertEquals("confidence", partial.fields[1].name)
+        assertEquals(KneType.DOUBLE, partial.fields[1].type)
+    }
+
+    @Test
+    fun `CalcResult Nothing variant has no fields`() {
+        val sealed = module.sealedEnums.first { it.simpleName == "CalcResult" }
+        val nothing = sealed.variants.first { it.name == "Nothing" }
+        assertTrue(nothing.fields.isEmpty())
+    }
+
+    @Test
+    fun `try_divide returns SEALED_ENUM type`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "try_divide" }
+        assertNotNull("try_divide should exist", method)
+        assertTrue(method!!.returnType is KneType.SEALED_ENUM)
+        assertEquals("CalcResult", (method.returnType as KneType.SEALED_ENUM).simpleName)
+    }
+
+    @Test
+    fun `last_result returns SEALED_ENUM type`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "last_result" }
+        assertNotNull("last_result should exist", method)
+        assertTrue(method!!.returnType is KneType.SEALED_ENUM)
+    }
 }
