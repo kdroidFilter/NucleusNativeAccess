@@ -2881,6 +2881,29 @@ class FfmProxyGenerator {
                 appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
                 appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), v.handle) }")
             }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                // Nested collection: wrap each inner collection as StableRef handle via wrap bridge
+                val innerKey = suspendCollElemKey(when (elemType) {
+                    is KneType.LIST -> elemType.elementType
+                    is KneType.SET -> elemType.elementType
+                    else -> KneType.INT
+                })
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { _i, _inner ->")
+                appendLine("${indent}    val _innerHandle = run {")
+                if (elemType is KneType.MAP) {
+                    val kk = suspendCollElemKey(elemType.keyType)
+                    val vk = suspendCollElemKey(elemType.valueType)
+                    appendCollFieldWrapMap("${indent}        ", "_inner", elemType, kk, vk)
+                } else {
+                    val innerElem = when (elemType) { is KneType.LIST -> elemType.elementType; is KneType.SET -> elemType.elementType; else -> KneType.INT }
+                    val src = if (elemType is KneType.SET) "_inner.toList()" else "_inner"
+                    appendCollFieldWrapPrimitive("${indent}        ", src, innerElem, innerKey)
+                }
+                appendLine("${indent}    }")
+                appendLine("${indent}    ${name}Seg.setAtIndex(JAVA_LONG, _i.toLong(), _innerHandle)")
+                appendLine("${indent}}")
+            }
             else -> {
                 val layout = KneType.collectionElementLayout(elemType)
                 appendLine("${indent}val ${name}Seg = arena.allocate($layout, $srcExpr.size.toLong())")
@@ -3032,6 +3055,13 @@ class FfmProxyGenerator {
             is KneType.OBJECT -> {
                 appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
             }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                // Nested collection: each element is a StableRef handle — read inner collection from each handle
+                appendLine("${indent}val _list = List($countExpr) { _idx ->")
+                appendLine("${indent}    val _innerHandle = _outBuf.getAtIndex(JAVA_LONG, _idx.toLong()) as Long")
+                appendNestedCollectionRead("${indent}    ", elemType)
+                appendLine("${indent}}")
+            }
             else -> {
                 val layout = KneType.collectionElementLayout(elemType)
                 appendLine("${indent}val _list = List($countExpr) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
@@ -3039,6 +3069,66 @@ class FfmProxyGenerator {
         }
         if (collType == "Set") appendLine("${indent}return _list.toSet()")
         else appendLine("${indent}return _list")
+    }
+
+    /** Read a nested collection from its StableRef handle (for nested collections in List elements). */
+    private fun StringBuilder.appendNestedCollectionRead(indent: String, elemType: KneType) {
+        when (elemType) {
+            is KneType.LIST, is KneType.SET -> {
+                val innerElem = when (elemType) { is KneType.LIST -> elemType.elementType; is KneType.SET -> elemType.elementType; else -> KneType.INT }
+                val key = suspendCollElemKey(innerElem)
+                appendLine("${indent}Arena.ofConfined().use { _innerArena ->")
+                if (innerElem == KneType.STRING) {
+                    appendLine("${indent}    val _iBuf = _innerArena.allocate($STRING_BUF_SIZE.toLong())")
+                    appendLine("${indent}    val _iCount = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_innerHandle, _iBuf, $STRING_BUF_SIZE) as Int")
+                    appendLine("${indent}    val _inner = mutableListOf<String>()")
+                    appendLine("${indent}    var _iOff = 0L")
+                    appendLine("${indent}    repeat(_iCount) { _inner.add(_iBuf.getString(_iOff)); _iOff += _inner.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                } else {
+                    val layout = KneType.collectionElementLayout(innerElem)
+                    appendLine("${indent}    val _iBuf = _innerArena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                    appendLine("${indent}    val _iCount = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_innerHandle, _iBuf, $MAX_COLLECTION_SIZE) as Int")
+                    when (innerElem) {
+                        KneType.BOOLEAN -> appendLine("${indent}    val _inner = List(_iCount) { _iBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+                        is KneType.ENUM -> appendLine("${indent}    val _inner = List(_iCount) { ${innerElem.simpleName}.entries[_iBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+                        is KneType.OBJECT -> appendLine("${indent}    val _inner = List(_iCount) { ${innerElem.simpleName}.fromNativeHandle(_iBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                        else -> appendLine("${indent}    val _inner = List(_iCount) { _iBuf.getAtIndex($layout, it.toLong()) as ${innerElem.jvmTypeName} }")
+                    }
+                }
+                if (elemType is KneType.SET) appendLine("${indent}    _inner.toSet()")
+                else appendLine("${indent}    _inner as ${elemType.jvmTypeName}")
+                appendLine("${indent}}")
+            }
+            is KneType.MAP -> {
+                val kk = suspendCollElemKey(elemType.keyType)
+                val vk = suspendCollElemKey(elemType.valueType)
+                val isKeyString = elemType.keyType == KneType.STRING
+                val isValString = elemType.valueType == KneType.STRING
+                appendLine("${indent}Arena.ofConfined().use { _innerArena ->")
+                if (isKeyString) appendLine("${indent}    val _kBuf = _innerArena.allocate($STRING_BUF_SIZE.toLong())")
+                else appendLine("${indent}    val _kBuf = _innerArena.allocate(${KneType.collectionElementLayout(elemType.keyType)}, $MAX_COLLECTION_SIZE.toLong())")
+                if (isValString) appendLine("${indent}    val _vBuf = _innerArena.allocate($STRING_BUF_SIZE.toLong())")
+                else appendLine("${indent}    val _vBuf = _innerArena.allocate(${KneType.collectionElementLayout(elemType.valueType)}, $MAX_COLLECTION_SIZE.toLong())")
+                val ksArg = if (isKeyString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                val vsArg = if (isValString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                appendLine("${indent}    val _iCount = SUSPEND_READMAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke(_innerHandle, _kBuf, $ksArg, _vBuf, $vsArg) as Int")
+                if (isKeyString) {
+                    appendLine("${indent}    val _ks = mutableListOf<String>(); var _kOff = 0L")
+                    appendLine("${indent}    repeat(_iCount) { _ks.add(_kBuf.getString(_kOff)); _kOff += _ks.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                } else {
+                    appendLine("${indent}    val _ks = List(_iCount) { _kBuf.getAtIndex(${KneType.collectionElementLayout(elemType.keyType)}, it.toLong()) as ${elemType.keyType.jvmTypeName} }")
+                }
+                if (isValString) {
+                    appendLine("${indent}    val _vs = mutableListOf<String>(); var _vOff = 0L")
+                    appendLine("${indent}    repeat(_iCount) { _vs.add(_vBuf.getString(_vOff)); _vOff += _vs.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                } else {
+                    appendLine("${indent}    val _vs = List(_iCount) { _vBuf.getAtIndex(${KneType.collectionElementLayout(elemType.valueType)}, it.toLong()) as ${elemType.valueType.jvmTypeName} }")
+                }
+                appendLine("${indent}    _ks.zip(_vs).toMap()")
+                appendLine("${indent}}")
+            }
+            else -> appendLine("${indent}_innerHandle") // fallback
+        }
     }
 
     private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP, nullable: Boolean = false) {
