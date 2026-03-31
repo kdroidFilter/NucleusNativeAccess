@@ -1,6 +1,8 @@
 package io.github.kdroidfilter.nucleusnativeaccess.plugin
 
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.tasks.CargoBuildTask
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.tasks.GenerateNativeBridgesTask
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.tasks.GenerateRustBindingsTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.tasks.testing.Test
@@ -36,8 +38,31 @@ class KotlinNativeExportPlugin : Plugin<Project> {
         extension.nativePackage.convention("")
         extension.buildType.convention("release")
 
+        // Rust import extension (opt-in)
+        val rustExtension = project.extensions.create(
+            "rustImport",
+            RustImportExtension::class.java,
+        )
+        rustExtension.libraryName.convention("")
+        rustExtension.jvmPackage.convention("")
+        rustExtension.buildType.convention("release")
+
         project.plugins.withId("org.jetbrains.kotlin.multiplatform") {
-            project.afterEvaluate { configureKmp(project, extension) }
+            project.afterEvaluate {
+                configureKmp(project, extension)
+                if (rustExtension.crates.isPresent && rustExtension.crates.get().isNotEmpty()) {
+                    configureRust(project, rustExtension)
+                }
+            }
+        }
+
+        // Also support pure JVM projects with Rust
+        project.plugins.withId("org.jetbrains.kotlin.jvm") {
+            project.afterEvaluate {
+                if (rustExtension.crates.isPresent && rustExtension.crates.get().isNotEmpty()) {
+                    configureRustJvm(project, rustExtension)
+                }
+            }
         }
     }
 
@@ -248,6 +273,130 @@ class KotlinNativeExportPlugin : Plugin<Project> {
                 "-Djava.library.path=$libraryPath",
                 "--enable-native-access=ALL-UNNAMED",
             )
+        }
+    }
+
+    // ── Rust import support (KMP projects) ──────────────────────────────
+
+    private fun configureRust(project: Project, rustExt: RustImportExtension) {
+        val kotlin = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
+        val libName = rustExt.libraryName.get().ifEmpty {
+            rustExt.crates.get().firstOrNull()?.name?.replace('-', '_') ?: "rustlib"
+        }
+        configureRustCommon(project, rustExt, libName) { jvmProxiesDir, jvmResourcesDir, nativeLibDir ->
+            kotlin.sourceSets.findByName("jvmMain")?.kotlin?.srcDir(jvmProxiesDir)
+            kotlin.sourceSets.findByName("jvmMain")?.resources?.srcDir(jvmResourcesDir)
+            kotlin.sourceSets.findByName("jvmMain")?.resources?.srcDir(nativeLibDir)
+        }
+    }
+
+    // ── Rust import support (pure JVM projects) ─────────────────────────
+
+    private fun configureRustJvm(project: Project, rustExt: RustImportExtension) {
+        val libName = rustExt.libraryName.get().ifEmpty {
+            rustExt.crates.get().firstOrNull()?.name?.replace('-', '_') ?: "rustlib"
+        }
+        configureRustCommon(project, rustExt, libName) { jvmProxiesDir, jvmResourcesDir, nativeLibDir ->
+            val mainSourceSet = project.extensions.findByType(
+                org.gradle.api.plugins.JavaPluginExtension::class.java
+            )?.sourceSets?.findByName("main")
+            mainSourceSet?.java?.srcDir(jvmProxiesDir)
+            mainSourceSet?.resources?.srcDir(jvmResourcesDir)
+            mainSourceSet?.resources?.srcDir(nativeLibDir)
+        }
+    }
+
+    private fun configureRustCommon(
+        project: Project,
+        rustExt: RustImportExtension,
+        libName: String,
+        wireSourceSets: (jvmProxiesDir: Any, jvmResourcesDir: Any, nativeLibDir: Any) -> Unit,
+    ) {
+        val jvmPackage = rustExt.jvmPackage.get()
+        val buildType = rustExt.buildType.get()
+
+        val rustProjectDir = project.layout.buildDirectory.dir("generated/kne/rust")
+        val rustBridgesDir = project.layout.buildDirectory.dir("generated/kne/rustBridges")
+        val jvmProxiesDir = project.layout.buildDirectory.dir("generated/kne/jvmProxies")
+        val jvmResourcesDir = project.layout.buildDirectory.dir("generated/kne/jvmResources")
+        val nativeLibDir = project.layout.buildDirectory.dir("generated/kne/nativeLib")
+
+        // Task 1: Generate Rust bridges + JVM proxies
+        val generateBindings = project.tasks.register(
+            "generateKneRustBindings",
+            GenerateRustBindingsTask::class.java,
+        ) { task ->
+            task.group = "kne"
+            task.description = "Generate Rust FFI bridges and JVM FFM proxies"
+            task.libName.set(libName)
+            task.jvmPackage.set(jvmPackage)
+            task.crates.set(rustExt.crates)
+            task.rustProjectDir.set(rustProjectDir)
+            task.rustBridgesDir.set(rustBridgesDir)
+            task.jvmProxiesDir.set(jvmProxiesDir)
+            task.jvmResourcesDir.set(jvmResourcesDir)
+        }
+
+        // Resolve the actual Cargo project directory
+        val localCrate = rustExt.crates.get().singleOrNull { it.path != null }
+        val resolvedCargoDir = if (localCrate != null) {
+            val dir = File(localCrate.path!!)
+            val resolved = if (dir.isAbsolute) dir else project.projectDir.resolve(dir.path)
+            project.layout.projectDirectory.dir(resolved.absolutePath)
+        } else {
+            rustProjectDir.get()
+        }
+
+        // Task 2: Cargo build
+        val cargoBuild = project.tasks.register(
+            "cargoKneBuild",
+            CargoBuildTask::class.java,
+        ) { task ->
+            task.group = "kne"
+            task.description = "Build Rust shared library with cargo"
+            task.buildType.set(buildType)
+            task.cargoProjectDir.set(resolvedCargoDir)
+            task.nativeLibOutputDir.set(nativeLibDir)
+            task.dependsOn(generateBindings)
+        }
+
+        // Wire source sets
+        wireSourceSets(jvmProxiesDir, jvmResourcesDir, nativeLibDir)
+
+        // Ensure compilation waits for generation
+        project.tasks.configureEach { task ->
+            val name = task.name
+            if (name == "compileKotlinJvm" || name == "compileKotlinJvmMain" ||
+                name == "compileKotlin" || name == "compileJava"
+            ) {
+                task.dependsOn(generateBindings)
+            }
+            if (name == "jvmProcessResources" || name == "processJvmMainResources" || name == "processResources") {
+                task.dependsOn(cargoBuild)
+                task.dependsOn(generateBindings)
+                // Also depend on KMP native bridges task if it exists (shared jvmResourcesDir)
+                project.tasks.findByName("generateKneNativeBridges")?.let { task.dependsOn(it) }
+            }
+        }
+
+        // Configure JVM test tasks
+        val cargoTargetDir = if (localCrate != null) {
+            val dir = File(localCrate.path!!)
+            val resolved = if (dir.isAbsolute) dir else project.projectDir.resolve(dir.path)
+            resolved.resolve("target/${buildType.lowercase()}")
+        } else {
+            rustProjectDir.get().asFile.resolve("target/${buildType.lowercase()}")
+        }
+        project.tasks.withType(Test::class.java).configureEach { testTask ->
+            testTask.dependsOn(cargoBuild)
+            testTask.jvmArgs(
+                "--enable-native-access=ALL-UNNAMED",
+            )
+            testTask.doFirst {
+                val libPath = cargoTargetDir.absolutePath
+                val nativeLibPath = nativeLibDir.get().asFile.absolutePath
+                testTask.jvmArgs("-Djava.library.path=$libPath${File.pathSeparator}$nativeLibPath")
+            }
         }
     }
 }

@@ -9,6 +9,7 @@ plugins {
 dependencies {
     implementation(kotlin("stdlib"))
     implementation(gradleApi())
+    implementation("com.google.code.gson:gson:2.13.1")
 
     // kotlin-compiler-embeddable for PSI parsing (compileOnly — loaded at runtime via isolated Worker classloader)
     compileOnly(libs.kotlin.compiler.embeddable)
