@@ -291,6 +291,27 @@ impl Calculator {
         }
     }
 
+    // ── Callback support ────────────────────────────────────────────
+
+    pub fn transform_and_sum(&self, values: &[i32], transform: fn(i32) -> i32) -> i32 {
+        values.iter().map(|&v| transform(v)).sum()
+    }
+
+    pub fn for_each_score(&self, count: i32, callback: fn(i32)) {
+        for i in 1..=count {
+            callback(self.accumulator * i);
+        }
+    }
+
+    /// Runs a tick loop, calling on_tick for each iteration.
+    /// @kne:suspend
+    pub fn run_tick_loop(&self, count: i32, interval_ms: i32, on_tick: fn(i32)) {
+        for i in 1..=count {
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
+            on_tick(self.accumulator + i);
+        }
+    }
+
     // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {

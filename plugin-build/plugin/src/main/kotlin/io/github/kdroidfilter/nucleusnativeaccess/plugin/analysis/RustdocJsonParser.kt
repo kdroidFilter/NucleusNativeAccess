@@ -703,6 +703,44 @@ class RustdocJsonParser {
             return null // Non-empty tuples not supported in v1
         }
 
+        // Function pointer: fn(T) -> R
+        if (obj.has("function_pointer")) {
+            val fp = obj.getAsJsonObject("function_pointer")
+            val sig = fp.getAsJsonObject("sig")
+            val inputs = sig.getAsJsonArray("inputs")
+            val paramTypes = mutableListOf<KneType>()
+            for (input in inputs) {
+                val arr = input.asJsonArray
+                val paramType = resolveType(arr[1], knownStructs, knownEnums, knownDataClasses) ?: return null
+                paramTypes.add(paramType)
+            }
+            val output = sig.get("output")
+            val returnType = if (output == null || output.isJsonNull) KneType.UNIT
+                else resolveType(output.asJsonObject, knownStructs, knownEnums, knownDataClasses) ?: return null
+            return KneType.FUNCTION(paramTypes, returnType)
+        }
+
+        // dyn Trait (for &dyn Fn(T) -> R, reached via borrowed_ref recursion)
+        if (obj.has("dyn_trait")) {
+            val traits = obj.getAsJsonObject("dyn_trait").getAsJsonArray("traits") ?: return null
+            for (traitEntry in traits) {
+                val traitObj = traitEntry.asJsonObject.getAsJsonObject("trait") ?: continue
+                val path = traitObj.get("path")?.asString ?: continue
+                if (path !in listOf("Fn", "FnMut", "FnOnce")) continue
+                val args = traitObj.getAsJsonObject("args") ?: continue
+                if (!args.has("parenthesized")) continue
+                val paren = args.getAsJsonObject("parenthesized")
+                val inputs = paren.getAsJsonArray("inputs") ?: return null
+                val paramTypes = inputs.mapNotNull { resolveType(it, knownStructs, knownEnums, knownDataClasses) }
+                if (paramTypes.size != inputs.size()) return null
+                val output = paren.get("output")
+                val returnType = if (output == null || output.isJsonNull) KneType.UNIT
+                    else resolveType(output.asJsonObject, knownStructs, knownEnums, knownDataClasses) ?: return null
+                return KneType.FUNCTION(paramTypes, returnType)
+            }
+            return null
+        }
+
         // Generic "Self" → skip (handled by caller context)
         if (obj.has("generic")) {
             return null

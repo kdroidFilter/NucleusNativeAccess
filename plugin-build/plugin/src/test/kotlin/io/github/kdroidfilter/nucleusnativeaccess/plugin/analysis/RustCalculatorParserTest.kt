@@ -580,4 +580,43 @@ class RustCalculatorParserTest {
         assertNotNull("last_result should exist", method)
         assertTrue(method!!.returnType is KneType.SEALED_ENUM)
     }
+
+    // --- Callback / function pointer params ---
+
+    @Test
+    fun `transform_and_sum has fn(i32) to i32 callback param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "transform_and_sum" }
+        assertNotNull("transform_and_sum should exist", method)
+        val cbParam = method!!.params.find { it.type is KneType.FUNCTION }
+        assertNotNull("Should have a FUNCTION param", cbParam)
+        val fnType = cbParam!!.type as KneType.FUNCTION
+        assertEquals(listOf(KneType.INT), fnType.paramTypes)
+        assertEquals(KneType.INT, fnType.returnType)
+    }
+
+    @Test
+    fun `for_each_score has fn(i32) callback param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "for_each_score" }
+        assertNotNull("for_each_score should exist", method)
+        val cbParam = method!!.params.find { it.type is KneType.FUNCTION }
+        assertNotNull("Should have a FUNCTION param", cbParam)
+        val fnType = cbParam!!.type as KneType.FUNCTION
+        assertEquals(listOf(KneType.INT), fnType.paramTypes)
+        assertEquals(KneType.UNIT, fnType.returnType)
+    }
+
+    @Test
+    fun `run_tick_loop is suspend with fn(i32) callback`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "run_tick_loop" }
+        assertNotNull("run_tick_loop should exist", method)
+        assertTrue(method!!.isSuspend)
+        val cbParam = method.params.find { it.type is KneType.FUNCTION }
+        assertNotNull("Should have a FUNCTION param", cbParam)
+        val fnType = cbParam!!.type as KneType.FUNCTION
+        assertEquals(listOf(KneType.INT), fnType.paramTypes)
+        assertEquals(KneType.UNIT, fnType.returnType)
+    }
 }

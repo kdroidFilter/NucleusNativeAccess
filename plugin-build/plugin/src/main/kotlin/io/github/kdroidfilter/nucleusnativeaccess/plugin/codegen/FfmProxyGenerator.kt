@@ -1918,6 +1918,9 @@ class FfmProxyGenerator {
         appendLine("            } finally { _suspendInFlight.decrementAndGet() }")
         appendLine("        }, _callbackArena)")
 
+        // Allocate callback stubs (persistent arena — survive async)
+        appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
+
         // Invoke native bridge
         appendLine("        Arena.ofConfined().use { _callArena ->")
 

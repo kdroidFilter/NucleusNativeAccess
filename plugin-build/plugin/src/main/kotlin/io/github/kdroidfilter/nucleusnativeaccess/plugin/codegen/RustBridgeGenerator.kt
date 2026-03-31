@@ -815,6 +815,9 @@ class RustBridgeGenerator {
                 val typeName = (p.type as KneType.OBJECT).simpleName
                 appendLine("            let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
             }
+            is KneType.FUNCTION -> {
+                appendFunctionParamConversion(p, "            ")
+            }
             KneType.BYTE_ARRAY -> {
                 appendLine("            let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
             }
@@ -880,6 +883,9 @@ class RustBridgeGenerator {
                     else -> appendLine("        let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
                 }
             }
+            is KneType.FUNCTION -> {
+                appendFunctionParamConversion(p, "        ")
+            }
             KneType.BYTE_ARRAY -> {
                 appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
             }
@@ -890,10 +896,75 @@ class RustBridgeGenerator {
         }
     }
 
+    /**
+     * Generates conversion for a FUNCTION param.
+     * For simple types (all primitives): transmute directly to Rust fn() pointer.
+     * For types needing conversion (bool, String): transmute to extern "C" fn + closure wrapper.
+     */
+    private fun StringBuilder.appendFunctionParamConversion(p: KneParam, indent: String) {
+        val fnType = p.type as KneType.FUNCTION
+        val needsConversion = fnType.paramTypes.any { it == KneType.BOOLEAN || it == KneType.STRING } ||
+            (fnType.returnType == KneType.BOOLEAN || fnType.returnType == KneType.STRING)
+
+        if (!needsConversion) {
+            // Direct transmute to Rust fn pointer (safe for primitives on x86-64/aarch64)
+            val nativeParams = fnType.paramTypes.joinToString(", ") { rustNativeType(it) }
+            val nativeRet = if (fnType.returnType == KneType.UNIT) "()" else rustNativeType(fnType.returnType)
+            appendLine("${indent}let ${p.name}_fn: fn($nativeParams) -> $nativeRet = unsafe { std::mem::transmute(${p.name}) };")
+        } else {
+            // Transmute to extern "C" fn, then wrap in closure for type conversion
+            val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->
+                "_p$i: ${rustCType(t)}"
+            }.joinToString(", ")
+            val cRetType = if (fnType.returnType == KneType.UNIT) "()" else rustCType(fnType.returnType)
+            appendLine("${indent}let ${p.name}_c: extern \"C\" fn($cParamTypes) -> $cRetType = unsafe { std::mem::transmute(${p.name}) };")
+
+            val closureParams = fnType.paramTypes.mapIndexed { i, t ->
+                "_cp$i: ${rustNativeType(t)}"
+            }.joinToString(", ")
+            val closureRetType = if (fnType.returnType == KneType.UNIT) "" else " -> ${rustNativeType(fnType.returnType)}"
+            val callArgs = fnType.paramTypes.mapIndexed { i, t ->
+                rustToCCallArgConvert("_cp$i", t)
+            }.joinToString(", ")
+            val callExpr = "${p.name}_c($callArgs)"
+            val returnExpr = rustFromCRetConvert(callExpr, fnType.returnType)
+            appendLine("${indent}let ${p.name}_fn = |$closureParams|$closureRetType { $returnExpr };")
+        }
+    }
+
+    /** Rust native type (not C ABI) for closure params. */
+    private fun rustNativeType(type: KneType): String = when (type) {
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.BOOLEAN -> "bool"
+        KneType.BYTE -> "i8"
+        KneType.SHORT -> "i16"
+        KneType.STRING -> "String"
+        else -> rustCType(type) // fallback
+    }
+
+    /** Convert a Rust native value to C ABI for calling into a C callback. */
+    private fun rustToCCallArgConvert(expr: String, type: KneType): String = when (type) {
+        KneType.BOOLEAN -> "if $expr { 1 } else { 0 }"
+        KneType.STRING -> "std::ffi::CString::new($expr).unwrap().into_raw()"
+        else -> expr
+    }
+
+    /** Convert a C ABI return value back to Rust native type. */
+    private fun rustFromCRetConvert(expr: String, type: KneType): String = when (type) {
+        KneType.UNIT -> expr
+        KneType.BOOLEAN -> "$expr != 0"
+        KneType.STRING -> "unsafe { std::ffi::CString::from_raw($expr as *mut c_char) }.into_string().unwrap_or_default()"
+        else -> expr
+    }
+
     /** Param name for method calls — uses isBorrowed to decide &str vs String, &T vs T. */
     private fun convertedParamName(p: KneParam): String = when (p.type) {
         KneType.STRING -> if (p.isBorrowed) "${p.name}_conv" else "${p.name}_str.clone()"
         KneType.BOOLEAN -> "${p.name}_conv"
+        is KneType.FUNCTION -> "${p.name}_fn"
         is KneType.ENUM -> "&${p.name}_conv"
         is KneType.OBJECT -> if (p.isBorrowed) {
             // Borrowed object: pass as &T
