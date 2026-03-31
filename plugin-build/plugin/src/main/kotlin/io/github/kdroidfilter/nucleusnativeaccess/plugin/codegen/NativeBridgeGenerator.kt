@@ -1737,6 +1737,18 @@ class NativeBridgeGenerator {
                 appendLine("}")
                 appendLine()
             }
+            "NestedColl" -> {
+                // Each element is a Long handle (StableRef of inner collection)
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(buf: CPointer<LongVar>?, count: Int): Long {")
+                appendLine("    val _list = List(count) {")
+                appendLine("        val _ref = buf!![it].toCPointer<COpaque>()!!.asStableRef<Any>()")
+                appendLine("        val _inner = _ref.get(); _ref.dispose(); _inner")
+                appendLine("    }")
+                appendLine("    return StableRef.create(_list as Any).asCPointer().toLong()")
+                appendLine("}")
+                appendLine()
+            }
             else -> {
                 val nativeType = when (key) {
                     "Long" -> "LongVar"
@@ -1815,6 +1827,7 @@ class NativeBridgeGenerator {
         is KneType.ENUM -> "Enum"
         is KneType.OBJECT -> "ObjHandle"
         KneType.BYTE_ARRAY -> "ByteArray"
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "NestedColl"
         else -> "Int" // fallback
     }
 
@@ -1889,6 +1902,19 @@ class NativeBridgeGenerator {
                 appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
                 appendLine("    val _writeLen = minOf(_list.size, outLen)")
                 appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create(_list[i] as ByteArray).asCPointer().toLong()")
+                appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+                appendLine("    return _list.size")
+                appendLine("}")
+                appendLine()
+            }
+            "NestedColl" -> {
+                // Each nested collection element wrapped as StableRef handle (Long)
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(handle: Long, outBuf: CPointer<LongVar>?, outLen: Int): Int {")
+                appendLine("    val _coll = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get()")
+                appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
+                appendLine("    val _writeLen = minOf(_list.size, outLen)")
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create(_list[i] as Any).asCPointer().toLong()")
                 appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
                 appendLine("    return _list.size")
                 appendLine("}")

@@ -1589,6 +1589,13 @@ class FfmProxyGenerator {
                     KneType.BOOLEAN -> appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
                     is KneType.ENUM -> appendLine("${indent}    val _list = List(_count) { ${innerElem.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
                     is KneType.OBJECT -> appendLine("${indent}    val _list = List(_count) { ${innerElem.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    KneType.BYTE_ARRAY -> appendLine("${indent}    val _list = List(_count) { KneRuntime.readByteArrayFromRef(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                        appendLine("${indent}    val _list = List(_count) { _idx ->")
+                        appendLine("${indent}        val _innerHandle = _outBuf.getAtIndex(JAVA_LONG, _idx.toLong()) as Long")
+                        appendNestedCollectionRead("${indent}        ", innerElem)
+                        appendLine("${indent}    }")
+                    }
                     else -> appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${innerElem.jvmTypeName} }")
                 }
             }
@@ -1747,6 +1754,7 @@ class FfmProxyGenerator {
         KneType.BYTE_ARRAY -> "ByteArray"
         is KneType.ENUM -> "Enum"
         is KneType.OBJECT -> "ObjHandle"
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> "NestedColl"
         else -> "Int"
     }
 
@@ -1806,6 +1814,14 @@ class FfmProxyGenerator {
                         appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
                     is KneType.OBJECT ->
                         appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    KneType.BYTE_ARRAY ->
+                        appendLine("${indent}    val _list = List(_count) { KneRuntime.readByteArrayFromRef(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                        appendLine("${indent}    val _list = List(_count) { _idx ->")
+                        appendLine("${indent}        val _innerHandle = _outBuf.getAtIndex(JAVA_LONG, _idx.toLong()) as Long")
+                        appendNestedCollectionRead("${indent}        ", elemType)
+                        appendLine("${indent}    }")
+                    }
                     else ->
                         appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
                 }
