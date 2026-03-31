@@ -230,6 +230,44 @@ class RustCalculatorParserTest {
         assertEquals(KneType.INT, (findMax.returnType as KneType.NULLABLE).inner)
     }
 
+    // --- Slice param tests ---
+
+    @Test
+    fun `Calculator has sum_bytes method with BYTE_ARRAY param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val sumBytes = calc.methods.find { it.name == "sum_bytes" }
+        assertNotNull(sumBytes)
+        assertEquals(1, sumBytes!!.params.size)
+        assertEquals(KneType.BYTE_ARRAY, sumBytes.params[0].type)
+        assertEquals(KneType.INT, sumBytes.returnType)
+    }
+
+    @Test
+    fun `Calculator has reverse_bytes method`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val revBytes = calc.methods.find { it.name == "reverse_bytes" }
+        assertNotNull(revBytes)
+        assertEquals(KneType.BYTE_ARRAY, revBytes!!.params[0].type)
+        assertEquals(KneType.BYTE_ARRAY, revBytes.returnType)
+    }
+
+    @Test
+    fun `parses sum_all with slice param`() {
+        val sumAll = module.functions.find { it.name == "sum_all" }
+        assertNotNull(sumAll)
+        assertEquals(1, sumAll!!.params.size)
+        assertTrue(sumAll.params[0].type is KneType.LIST)
+        assertEquals(KneType.INT, (sumAll.params[0].type as KneType.LIST).elementType)
+    }
+
+    @Test
+    fun `parses find_max with slice param and Option return`() {
+        val findMax = module.functions.find { it.name == "find_max" }
+        assertNotNull(findMax)
+        assertTrue(findMax!!.params[0].type is KneType.LIST)
+        assertTrue(findMax.returnType is KneType.NULLABLE)
+    }
+
     // --- Parity checks ---
 
     @Test

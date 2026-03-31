@@ -228,7 +228,14 @@ impl Calculator {
         self.accumulator.to_string().into_bytes()
     }
 
-    // sum_bytes and reverse_bytes take &[u8] slices — not yet supported in NNA bridge v1
+    pub fn sum_bytes(&mut self, data: &[u8]) -> i32 {
+        self.accumulator = data.iter().map(|&b| b as i32).sum();
+        self.accumulator
+    }
+
+    pub fn reverse_bytes(&self, data: &[u8]) -> Vec<u8> {
+        data.iter().rev().copied().collect()
+    }
 
     // ── Collection support ──────────────────────────────────────────────
 
@@ -253,7 +260,15 @@ pub fn greet(name: String) -> String {
     format!("Hello, {}!", name)
 }
 
-// sum_all and find_max take &[i32] slices — not yet supported in NNA bridge v1
+/// Adds all numbers in a slice.
+pub fn sum_all(numbers: &[i32]) -> i32 {
+    numbers.iter().sum()
+}
+
+/// Finds the maximum value in a slice, or None if empty.
+pub fn find_max(numbers: &[i32]) -> Option<i32> {
+    numbers.iter().copied().max()
+}
 
 #[cfg(test)]
 mod tests {
@@ -337,6 +352,8 @@ mod tests {
         assert_eq!(compute(3, 4, &Operation::Multiply), 12);
     }
 }
+
+
 
 
 

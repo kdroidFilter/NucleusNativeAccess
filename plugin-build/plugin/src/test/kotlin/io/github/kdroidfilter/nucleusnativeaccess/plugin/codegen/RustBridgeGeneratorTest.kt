@@ -191,6 +191,21 @@ class RustBridgeGeneratorTest {
         assertEquals("Each extern C fn should have #[no_mangle]", noMangle, externC)
     }
 
+    @Test
+    fun `generates slice param as pointer plus length`() {
+        val moduleWithSlice = simpleModule.copy(
+            functions = simpleModule.functions + KneFunction(
+                name = "process_bytes",
+                params = listOf(KneParam("data", KneType.BYTE_ARRAY, isBorrowed = true)),
+                returnType = KneType.INT,
+            )
+        )
+        val sliceCode = RustBridgeGenerator().generate(moduleWithSlice)
+        assertTrue(sliceCode.contains("data_ptr: *const u8"))
+        assertTrue(sliceCode.contains("data_len: i32"))
+        assertTrue(sliceCode.contains("std::slice::from_raw_parts"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

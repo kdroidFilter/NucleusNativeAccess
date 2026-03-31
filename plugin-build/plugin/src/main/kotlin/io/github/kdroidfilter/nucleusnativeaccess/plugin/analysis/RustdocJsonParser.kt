@@ -432,6 +432,12 @@ class RustdocJsonParser {
             }
         }
 
+        // Slice (&[T]) — typically reached via borrowed_ref → slice
+        if (obj.has("slice")) {
+            val elemType = resolveType(obj.getAsJsonObject("slice"), knownStructs, knownEnums) ?: return null
+            return if (elemType == KneType.BYTE) KneType.BYTE_ARRAY else KneType.LIST(elemType)
+        }
+
         // Tuple (empty tuple = unit)
         if (obj.has("tuple")) {
             val elems = obj.getAsJsonArray("tuple")

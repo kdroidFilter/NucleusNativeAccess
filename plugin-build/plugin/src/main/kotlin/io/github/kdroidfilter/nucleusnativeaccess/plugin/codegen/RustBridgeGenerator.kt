@@ -154,7 +154,11 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn $sym(handle: i64")
         for (p in fn.params) {
-            append(", ${p.name}: ${rustCType(p.type)}")
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
         }
         if (needsBufOutput) {
             append(", out_buf: *mut u8, out_buf_len: i32")
@@ -315,7 +319,12 @@ class RustBridgeGenerator {
         append("pub extern \"C\" fn $sym(")
         val allParams = mutableListOf<String>()
         for (p in fn.params) {
-            allParams.add("${p.name}: ${rustCType(p.type)}")
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                allParams.add("${p.name}_len: i32")
+            } else {
+                allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
         }
         if (needsBuf) {
             allParams.add("out_buf: *mut u8")
@@ -357,6 +366,12 @@ class RustBridgeGenerator {
                 val typeName = (p.type as KneType.OBJECT).simpleName
                 appendLine("        let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
             }
+            KneType.BYTE_ARRAY -> {
+                appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+            }
+            is KneType.LIST -> {
+                appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+            }
             else -> {} // Primitives need no conversion
         }
     }
@@ -373,6 +388,8 @@ class RustBridgeGenerator {
             // Owned object — for now still pass as borrow
             "${p.name}_conv"
         }
+        KneType.BYTE_ARRAY -> "${p.name}_slice"
+        is KneType.LIST -> "${p.name}_slice"
         else -> p.name
     }
 
@@ -433,6 +450,19 @@ class RustBridgeGenerator {
         appendLine("            }")
         appendLine("        }")
         appendLine("        len + 1")
+    }
+
+    /** C ABI pointer type for a slice parameter. */
+    private fun slicePointerType(type: KneType): String = when (type) {
+        KneType.BYTE_ARRAY -> "*const u8"
+        is KneType.LIST -> when (type.elementType) {
+            KneType.INT -> "*const i32"
+            KneType.LONG -> "*const i64"
+            KneType.DOUBLE -> "*const f64"
+            KneType.FLOAT -> "*const f32"
+            else -> "*const i64"
+        }
+        else -> "*const u8"
     }
 
     /** C ABI type for a parameter. */
