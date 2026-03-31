@@ -513,6 +513,12 @@ class NativeBridgeGenerator {
                 appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create($listExpr[i]).asCPointer().toLong()")
                 appendLine("    return $listExpr.size")
             }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                // Nested collection: wrap each inner collection as StableRef handle
+                appendLine("    val _writeLen = minOf($listExpr.size, outLen)")
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create($listExpr[i] as Any).asCPointer().toLong()")
+                appendLine("    return $listExpr.size")
+            }
             else -> {
                 appendLine("    val _writeLen = minOf($listExpr.size, outLen)")
                 appendLine("    for (i in 0 until _writeLen) outBuf!![i] = $listExpr[i]")
@@ -929,6 +935,13 @@ class NativeBridgeGenerator {
             }
             is KneType.OBJECT -> {
                 appendLine("    val $listVar = List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
+            }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                // Nested collection: each element is a StableRef handle, cast to correct type
+                appendLine("    val $listVar: List<${elemType.jvmTypeName}> = List(${paramName}_size) {")
+                appendLine("        val _innerRef = $paramName!![it].toCPointer<COpaque>()!!.asStableRef<Any>()")
+                appendLine("        val _inner = _innerRef.get(); _innerRef.dispose(); _inner as ${elemType.jvmTypeName}")
+                appendLine("    }")
             }
             else -> {
                 appendLine("    val $listVar = List(${paramName}_size) { $paramName!![it] }")

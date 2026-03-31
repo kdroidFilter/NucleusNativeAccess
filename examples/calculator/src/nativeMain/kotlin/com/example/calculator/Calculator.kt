@@ -785,6 +785,27 @@ class Calculator(initial: Int = 0) {
         )
     }
 
+    // ── Nested collections ──────────────────────────────────────────────────
+
+    fun getMatrix(): List<List<Int>> {
+        return listOf(
+            listOf(accumulator, accumulator + 1),
+            listOf(accumulator * 2, accumulator * 2 + 1),
+        )
+    }
+
+    fun sumMatrix(matrix: List<List<Int>>): Int {
+        accumulator = matrix.sumOf { row -> row.sum() }
+        return accumulator
+    }
+
+    fun getTagGrid(): List<List<String>> {
+        return listOf(
+            listOf("a_$accumulator", "b_$accumulator"),
+            listOf("c_$accumulator"),
+        )
+    }
+
     // ── Nullable collections ────────────────────────────────────────────────
 
     fun getScoresOrNull(): List<Int>? = if (accumulator != 0) listOf(accumulator, accumulator * 2) else null
