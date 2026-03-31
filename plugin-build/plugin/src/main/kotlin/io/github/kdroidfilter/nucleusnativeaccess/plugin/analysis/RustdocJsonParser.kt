@@ -93,9 +93,29 @@ class RustdocJsonParser {
             }
         }
 
-        // Build KneClasses
+        // Detect data class candidates: all public fields, no public methods (beyond new())
+        val knownDataClasses = mutableMapOf<Int, KneDataClass>()
+        for ((id, name) in knownStructs) {
+            val hasMethods = (implMethods[id]?.isNotEmpty() == true)
+            if (hasMethods) continue // Structs with methods are regular classes
+
+            val structItem = index.get(id.toString())?.asJsonObject ?: continue
+            val fields = extractStructFields(structItem, index, knownStructs, knownEnums)
+            if (fields == null || fields.isEmpty()) continue // No public fields or not a plain struct
+
+            val fqName = "$crateName.$name"
+            knownDataClasses[id] = KneDataClass(
+                simpleName = name,
+                fqName = fqName,
+                fields = fields,
+            )
+        }
+
+        // Build KneClasses (excluding data class structs)
         val classes = mutableListOf<KneClass>()
         for ((id, name) in knownStructs) {
+            if (knownDataClasses.containsKey(id)) continue
+
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
 
             // Build constructor from "new" function or from struct fields
@@ -103,7 +123,7 @@ class RustdocJsonParser {
 
             // Build methods (passing isMutating from the self param)
             val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { (methodItem, isMutating) ->
-                buildMethod(methodItem, knownStructs, knownEnums, isMutating)
+                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating)
             }
 
             // Extract properties from get_/set_ patterns
@@ -170,6 +190,8 @@ class RustdocJsonParser {
             val vis = item.get("visibility").safeString() ?: continue
             if (vis != "public") continue
             val name = item.get("name").safeString() ?: continue
+            // Skip generated bridge functions (from previous runs included via build.rs)
+            if (name.startsWith("${libName}_") || name.startsWith("kne_")) continue
             val sig = inner.getAsJsonObject("function").getAsJsonObject("sig")
             val inputs = sig.getAsJsonArray("inputs")
             // Skip if it has a self param (should be in an impl block)
@@ -178,8 +200,8 @@ class RustdocJsonParser {
             val generics = inner.getAsJsonObject("function").getAsJsonObject("generics")
             if (hasUnresolvedGenerics(generics)) continue
 
-            val params = buildParams(inputs, knownStructs, knownEnums)
-            val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums)?.type ?: KneType.UNIT
+            val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses)
+            val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
             topLevelFunctions.add(
                 KneFunction(
                     name = name,
@@ -196,7 +218,7 @@ class RustdocJsonParser {
             libName = libName,
             packages = setOf(pkg),
             classes = classes,
-            dataClasses = emptyList(),
+            dataClasses = knownDataClasses.values.toList(),
             enums = enums,
             functions = topLevelFunctions,
         )
@@ -235,6 +257,38 @@ class RustdocJsonParser {
     private fun hasUnresolvedGenerics(generics: JsonObject): Boolean {
         val params = generics.getAsJsonArray("params") ?: return false
         return params.size() > 0
+    }
+
+    /**
+     * Extracts public fields from a plain struct. Returns null if not all fields are public
+     * or the struct is not a plain struct.
+     */
+    private fun extractStructFields(
+        structItem: JsonObject,
+        index: JsonObject,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+    ): List<KneParam>? {
+        val structData = structItem.getAsJsonObject("inner").getAsJsonObject("struct")
+        val kind = structData.getAsJsonObject("kind") ?: return null
+        if (!kind.has("plain")) return null
+        val fieldIds = kind.getAsJsonObject("plain").getAsJsonArray("fields") ?: return null
+        val params = mutableListOf<KneParam>()
+        for (fieldId in fieldIds) {
+            val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: return null
+            val fieldVis = fieldItem.get("visibility").safeString() ?: return null
+            if (fieldVis != "public") return null // All fields must be public
+            val fieldName = fieldItem.get("name").safeString() ?: return null
+            val fieldType = fieldItem.getAsJsonObject("inner")
+                ?.getAsJsonObject("struct_field")
+            val resolvedType = if (fieldType != null) {
+                resolveType(fieldType, knownStructs, knownEnums)
+            } else return null
+            if (resolvedType != null) {
+                params.add(KneParam(fieldName, resolvedType))
+            } else return null
+        }
+        return params
     }
 
     private fun buildConstructor(
@@ -281,6 +335,7 @@ class RustdocJsonParser {
         methodItem: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
         isMutating: Boolean = false,
     ): KneFunction? {
         val name = methodItem.get("name").safeString() ?: return null
@@ -291,8 +346,8 @@ class RustdocJsonParser {
         val sig = inner.getAsJsonObject("sig")
         val inputs = sig.getAsJsonArray("inputs")
         // Skip the &self/&mut self param
-        val params = buildParams(inputs, knownStructs, knownEnums, skipSelf = true)
-        val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums)?.type ?: KneType.UNIT
+        val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses, skipSelf = true)
+        val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
 
         return KneFunction(
             name = name,
@@ -306,6 +361,7 @@ class RustdocJsonParser {
         inputs: com.google.gson.JsonArray,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
         skipSelf: Boolean = false,
     ): List<KneParam> {
         val params = mutableListOf<KneParam>()
@@ -314,7 +370,7 @@ class RustdocJsonParser {
             val paramName = arr[0].asString
             if (skipSelf && paramName == "self") continue
             val paramTypeJson = arr[1]
-            val resolved = resolveTypeWithBorrow(paramTypeJson, knownStructs, knownEnums) ?: continue
+            val resolved = resolveTypeWithBorrow(paramTypeJson, knownStructs, knownEnums, knownDataClasses) ?: continue
             params.add(KneParam(paramName, resolved.type, isBorrowed = resolved.isBorrowed))
         }
         return params
@@ -328,6 +384,7 @@ class RustdocJsonParser {
         typeJson: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): ResolvedType? {
         if (typeJson == null || typeJson.isJsonNull) return null
         val obj = typeJson.asJsonObject
@@ -335,11 +392,11 @@ class RustdocJsonParser {
         if (obj.has("borrowed_ref")) {
             val ref = obj.getAsJsonObject("borrowed_ref")
             val innerType = ref.getAsJsonObject("type")
-            val resolved = resolveType(innerType, knownStructs, knownEnums) ?: return null
+            val resolved = resolveType(innerType, knownStructs, knownEnums, knownDataClasses) ?: return null
             return ResolvedType(resolved, isBorrowed = true)
         }
 
-        val resolved = resolveType(obj, knownStructs, knownEnums) ?: return null
+        val resolved = resolveType(obj, knownStructs, knownEnums, knownDataClasses) ?: return null
         return ResolvedType(resolved, isBorrowed = false)
     }
 
@@ -352,6 +409,7 @@ class RustdocJsonParser {
         typeJson: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): KneType? {
         if (typeJson == null || typeJson.isJsonNull) return null
         val obj = typeJson.asJsonObject
@@ -379,7 +437,7 @@ class RustdocJsonParser {
             if (innerType.has("primitive") && innerType.get("primitive").asString == "str") {
                 return KneType.STRING
             }
-            return resolveType(innerType, knownStructs, knownEnums)
+            return resolveType(innerType, knownStructs, knownEnums, knownDataClasses)
         }
 
         // Resolved path (named types: String, Vec, Option, HashMap, user structs/enums)
@@ -393,35 +451,38 @@ class RustdocJsonParser {
                 "String" -> KneType.STRING
 
                 "Vec" -> {
-                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums)
+                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
                         ?: return null
                     if (elemType == KneType.BYTE) KneType.BYTE_ARRAY
                     else KneType.LIST(elemType)
                 }
 
                 "Option" -> {
-                    val innerType = extractFirstGenericArg(args, knownStructs, knownEnums)
+                    val innerType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
                         ?: return null
                     KneType.NULLABLE(innerType)
                 }
 
                 "HashSet", "BTreeSet" -> {
-                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums)
+                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
                         ?: return null
                     KneType.SET(elemType)
                 }
 
                 "HashMap", "BTreeMap" -> {
-                    val (keyType, valType) = extractTwoGenericArgs(args, knownStructs, knownEnums)
+                    val (keyType, valType) = extractTwoGenericArgs(args, knownStructs, knownEnums, knownDataClasses)
                         ?: return null
                     KneType.MAP(keyType, valType)
                 }
 
                 else -> {
-                    // Check if it's a known struct or enum
+                    // Check if it's a known data class, enum, or regular struct
                     if (id != null && knownEnums.containsKey(id)) {
                         val name = knownEnums[id]!!
                         KneType.ENUM("$currentCrateName.$name", name)
+                    } else if (id != null && knownDataClasses.containsKey(id)) {
+                        val dc = knownDataClasses[id]!!
+                        KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields)
                     } else if (id != null && knownStructs.containsKey(id)) {
                         val name = knownStructs[id]!!
                         KneType.OBJECT("$currentCrateName.$name", name)
@@ -457,6 +518,7 @@ class RustdocJsonParser {
         args: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): KneType? {
         if (args == null || args.isJsonNull) return null
         val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
@@ -464,7 +526,7 @@ class RustdocJsonParser {
         if (argsList.size() == 0) return null
         val firstArg = argsList[0].asJsonObject
         if (firstArg.has("type")) {
-            return resolveType(firstArg.getAsJsonObject("type"), knownStructs, knownEnums)
+            return resolveType(firstArg.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses)
         }
         return null
     }
@@ -473,6 +535,7 @@ class RustdocJsonParser {
         args: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): Pair<KneType, KneType>? {
         if (args == null || args.isJsonNull) return null
         val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
@@ -480,8 +543,8 @@ class RustdocJsonParser {
         if (argsList.size() < 2) return null
         val first = argsList[0].asJsonObject
         val second = argsList[1].asJsonObject
-        val keyType = if (first.has("type")) resolveType(first.getAsJsonObject("type"), knownStructs, knownEnums) else null
-        val valType = if (second.has("type")) resolveType(second.getAsJsonObject("type"), knownStructs, knownEnums) else null
+        val keyType = if (first.has("type")) resolveType(first.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses) else null
+        val valType = if (second.has("type")) resolveType(second.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses) else null
         if (keyType == null || valType == null) return null
         return keyType to valType
     }

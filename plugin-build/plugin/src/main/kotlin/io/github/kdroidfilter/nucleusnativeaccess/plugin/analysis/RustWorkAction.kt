@@ -31,18 +31,17 @@ object RustWorkAction {
         val cargoProjectDir = resolveCargoProject(crates, rustProjectDir, libName, logger)
         val crateSrcDir = cargoProjectDir.resolve("src")
 
-        // Step 2: Temporarily remove kne_bridges include for rustdoc
-        // (bridges don't exist yet, and rustdoc doesn't need them)
-        val libRs = crateSrcDir.resolve("lib.rs")
-        val originalContent = if (libRs.exists()) libRs.readText() else ""
-        val cleanContent = originalContent
-            .replace("\ninclude!(\"kne_bridges.rs\");\n", "")
-            .replace("include!(\"kne_bridges.rs\");", "")
-        if (cleanContent != originalContent) {
-            libRs.writeText(cleanContent)
-        }
-        // Also create an empty kne_bridges.rs to avoid include! errors
-        crateSrcDir.resolve("kne_bridges.rs").writeText("// placeholder\n")
+        // Step 2: Write an empty bridge file so rustdoc doesn't fail
+        // The bridge is included via build.rs which points to the Gradle build dir
+        rustBridgesDir.mkdirs()
+        val bridgeFile = rustBridgesDir.resolve("kne_bridges.rs")
+        if (!bridgeFile.exists()) bridgeFile.writeText("// placeholder\n")
+
+        // Generate build.rs that tells Cargo where to find the bridges
+        ensureBuildRs(cargoProjectDir, rustBridgesDir, logger)
+
+        // Ensure lib.rs includes the bridge via OUT_DIR
+        ensureLibRsInclude(crateSrcDir, logger)
 
         // Step 3: Run cargo rustdoc to produce JSON
         val rustdocJson = runCargoRustdoc(cargoProjectDir, libName, logger)
@@ -51,25 +50,13 @@ object RustWorkAction {
         // Step 4: Parse JSON → KneModule
         val jsonContent = rustdocJson.readText()
         val module = RustdocJsonParser().parse(jsonContent, libName)
-        logger.lifecycle("kne-rust: Parsed ${module.classes.size} classes, ${module.enums.size} enums, ${module.functions.size} functions")
+        logger.lifecycle("kne-rust: Parsed ${module.classes.size} classes, ${module.dataClasses.size} data classes, ${module.enums.size} enums, ${module.functions.size} functions")
 
-        // Step 5: Generate Rust bridges and inject into the crate
-        if (module.classes.isNotEmpty() || module.enums.isNotEmpty() || module.functions.isNotEmpty()) {
-            rustBridgesDir.mkdirs()
+        // Step 5: Generate Rust bridges (into Gradle build dir, NOT into crate src)
+        if (module.classes.isNotEmpty() || module.enums.isNotEmpty() || module.functions.isNotEmpty() || module.dataClasses.isNotEmpty()) {
             val bridgeCode = RustBridgeGenerator().generate(module)
-            rustBridgesDir.resolve("kne_bridges.rs").writeText(bridgeCode)
-
-            // Write bridges into the crate's src/ directory
-            crateSrcDir.resolve("kne_bridges.rs").writeText(bridgeCode)
-
-            // Add include! to lib.rs if not already present
-            val currentContent = libRs.readText()
-            if (!currentContent.contains("kne_bridges")) {
-                libRs.writeText(currentContent + "\n\ninclude!(\"kne_bridges.rs\");\n")
-                logger.lifecycle("kne-rust: Injected bridge include into lib.rs")
-            }
-
-            logger.lifecycle("kne-rust: Generated Rust bridges → kne_bridges.rs")
+            bridgeFile.writeText(bridgeCode)
+            logger.lifecycle("kne-rust: Generated Rust bridges → ${bridgeFile.absolutePath}")
         }
 
         // Step 5: Generate JVM proxies
@@ -142,6 +129,43 @@ object RustWorkAction {
 
         logger.lifecycle("kne-rust: Generated wrapper Cargo project at ${rustProjectDir.absolutePath}")
         return rustProjectDir
+    }
+
+    private fun ensureBuildRs(cargoDir: File, bridgesDir: File, logger: org.gradle.api.logging.Logger) {
+        val buildRs = cargoDir.resolve("build.rs")
+        val bridgePath = bridgesDir.resolve("kne_bridges.rs").absolutePath.replace("\\", "/")
+        val content = """
+            |fn main() {
+            |    let src = "$bridgePath";
+            |    let out_dir = std::env::var("OUT_DIR").unwrap();
+            |    let dest = format!("{}/kne_bridges.rs", out_dir);
+            |    if std::path::Path::new(src).exists() {
+            |        std::fs::copy(src, &dest).expect("Failed to copy kne_bridges.rs");
+            |    } else {
+            |        std::fs::write(&dest, "// placeholder\n").expect("Failed to write placeholder");
+            |    }
+            |    println!("cargo:rerun-if-changed={}", src);
+            |}
+        """.trimMargin()
+        if (!buildRs.exists() || buildRs.readText() != content) {
+            buildRs.writeText(content)
+            logger.lifecycle("kne-rust: Generated build.rs for bridge inclusion")
+        }
+    }
+
+    private fun ensureLibRsInclude(srcDir: File, logger: org.gradle.api.logging.Logger) {
+        val libRs = srcDir.resolve("lib.rs")
+        if (!libRs.exists()) return
+        val content = libRs.readText()
+        val oldInclude = "include!(\"kne_bridges.rs\");"
+        val outDirInclude = "include!(concat!(env!(\"OUT_DIR\"), \"/kne_bridges.rs\"));"
+        val cleaned = content.replace("\n$oldInclude\n", "\n").replace(oldInclude, "")
+        if (!cleaned.contains(outDirInclude)) {
+            libRs.writeText(cleaned.trimEnd() + "\n\n$outDirInclude\n")
+            logger.lifecycle("kne-rust: Injected OUT_DIR bridge include into lib.rs")
+        } else if (cleaned != content) {
+            libRs.writeText(cleaned)
+        }
     }
 
     private fun runCargoRustdoc(cargoDir: File, libName: String, logger: org.gradle.api.logging.Logger): File? {

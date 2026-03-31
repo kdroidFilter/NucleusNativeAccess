@@ -156,12 +156,32 @@ class RustBridgeGenerator {
         for (p in fn.params) {
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (p.type is KneType.DATA_CLASS) {
+                // Expand data class fields as individual C params
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
             } else {
                 append(", ${p.name}: ${rustCType(p.type)}")
             }
         }
         if (needsBufOutput) {
             append(", out_buf: *mut u8, out_buf_len: i32")
+        }
+        // Data class return: add per-field out-params
+        if (fn.returnType is KneType.DATA_CLASS) {
+            val dc = fn.returnType as KneType.DATA_CLASS
+            for (field in dc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        append(", out_${field.name}: *mut u8, out_${field.name}_len: i32")
+                    }
+                    else -> {
+                        append(", out_${field.name}: *mut ${rustCType(field.type)}")
+                    }
+                }
+            }
         }
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
@@ -177,7 +197,11 @@ class RustBridgeGenerator {
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
         appendReturnHandling("obj.${fn.name}($callArgs)", fn.returnType)
         appendLine("    })) {")
-        appendLine("        Ok(v) => v,")
+        if (fn.returnType is KneType.DATA_CLASS) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
         appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
         appendLine("    }")
         appendLine("}")
@@ -231,6 +255,7 @@ class RustBridgeGenerator {
         KneType.STRING, KneType.BYTE_ARRAY -> true
         is KneType.LIST -> true
         is KneType.NULLABLE -> (type as KneType.NULLABLE).inner == KneType.STRING
+        is KneType.DATA_CLASS -> false // Data class returns use per-field out-params, not a single buffer
         else -> false
     }
 
@@ -250,6 +275,24 @@ class RustBridgeGenerator {
             }
             KneType.UNIT -> {
                 appendLine("        $expr;")
+            }
+            is KneType.DATA_CLASS -> {
+                appendLine("        let result = $expr;")
+                val dc = returnType as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    when (field.type) {
+                        KneType.STRING -> {
+                            appendLine("        let _f_bytes = result.${field.name}.as_bytes();")
+                            appendLine("        if (_f_bytes.len() as i32) < out_${field.name}_len {")
+                            appendLine("            unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
+                            appendLine("            unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
+                            appendLine("        }")
+                        }
+                        else -> {
+                            appendLine("        unsafe { *out_${field.name} = result.${field.name}${rustReturnConversion(field.type)}; }")
+                        }
+                    }
+                }
             }
             is KneType.OBJECT -> {
                 appendLine("        let result = $expr;")
@@ -322,6 +365,11 @@ class RustBridgeGenerator {
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
                 allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
             } else {
                 allParams.add("${p.name}: ${rustCType(p.type)}")
             }
@@ -329,6 +377,21 @@ class RustBridgeGenerator {
         if (needsBuf) {
             allParams.add("out_buf: *mut u8")
             allParams.add("out_buf_len: i32")
+        }
+        // Data class return: add per-field out-params
+        if (fn.returnType is KneType.DATA_CLASS) {
+            val dc = fn.returnType as KneType.DATA_CLASS
+            for (field in dc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        allParams.add("out_${field.name}: *mut u8")
+                        allParams.add("out_${field.name}_len: i32")
+                    }
+                    else -> {
+                        allParams.add("out_${field.name}: *mut ${rustCType(field.type)}")
+                    }
+                }
+            }
         }
         append(allParams.joinToString(", "))
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
@@ -340,7 +403,11 @@ class RustBridgeGenerator {
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
         appendReturnHandling("${fn.name}($callArgs)", fn.returnType)
         appendLine("    })) {")
-        appendLine("        Ok(v) => v,")
+        if (fn.returnType is KneType.DATA_CLASS) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
         appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
         appendLine("    }")
         appendLine("}")
@@ -366,6 +433,24 @@ class RustBridgeGenerator {
                 val typeName = (p.type as KneType.OBJECT).simpleName
                 appendLine("        let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
             }
+            is KneType.DATA_CLASS -> {
+                val dc = p.type as KneType.DATA_CLASS
+                // Convert individual string fields from C strings
+                for (field in dc.fields) {
+                    if (field.type == KneType.STRING) {
+                        appendLine("        let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
+                    }
+                }
+                // Reconstruct the struct from expanded fields
+                val fieldAssignments = dc.fields.joinToString(", ") { field ->
+                    when (field.type) {
+                        KneType.STRING -> "${field.name}: ${p.name}_${field.name}_conv.to_string()"
+                        KneType.BOOLEAN -> "${field.name}: ${p.name}_${field.name} != 0"
+                        else -> "${field.name}: ${p.name}_${field.name}"
+                    }
+                }
+                appendLine("        let ${p.name}_dc = ${dc.simpleName} { $fieldAssignments };")
+            }
             KneType.BYTE_ARRAY -> {
                 appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
             }
@@ -388,6 +473,7 @@ class RustBridgeGenerator {
             // Owned object — for now still pass as borrow
             "${p.name}_conv"
         }
+        is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
         KneType.BYTE_ARRAY -> "${p.name}_slice"
         is KneType.LIST -> "${p.name}_slice"
         else -> p.name
@@ -495,6 +581,7 @@ class RustBridgeGenerator {
         KneType.BYTE_ARRAY -> "i32"
         KneType.UNIT -> "()"
         is KneType.LIST -> "i32"
+        is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.INT, KneType.LONG, KneType.DOUBLE -> "i64"
             KneType.BOOLEAN -> "i32"
@@ -521,6 +608,7 @@ class RustBridgeGenerator {
         KneType.BOOLEAN -> "0"
         KneType.STRING -> "0" // byte count = 0
         KneType.UNIT -> "()"
+        is KneType.DATA_CLASS -> "()" // out-params pattern, void return
         is KneType.OBJECT, is KneType.INTERFACE -> "0i64"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when ((type).inner) {

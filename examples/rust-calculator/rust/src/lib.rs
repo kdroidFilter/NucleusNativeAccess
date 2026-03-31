@@ -8,16 +8,16 @@ pub enum Operation {
     Multiply,
 }
 
-/// Simple 2D point.
+/// Simple 2D point (data class -- all public fields, no complex methods).
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
-impl Point {
-    pub fn new(x: i32, y: i32) -> Self {
-        Point { x, y }
-    }
+/// A named value (data class -- mirrors Kotlin NamedValue).
+pub struct NamedValue {
+    pub name: String,
+    pub value: i32,
 }
 
 /// A stateful calculator that accumulates a value.
@@ -211,15 +211,25 @@ impl Calculator {
         }
     }
 
-    // ── Data class support (Point) ──────────────────────────────────────
+    // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {
-        Point::new(self.accumulator, self.accumulator * 2)
+        Point { x: self.accumulator, y: self.accumulator * 2 }
     }
 
     pub fn add_point(&mut self, p: &Point) -> i32 {
         self.accumulator += p.x + p.y;
         self.accumulator
+    }
+
+    pub fn get_named_value(&self) -> NamedValue {
+        let name = if self.label.is_empty() { "default".to_string() } else { self.label.clone() };
+        NamedValue { name, value: self.accumulator }
+    }
+
+    pub fn set_from_named(&mut self, nv: &NamedValue) {
+        self.accumulator = nv.value;
+        self.label = nv.name.clone();
     }
 
     // ── ByteArray support ─────────────────────────────────────────────
@@ -353,30 +363,4 @@ mod tests {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-include!("kne_bridges.rs");
+include!(concat!(env!("OUT_DIR"), "/kne_bridges.rs"));

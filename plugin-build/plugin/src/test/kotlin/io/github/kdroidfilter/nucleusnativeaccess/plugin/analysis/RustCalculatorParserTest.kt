@@ -178,20 +178,84 @@ class RustCalculatorParserTest {
         assertEquals(KneType.BYTE_ARRAY, methods["reverse_bytes"]?.returnType)
     }
 
-    // --- Point class ---
+    // --- Point data class ---
 
     @Test
-    fun `parses Point struct`() {
-        val point = module.classes.find { it.simpleName == "Point" }
-        assertNotNull("Point class should exist", point)
+    fun `Point is parsed as KneDataClass`() {
+        val point = module.dataClasses.find { it.simpleName == "Point" }
+        assertNotNull("Point should be a data class", point)
+        assertEquals(2, point!!.fields.size)
+        assertEquals("x", point.fields[0].name)
+        assertEquals(KneType.INT, point.fields[0].type)
+        assertEquals("y", point.fields[1].name)
+        assertEquals(KneType.INT, point.fields[1].type)
     }
 
     @Test
-    fun `Point constructor takes x and y`() {
-        val point = module.classes.first { it.simpleName == "Point" }
-        assertEquals(2, point.constructor.params.size)
-        assertEquals(KneType.INT, point.constructor.params[0].type)
-        assertEquals(KneType.INT, point.constructor.params[1].type)
+    fun `NamedValue is parsed as KneDataClass`() {
+        val nv = module.dataClasses.find { it.simpleName == "NamedValue" }
+        assertNotNull("NamedValue should be a data class", nv)
+        assertEquals(2, nv!!.fields.size)
+        assertEquals("name", nv.fields[0].name)
+        assertEquals(KneType.STRING, nv.fields[0].type)
+        assertEquals("value", nv.fields[1].name)
+        assertEquals(KneType.INT, nv.fields[1].type)
+    }
+
+    @Test
+    fun `Point is not in classes list`() {
+        assertNull(module.classes.find { it.simpleName == "Point" })
+    }
+
+    @Test
+    fun `NamedValue is not in classes list`() {
+        assertNull(module.classes.find { it.simpleName == "NamedValue" })
+    }
+
+    @Test
+    fun `two data classes`() {
+        assertEquals(2, module.dataClasses.size)
+    }
+
+    @Test
+    fun `get_point returns DATA_CLASS type`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val getPoint = calc.methods.find { it.name == "get_point" }
+        assertNotNull(getPoint)
+        assertTrue(getPoint!!.returnType is KneType.DATA_CLASS)
+        val dc = getPoint.returnType as KneType.DATA_CLASS
+        assertEquals("Point", dc.simpleName)
+        assertEquals(2, dc.fields.size)
+    }
+
+    @Test
+    fun `add_point takes DATA_CLASS param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val addPoint = calc.methods.find { it.name == "add_point" }
+        assertNotNull(addPoint)
+        assertEquals(1, addPoint!!.params.size)
+        assertTrue(addPoint.params[0].type is KneType.DATA_CLASS)
+        assertEquals("Point", (addPoint.params[0].type as KneType.DATA_CLASS).simpleName)
+    }
+
+    @Test
+    fun `get_named_value returns DATA_CLASS with String field`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val getNv = calc.methods.find { it.name == "get_named_value" }
+        assertNotNull(getNv)
+        assertTrue(getNv!!.returnType is KneType.DATA_CLASS)
+        val dc = getNv.returnType as KneType.DATA_CLASS
+        assertEquals("NamedValue", dc.simpleName)
+        assertEquals(KneType.STRING, dc.fields[0].type)
+    }
+
+    @Test
+    fun `set_from_named takes DATA_CLASS param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val setNamed = calc.methods.find { it.name == "set_from_named" }
+        assertNotNull(setNamed)
+        assertTrue(setNamed!!.params[0].type is KneType.DATA_CLASS)
+        assertEquals("NamedValue", (setNamed.params[0].type as KneType.DATA_CLASS).simpleName)
     }
 
     // --- Operation enum ---
@@ -272,8 +336,8 @@ class RustCalculatorParserTest {
 
     @Test
     fun `same number of classes as expected`() {
-        // Calculator + Point = 2
-        assertEquals(2, module.classes.size)
+        // Only Calculator (Point and NamedValue are data classes)
+        assertEquals(1, module.classes.size)
     }
 
     @Test
