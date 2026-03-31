@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (930+ end-to-end FFM tests)
+### Types — test coverage (960+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 930+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 960+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -401,19 +401,7 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Unsupported | Reason | Alternative |
 |-------------|--------|-------------|
 | Lambda as return type | Callback supported as param only | Return a class with methods instead |
-| `ByteArray` as callback param | Buffer lifecycle across callback boundary | Pass as `String` (Base64) or use non-callback API |
 
-### Collection limitations
-
-| Unsupported | Reason | Alternative |
-|-------------|--------|-------------|
-| `ByteArray` in `List` / `Set` / `Map` | Nested buffer management | Use `List<String>` with encoding |
-
-### Data class field limitations
-
-| Unsupported | Reason | Alternative |
-|-------------|--------|-------------|
-| `ByteArray` field | Buffer out-param not wired for DC fields | Use `String` (Base64) or separate method |
 
 ## Configuration reference
 
@@ -577,7 +565,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 930+ end-to-end tests: all types, callbacks, collections (incl. `List<DataClass>` params), collection properties, data class collection fields, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 960+ end-to-end tests: all types, callbacks, collections (incl. `List<DataClass>` params), collection properties, data class collection fields, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -586,7 +574,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 930+ end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 960+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 

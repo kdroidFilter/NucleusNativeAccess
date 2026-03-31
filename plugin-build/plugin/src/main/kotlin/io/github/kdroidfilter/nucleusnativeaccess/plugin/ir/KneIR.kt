@@ -188,7 +188,9 @@ sealed class KneType : Serializable {
             DOUBLE -> "CPointer<DoubleVar>?"
             FLOAT -> "CPointer<FloatVar>?"
             SHORT -> "CPointer<ShortVar>?"
-            BYTE, STRING -> "CPointer<ByteVar>?" // String: packed null-terminated
+            BYTE -> "CPointer<ByteVar>?"
+            STRING -> "CPointer<ByteVar>?" // packed null-terminated
+            BYTE_ARRAY -> "CPointer<LongVar>?" // StableRef handles
             is ENUM -> "CPointer<IntVar>?" // ordinals
             is OBJECT -> "CPointer<LongVar>?" // handles
             is LIST, is SET, is MAP -> "CPointer<LongVar>?" // nested collection handles
@@ -219,6 +221,7 @@ sealed class KneType : Serializable {
             STRING -> "JAVA_BYTE" // packed buffer uses byte layout
             is ENUM -> "JAVA_INT"
             is OBJECT -> "JAVA_LONG"
+            BYTE_ARRAY -> "JAVA_LONG" // StableRef handles
             is LIST, is SET, is MAP -> "JAVA_LONG" // nested collection handles
             else -> "JAVA_BYTE"
         }

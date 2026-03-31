@@ -29,3 +29,8 @@ data class TaggedList(val label: String, val scores: List<Int>)
 data class MetadataHolder(val name: String, val metadata: Map<String, Int>)
 
 data class MultiCollDC(val tags: List<String>, val flags: List<Boolean>, val counts: List<Int>)
+
+data class BinaryPayload(val name: String, val data: ByteArray) {
+    override fun equals(other: Any?): Boolean = other is BinaryPayload && name == other.name && data.contentEquals(other.data)
+    override fun hashCode(): Int = 31 * name.hashCode() + data.contentHashCode()
+}

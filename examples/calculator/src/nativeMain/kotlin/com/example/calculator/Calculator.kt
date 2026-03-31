@@ -215,6 +215,16 @@ class Calculator(initial: Int = 0) {
     fun withShort(fn: (Short) -> Short): Short = fn(accumulator.toShort())
     fun withByte(fn: (Byte) -> Byte): Byte = fn(accumulator.toByte())
 
+    // ── ByteArray callback params ─────────────────────────────────────────
+
+    fun onBytesReady(callback: (ByteArray) -> Unit) {
+        callback(ByteArray(accumulator.coerceAtLeast(0)) { (it % 256).toByte() })
+    }
+
+    fun transformBytes(input: ByteArray, fn: (ByteArray) -> ByteArray): ByteArray {
+        return fn(input)
+    }
+
     // ── Nullable callback params ──────────────────────────────────────────
 
     fun onValueChangedOrNull(callback: ((Int) -> Unit)?): Boolean {
@@ -796,6 +806,33 @@ class Calculator(initial: Int = 0) {
             flags = listOf(accumulator > 0, accumulator % 2 == 0),
             counts = listOf(accumulator, accumulator + 1, accumulator + 2),
         )
+    }
+
+    // ── ByteArray in collections ──────────────────────────────────────────
+
+    fun getByteChunks(): List<ByteArray> {
+        return listOf(
+            byteArrayOf(1, 2, 3),
+            byteArrayOf(4, 5, 6, 7),
+            ByteArray(accumulator.coerceAtLeast(0)) { (it % 256).toByte() },
+        )
+    }
+
+    fun countByteChunks(chunks: List<ByteArray>): Int {
+        accumulator = chunks.sumOf { it.size }
+        return accumulator
+    }
+
+    // ── ByteArray DC field ──────────────────────────────────────────────────
+
+    fun getBinaryPayload(): BinaryPayload {
+        return BinaryPayload("payload_$accumulator", ByteArray(accumulator.coerceAtLeast(0)) { (it % 256).toByte() })
+    }
+
+    fun applyBinaryPayload(bp: BinaryPayload): Int {
+        label = bp.name
+        accumulator = bp.data.size
+        return accumulator
     }
 
     // ── Nested collections ──────────────────────────────────────────────────
