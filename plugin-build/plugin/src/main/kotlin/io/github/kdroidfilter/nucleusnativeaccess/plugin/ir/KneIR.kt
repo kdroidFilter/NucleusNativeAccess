@@ -63,6 +63,8 @@ data class KneFunction(
     val isExtension: Boolean = false,
     val receiverType: KneType? = null,
     val isOverride: Boolean = false,
+    /** True if the method takes `&mut self` (Rust). Used by Rust bridge generator. */
+    val isMutating: Boolean = false,
 ) : Serializable
 
 data class KneProperty(
@@ -76,6 +78,8 @@ data class KneParam(
     val name: String,
     val type: KneType,
     val hasDefault: Boolean = false,
+    /** True if this param is borrowed (`&str`, `&T`) in Rust. Affects bridge codegen. */
+    val isBorrowed: Boolean = false,
 ) : Serializable
 
 sealed class KneType : Serializable {

@@ -140,6 +140,11 @@ class RustBridgeGenerator {
         for (method in cls.methods) {
             appendMethod(method, cls, prefix)
         }
+
+        // Properties
+        for (prop in cls.properties) {
+            appendPropertyBridges(prop, cls, prefix)
+        }
     }
 
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
@@ -157,7 +162,11 @@ class RustBridgeGenerator {
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-        appendLine("        let obj = unsafe { &mut *(handle as *mut ${cls.simpleName}) };")
+        if (fn.isMutating) {
+            appendLine("        let obj = unsafe { &mut *(handle as *mut ${cls.simpleName}) };")
+        } else {
+            appendLine("        let obj = unsafe { &*(handle as *const ${cls.simpleName}) };")
+        }
         for (p in fn.params) {
             appendParamConversion(p)
         }
@@ -169,6 +178,49 @@ class RustBridgeGenerator {
         appendLine("    }")
         appendLine("}")
         appendLine()
+    }
+
+    private fun StringBuilder.appendPropertyBridges(prop: KneProperty, cls: KneClass, prefix: String) {
+        val className = cls.simpleName
+        val sym = "${prefix}_${className}"
+        val needsBuf = needsOutputBuffer(prop.type)
+
+        // Getter bridge
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_get_${prop.name}(handle: i64")
+        if (needsBuf) append(", out_buf: *mut u8, out_buf_len: i32")
+        appendLine(") -> ${rustCReturnType(prop.type)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        appendLine("        let obj = unsafe { &*(handle as *const $className) };")
+        appendReturnHandling("obj.get_${prop.name}()", prop.type)
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(prop.type)} }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+
+        // Setter bridge (only if mutable)
+        if (prop.mutable) {
+            val param = KneParam("value", prop.type)
+            appendLine("#[no_mangle]")
+            append("pub extern \"C\" fn ${sym}_set_${prop.name}(handle: i64")
+            append(", value: ${rustCType(prop.type)}")
+            appendLine(") {")
+            appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendLine("        let obj = unsafe { &mut *(handle as *mut $className) };")
+            appendParamConversion(param)
+            val callArg = convertedParamName(param)
+            appendLine("        obj.set_${prop.name}($callArg);")
+            appendLine("    })) {")
+            appendLine("        Ok(_) => {},")
+            appendLine("        Err(e) => { kne_set_panic_error(e); }")
+            appendLine("    }")
+            appendLine("}")
+            appendLine()
+        }
     }
 
     private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
@@ -309,12 +361,18 @@ class RustBridgeGenerator {
         }
     }
 
-    /** Param name for method calls — String passes owned (clone), works for both &str and String params. */
+    /** Param name for method calls — uses isBorrowed to decide &str vs String, &T vs T. */
     private fun convertedParamName(p: KneParam): String = when (p.type) {
-        KneType.STRING -> "${p.name}_str.clone()"
+        KneType.STRING -> if (p.isBorrowed) "${p.name}_conv" else "${p.name}_str.clone()"
         KneType.BOOLEAN -> "${p.name}_conv"
         is KneType.ENUM -> "&${p.name}_conv"
-        is KneType.OBJECT -> "${p.name}_conv"
+        is KneType.OBJECT -> if (p.isBorrowed) {
+            // Borrowed object: pass as &T
+            "${p.name}_conv"
+        } else {
+            // Owned object — for now still pass as borrow
+            "${p.name}_conv"
+        }
         else -> p.name
     }
 

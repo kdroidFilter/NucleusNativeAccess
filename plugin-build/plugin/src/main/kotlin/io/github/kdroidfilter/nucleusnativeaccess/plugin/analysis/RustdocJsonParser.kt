@@ -13,15 +13,29 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
  */
 class RustdocJsonParser {
 
+    /** Set during [parse]; used by [resolveType] to build fqNames for struct/enum references. */
+    private var currentCrateName: String = ""
+
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
         return this.asString
     }
 
+    /**
+     * Result of resolving a rustdoc JSON type: the mapped [KneType] plus whether
+     * the original type was wrapped in a `borrowed_ref`.
+     */
+    private data class ResolvedType(val type: KneType, val isBorrowed: Boolean = false)
+
     fun parse(json: String, libName: String): KneModule {
         val root = JsonParser.parseString(json).asJsonObject
         val index = root.getAsJsonObject("index")
         val rootModuleId = root.get("root").asInt
+
+        // Derive crate name from the root module
+        val rootModule = index.get(rootModuleId.toString())?.asJsonObject
+        val crateName = rootModule?.get("name").safeString() ?: libName
+        currentCrateName = crateName
 
         // Collect known types first (for type resolution)
         val knownStructs = mutableMapOf<Int, String>() // id → simpleName
@@ -43,7 +57,8 @@ class RustdocJsonParser {
         }
 
         // Collect inherent impl blocks (trait_ == null) and map struct id → method items
-        val implMethods = mutableMapOf<Int, MutableList<JsonObject>>() // struct id → methods
+        // Each method item is paired with a Boolean indicating if &mut self
+        val implMethods = mutableMapOf<Int, MutableList<Pair<JsonObject, Boolean>>>() // struct id → (item, isMutating)
         val implConstructors = mutableMapOf<Int, JsonObject?>()        // struct id → new() fn
 
         for ((_, item) in index.entrySet()) {
@@ -71,7 +86,8 @@ class RustdocJsonParser {
                 if (methodName == "new" && !hasSelfParam(inputs)) {
                     implConstructors[structId] = methodItem
                 } else if (hasSelfParam(inputs)) {
-                    implMethods.getOrPut(structId) { mutableListOf() }.add(methodItem)
+                    val isMutating = isSelfMutable(inputs)
+                    implMethods.getOrPut(structId) { mutableListOf() }.add(methodItem to isMutating)
                 }
                 // Static methods (no self, not "new") → could be companion, skip for now
             }
@@ -85,19 +101,22 @@ class RustdocJsonParser {
             // Build constructor from "new" function or from struct fields
             val constructor = buildConstructor(implConstructors[id], structItem, index, knownStructs, knownEnums)
 
-            // Build methods
-            val methods = (implMethods[id] ?: emptyList()).mapNotNull { methodItem ->
-                buildMethod(methodItem, knownStructs, knownEnums)
+            // Build methods (passing isMutating from the self param)
+            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { (methodItem, isMutating) ->
+                buildMethod(methodItem, knownStructs, knownEnums, isMutating)
             }
 
-            val fqName = "kne_test_calculator.$name"
+            // Extract properties from get_/set_ patterns
+            val (methods, properties) = extractProperties(allMethods)
+
+            val fqName = "$crateName.$name"
             classes.add(
                 KneClass(
                     simpleName = name,
                     fqName = fqName,
                     constructor = constructor,
                     methods = methods,
-                    properties = emptyList(),
+                    properties = properties,
                 )
             )
         }
@@ -133,14 +152,13 @@ class RustdocJsonParser {
             enums.add(
                 KneEnum(
                     simpleName = name,
-                    fqName = "kne_test_calculator.$name",
+                    fqName = "$crateName.$name",
                     entries = entries,
                 )
             )
         }
 
         // Build top-level functions (functions in the root module, not inside impl blocks)
-        val rootModule = index.get(rootModuleId.toString())?.asJsonObject
         val rootItems = rootModule?.getAsJsonObject("inner")
             ?.getAsJsonObject("module")
             ?.getAsJsonArray("items") ?: com.google.gson.JsonArray()
@@ -161,7 +179,7 @@ class RustdocJsonParser {
             if (hasUnresolvedGenerics(generics)) continue
 
             val params = buildParams(inputs, knownStructs, knownEnums)
-            val returnType = resolveType(sig.get("output"), knownStructs, knownEnums) ?: KneType.UNIT
+            val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums)?.type ?: KneType.UNIT
             topLevelFunctions.add(
                 KneFunction(
                     name = name,
@@ -172,7 +190,6 @@ class RustdocJsonParser {
         }
 
         // Derive package from crate name
-        val crateName = rootModule?.get("name").safeString() ?: libName
         val pkg = crateName.replace('-', '.').replace('_', '.')
 
         return KneModule(
@@ -199,6 +216,20 @@ class RustdocJsonParser {
         val firstParam = inputs[0].asJsonArray
         val paramName = firstParam[0].asString
         return paramName == "self"
+    }
+
+    /**
+     * Checks if the self param is `&mut self` by inspecting `borrowed_ref.is_mutable`.
+     */
+    private fun isSelfMutable(inputs: com.google.gson.JsonArray): Boolean {
+        if (inputs.size() == 0) return false
+        val firstParam = inputs[0].asJsonArray
+        if (firstParam[0].asString != "self") return false
+        val typeObj = firstParam[1].asJsonObject
+        if (!typeObj.has("borrowed_ref")) return false
+        val ref = typeObj.getAsJsonObject("borrowed_ref")
+        val isMutable = ref.get("is_mutable")
+        return isMutable != null && !isMutable.isJsonNull && isMutable.asBoolean
     }
 
     private fun hasUnresolvedGenerics(generics: JsonObject): Boolean {
@@ -250,6 +281,7 @@ class RustdocJsonParser {
         methodItem: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        isMutating: Boolean = false,
     ): KneFunction? {
         val name = methodItem.get("name").safeString() ?: return null
         val inner = methodItem.getAsJsonObject("inner").getAsJsonObject("function")
@@ -260,12 +292,13 @@ class RustdocJsonParser {
         val inputs = sig.getAsJsonArray("inputs")
         // Skip the &self/&mut self param
         val params = buildParams(inputs, knownStructs, knownEnums, skipSelf = true)
-        val returnType = resolveType(sig.get("output"), knownStructs, knownEnums) ?: KneType.UNIT
+        val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums)?.type ?: KneType.UNIT
 
         return KneFunction(
             name = name,
             params = params,
             returnType = returnType,
+            isMutating = isMutating,
         )
     }
 
@@ -281,15 +314,39 @@ class RustdocJsonParser {
             val paramName = arr[0].asString
             if (skipSelf && paramName == "self") continue
             val paramTypeJson = arr[1]
-            val type = resolveType(paramTypeJson, knownStructs, knownEnums) ?: continue
-            params.add(KneParam(paramName, type))
+            val resolved = resolveTypeWithBorrow(paramTypeJson, knownStructs, knownEnums) ?: continue
+            params.add(KneParam(paramName, resolved.type, isBorrowed = resolved.isBorrowed))
         }
         return params
     }
 
     /**
+     * Top-level type resolution that tracks whether the original type was a `borrowed_ref`.
+     * This is the entry point; internal recursion uses [resolveType].
+     */
+    private fun resolveTypeWithBorrow(
+        typeJson: JsonElement?,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+    ): ResolvedType? {
+        if (typeJson == null || typeJson.isJsonNull) return null
+        val obj = typeJson.asJsonObject
+
+        if (obj.has("borrowed_ref")) {
+            val ref = obj.getAsJsonObject("borrowed_ref")
+            val innerType = ref.getAsJsonObject("type")
+            val resolved = resolveType(innerType, knownStructs, knownEnums) ?: return null
+            return ResolvedType(resolved, isBorrowed = true)
+        }
+
+        val resolved = resolveType(obj, knownStructs, knownEnums) ?: return null
+        return ResolvedType(resolved, isBorrowed = false)
+    }
+
+    /**
      * Resolves a rustdoc JSON type to a [KneType].
      * Returns null if the type is not mappable.
+     * Does NOT track borrow status — use [resolveTypeWithBorrow] for that.
      */
     private fun resolveType(
         typeJson: JsonElement?,
@@ -315,15 +372,13 @@ class RustdocJsonParser {
             }
         }
 
-        // Borrowed reference (&T, &mut T)
+        // Borrowed reference (&T, &mut T) — when reached via internal recursion
         if (obj.has("borrowed_ref")) {
             val ref = obj.getAsJsonObject("borrowed_ref")
             val innerType = ref.getAsJsonObject("type")
-            // &str → STRING
             if (innerType.has("primitive") && innerType.get("primitive").asString == "str") {
                 return KneType.STRING
             }
-            // &T where T is a known struct → OBJECT
             return resolveType(innerType, knownStructs, knownEnums)
         }
 
@@ -366,10 +421,10 @@ class RustdocJsonParser {
                     // Check if it's a known struct or enum
                     if (id != null && knownEnums.containsKey(id)) {
                         val name = knownEnums[id]!!
-                        KneType.ENUM("kne_test_calculator.$name", name)
+                        KneType.ENUM("$currentCrateName.$name", name)
                     } else if (id != null && knownStructs.containsKey(id)) {
                         val name = knownStructs[id]!!
-                        KneType.OBJECT("kne_test_calculator.$name", name)
+                        KneType.OBJECT("$currentCrateName.$name", name)
                     } else {
                         null
                     }
@@ -423,5 +478,55 @@ class RustdocJsonParser {
         val valType = if (second.has("type")) resolveType(second.getAsJsonObject("type"), knownStructs, knownEnums) else null
         if (keyType == null || valType == null) return null
         return keyType to valType
+    }
+
+    /**
+     * Detects get_/set_ accessor patterns among [methods] and converts them to [KneProperty] entries.
+     *
+     * Rules:
+     * - `get_X()` with no params and a simple return type (primitives, STRING, BOOLEAN, ENUM)
+     *   becomes a read-only property `X`.
+     * - If a matching `set_X(value: T)` exists (1 param, same type), the property becomes mutable.
+     * - OBJECT and LIST return types are skipped (too complex for now).
+     * - Matched get_/set_ methods are removed from the returned methods list.
+     */
+    private fun extractProperties(methods: List<KneFunction>): Pair<List<KneFunction>, List<KneProperty>> {
+        val getters = mutableMapOf<String, KneFunction>() // propName → getter fn
+        val setters = mutableMapOf<String, KneFunction>() // propName → setter fn
+
+        for (fn in methods) {
+            if (fn.name.startsWith("get_") && fn.params.isEmpty()) {
+                val propName = fn.name.removePrefix("get_")
+                // Only simple types become properties
+                if (isSimplePropertyType(fn.returnType)) {
+                    getters[propName] = fn
+                }
+            } else if (fn.name.startsWith("set_") && fn.params.size == 1 && fn.returnType == KneType.UNIT) {
+                val propName = fn.name.removePrefix("set_")
+                setters[propName] = fn
+            }
+        }
+
+        val properties = mutableListOf<KneProperty>()
+        val consumedMethods = mutableSetOf<String>() // fn names consumed as properties
+
+        for ((propName, getter) in getters) {
+            val setter = setters[propName]
+            val mutable = setter != null && setter.params[0].type == getter.returnType
+            properties.add(KneProperty(propName, getter.returnType, mutable))
+            consumedMethods.add(getter.name)
+            if (mutable) consumedMethods.add(setter!!.name)
+        }
+
+        val remainingMethods = methods.filter { it.name !in consumedMethods }
+        return remainingMethods to properties
+    }
+
+    /** Returns true for types that are simple enough to expose as properties. */
+    private fun isSimplePropertyType(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> true
+        is KneType.ENUM -> true
+        else -> false
     }
 }

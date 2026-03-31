@@ -111,15 +111,29 @@ class RustCalculatorParserTest {
     }
 
     @Test
-    fun `Calculator has property accessors`() {
+    fun `Calculator has properties extracted from get_ set_ accessors`() {
         val calc = module.classes.first { it.simpleName == "Calculator" }
+        val props = calc.properties.associateBy { it.name }
+
+        // label: get_label + set_label → mutable String property
+        assertNotNull(props["label"])
+        assertEquals(KneType.STRING, props["label"]!!.type)
+        assertTrue("label should be mutable", props["label"]!!.mutable)
+
+        // scale: get_scale + set_scale → mutable Double property
+        assertNotNull(props["scale"])
+        assertEquals(KneType.DOUBLE, props["scale"]!!.type)
+        assertTrue("scale should be mutable", props["scale"]!!.mutable)
+
+        // enabled: get_enabled + set_enabled → mutable Boolean property
+        assertNotNull(props["enabled"])
+        assertEquals(KneType.BOOLEAN, props["enabled"]!!.type)
+        assertTrue("enabled should be mutable", props["enabled"]!!.mutable)
+
+        // get_/set_ methods should be removed from methods list
         val methodNames = calc.methods.map { it.name }
-        assertTrue("get_label", "get_label" in methodNames)
-        assertTrue("set_label", "set_label" in methodNames)
-        assertTrue("get_scale", "get_scale" in methodNames)
-        assertTrue("set_scale", "set_scale" in methodNames)
-        assertTrue("get_enabled", "get_enabled" in methodNames)
-        assertTrue("set_enabled", "set_enabled" in methodNames)
+        assertFalse("get_label should not be in methods", "get_label" in methodNames)
+        assertFalse("set_label should not be in methods", "set_label" in methodNames)
     }
 
     @Test

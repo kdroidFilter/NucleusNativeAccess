@@ -48,7 +48,7 @@ fun CalculatorApp() {
     var error by remember { mutableStateOf<String?>(null) }
 
     fun updateDisplay() {
-        display = calc.get_current().toString()
+        display = calc.current.toString()
         description = calc.describe()
         error = null
     }

@@ -75,20 +75,19 @@ class RustdocJsonParserTest {
     }
 
     @Test
-    fun `Calculator has get_value method returning Int`() {
+    fun `Calculator has value property extracted from get_value`() {
         val calc = module.classes.first { it.simpleName == "Calculator" }
-        val getVal = calc.methods.find { it.name == "get_value" }
-        assertNotNull("get_value method should exist", getVal)
-        assertEquals(0, getVal!!.params.size)
-        assertEquals(KneType.INT, getVal.returnType)
+        val valueProp = calc.properties.find { it.name == "value" }
+        assertNotNull("value property should exist (extracted from get_value)", valueProp)
+        assertEquals(KneType.INT, valueProp!!.type)
     }
 
     @Test
-    fun `Calculator has get_name method returning String`() {
+    fun `Calculator has name property extracted from get_name`() {
         val calc = module.classes.first { it.simpleName == "Calculator" }
-        val getName = calc.methods.find { it.name == "get_name" }
-        assertNotNull("get_name method should exist", getName)
-        assertEquals(KneType.STRING, getName!!.returnType)
+        val nameProp = calc.properties.find { it.name == "name" }
+        assertNotNull("name property should exist (extracted from get_name)", nameProp)
+        assertEquals(KneType.STRING, nameProp!!.type)
     }
 
     @Test
