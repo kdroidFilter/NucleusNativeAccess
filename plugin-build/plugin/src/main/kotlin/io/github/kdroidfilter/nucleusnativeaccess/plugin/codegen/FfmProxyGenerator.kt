@@ -2789,9 +2789,11 @@ class FfmProxyGenerator {
             appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
 
             val arenaNeeded = needsConfinedArena(fn.params, fn.returnType)
-            if (arenaNeeded) {
+            val hasCollectionParams = fn.params.any { it.type == KneType.BYTE_ARRAY || it.type is KneType.LIST || it.type is KneType.SET }
+            if (arenaNeeded || hasCollectionParams) {
                 appendLine("        Arena.ofConfined().use { arena ->")
                 appendStringInvokeArgsAlloc("            ", fn.params)
+                appendCollectionParamAlloc("            ", fn.params)
                 val invokeArgs = buildTopLevelInvokeArgs(fn)
                 appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs)
                 appendLine("        }")
@@ -2949,7 +2951,15 @@ class FfmProxyGenerator {
 
     private fun buildTopLevelDescriptor(fn: KneFunction): String {
         val paramLayouts = buildList {
-            fn.params.forEach { p -> add(p.type.ffmLayout) }
+            fn.params.forEach { p ->
+                if (p.type == KneType.BYTE_ARRAY) {
+                    add("ADDRESS"); add("JAVA_INT")
+                } else if (p.type is KneType.LIST || p.type is KneType.SET) {
+                    add("ADDRESS"); add("JAVA_INT")
+                } else {
+                    add(p.type.ffmLayout)
+                }
+            }
             if (fn.returnType.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
@@ -3050,7 +3060,19 @@ class FfmProxyGenerator {
 
     private fun buildTopLevelInvokeArgs(fn: KneFunction): String {
         val args = buildList {
-            fn.params.forEach { p -> add(buildJvmInvokeArg(p.name, p.type)) }
+            fn.params.forEach { p ->
+                when {
+                    p.type == KneType.BYTE_ARRAY -> {
+                        add("${p.name}Seg")
+                        add("${p.name}.size")
+                    }
+                    p.type is KneType.LIST || p.type is KneType.SET -> {
+                        add("${p.name}Seg")
+                        add("${p.name}.size")
+                    }
+                    else -> add(buildJvmInvokeArg(p.name, p.type))
+                }
+            }
         }
         return args.joinToString(", ")
     }
