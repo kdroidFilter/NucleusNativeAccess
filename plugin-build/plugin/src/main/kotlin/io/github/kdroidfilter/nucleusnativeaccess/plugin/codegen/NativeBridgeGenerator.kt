@@ -2126,6 +2126,10 @@ class NativeBridgeGenerator {
                 appendLine("                val _ref = StableRef.create($valueExpr)")
                 appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
             }
+            KneType.BYTE_ARRAY -> {
+                appendLine("                val _ref = StableRef.create($valueExpr)")
+                appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
+            }
             is KneType.OBJECT -> {
                 appendLine("                val _ref = StableRef.create($valueExpr)")
                 appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")

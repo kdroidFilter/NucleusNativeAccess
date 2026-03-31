@@ -522,6 +522,19 @@ class Calculator(initial: Int = 0) {
         emit(true); emit(false); emit(accumulator > 0)
     }
 
+    // ── Flow<ByteArray> support ─────────────────────────────────────────────────
+
+    fun byteChunks(count: Int, chunkSize: Int): kotlinx.coroutines.flow.Flow<ByteArray> = kotlinx.coroutines.flow.flow {
+        repeat(count) { i ->
+            kotlinx.coroutines.delay(3)
+            emit(ByteArray(chunkSize) { ((i * chunkSize + it) % 256).toByte() })
+        }
+    }
+
+    fun singleByteFlow(): kotlinx.coroutines.flow.Flow<ByteArray> = kotlinx.coroutines.flow.flow {
+        emit(byteArrayOf(1, 2, 3))
+    }
+
     // ── Flow<Collection> support ────────────────────────────────────────────────
 
     fun scoresFlow(count: Int): kotlinx.coroutines.flow.Flow<List<Int>> = kotlinx.coroutines.flow.flow {
