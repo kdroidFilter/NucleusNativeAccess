@@ -32,7 +32,7 @@ jobs:
           sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
 
       - name: Build calculator (compile tests without running)
-        run: ./gradlew :examples:calculator:jvmTestClasses :examples:calculator:compileNativeMainKotlinMetadata
+        run: ./gradlew :examples:calculator:jvmTestClasses :examples:calculator:compileKotlinLinuxX64
 
   test:
     needs: build
