@@ -53,7 +53,9 @@ jobs:
           - LoadAndConcurrencyTest
           - CollectionTest
           - EdgeCaseTest
-          - SuspendFunctionTest
+          - SuspendBasicTest
+          - SuspendHeavyTest
+          - SuspendCrossFeatureTest
           - FlowDataClassTest
           - SuspendDataClassTest
           - SuspendCollectionTest
