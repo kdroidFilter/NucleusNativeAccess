@@ -2,9 +2,11 @@
 
 [![Gradle Plugin Portal](https://img.shields.io/maven-metadata/v?metadataUrl=https%3A%2F%2Fplugins.gradle.org%2Fm2%2Fio%2Fgithub%2Fkdroidfilter%2Fnucleusnativeaccess%2Fio.github.kdroidfilter.nucleusnativeaccess.gradle.plugin%2Fmaven-metadata.xml&label=Gradle%20Plugin%20Portal)](https://plugins.gradle.org/plugin/io.github.kdroidfilter.nucleusnativeaccess)
 
-A Gradle plugin that lets you use **Kotlin/Native code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation, callbacks &mdash; everything is transparent to the JVM developer.
+A Gradle plugin that lets you use **Kotlin/Native or Rust code directly from the JVM** as if it were a regular JVM library. Classes, methods, properties, enums, nullable types, companion objects, exception propagation, callbacks &mdash; everything is transparent to the JVM developer.
 
 Under the hood, the plugin generates [FFM (Foreign Function & Memory API)](https://openjdk.org/jeps/454) bindings inspired by [swift-java](https://github.com/swiftlang/swift-java) and [swift-export-standalone](https://github.com/JetBrains/kotlin/tree/master/native/swift/swift-export-standalone).
+
+**NEW: Rust Import** &mdash; import any Rust crate and use it from Kotlin/JVM as if it were a Kotlin library. No modifications to the Rust crate required.
 
 ## How it works
 
@@ -112,6 +114,101 @@ fun main() {
 ```
 
 No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from JVM.
+
+## Rust Import (experimental)
+
+Import **any Rust crate** and use it from Kotlin/JVM as if it were a Kotlin library. No modifications to the Rust crate required &mdash; unlike UniFFI/Gobley which require `#[uniffi::export]` annotations.
+
+```
+Rust crate (any)                Plugin generates              JVM developer sees
+────────────────              ────────────────              ──────────────────
+pub struct Calculator {  →    rustdoc JSON → parse      →   class Calculator : AutoCloseable {
+  pub fn add(&mut self, n)    #[no_mangle] bridges            fun add(n: Int): Int
+  pub fn get_current(&self)   + FFM MethodHandles              val current: Int
+}                             + cargo build → .so              // backed by Rust, via FFM
+                                                           }
+```
+
+**Pipeline:**
+
+1. Plugin runs `cargo rustdoc --output-format json` to extract the crate's public API
+2. Parses the rustdoc JSON &mdash; structs, enums, methods, functions, types
+3. Generates Rust `#[no_mangle] pub extern "C" fn` bridge wrappers (same symbol convention as Kotlin/Native)
+4. Reuses the existing `FfmProxyGenerator` to produce JVM proxy classes
+5. Runs `cargo build --release` to produce the shared library
+6. Bundles the `.so`/`.dylib`/`.dll` into the JAR
+
+### Quick start (Rust)
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("multiplatform") version "2.3.20"
+    id("io.github.kdroidfilter.nucleusnativeaccess")
+}
+
+kotlin {
+    jvmToolchain(25)
+    jvm()
+}
+
+rustImport {
+    libraryName = "mylib"
+    jvmPackage = "com.example.mylib"
+    cratePath("my-crate", "../rust")     // local crate
+    // crate("some-crate", "1.0")        // from crates.io
+    // crateGit("name", "https://...", branch = "main")  // from git
+}
+```
+
+```rust
+// rust/src/lib.rs — write normal Rust, no special annotations
+pub struct Calculator {
+    accumulator: i32,
+}
+
+impl Calculator {
+    pub fn new(initial: i32) -> Self { Calculator { accumulator: initial } }
+    pub fn add(&mut self, value: i32) -> i32 { self.accumulator += value; self.accumulator }
+    pub fn get_current(&self) -> i32 { self.accumulator }
+    pub fn describe(&self) -> String { format!("Calculator(current={})", self.accumulator) }
+}
+
+pub enum Operation { Add, Subtract, Multiply }
+
+pub fn greet(name: String) -> String { format!("Hello, {}!", name) }
+```
+
+```kotlin
+// src/jvmMain/kotlin/Main.kt — transparent, same API as Kotlin/Native
+fun main() {
+    val calc = Calculator(0)
+    calc.add(5)
+    calc.add(3)
+    println(calc.current)     // 8
+    println(calc.describe())  // "Calculator(current=8)"
+    calc.close()
+}
+```
+
+### What's supported (Rust)
+
+| Rust construct | Mapped to | Notes |
+|----------------|-----------|-------|
+| `pub struct` with methods | `KneClass` (opaque handle) | `Box::into_raw` / `Box::from_raw` lifecycle |
+| `pub struct` (all-pub fields, no methods) | `KneDataClass` (field expansion) | Marshalled by value |
+| `pub enum` (fieldless) | `KneEnum` | Ordinal mapping |
+| `impl` methods (`&self`) | Instance methods | Immutable borrow |
+| `impl` methods (`&mut self`) | Instance methods | Mutable borrow |
+| `get_X()` / `set_X()` pattern | `val` / `var` properties | Auto-detected |
+| `pub fn` (top-level) | Module-level functions | Grouped in singleton object |
+| All primitives (`i32`, `i64`, `f64`, `f32`, `bool`, `i8`, `i16`) | Int, Long, Double, Float, Boolean, Byte, Short | Direct mapping |
+| `String` / `&str` | String | Borrowed vs owned auto-detected |
+| `Option<T>` return | `T?` | Sentinel-based null encoding |
+| `Vec<T>` / `&[T]` return | `List<T>` / `ByteArray` | Buffer pattern |
+| `&[u8]` / `&[i32]` params | `ByteArray` / `List<Int>` | Pointer + length expansion |
+| `HashMap<K,V>` | `Map<K,V>` | Parallel arrays |
+| Error propagation | `KotlinNativeException` | `catch_unwind` + thread-local error |
 
 ### 5. Run
 
@@ -389,6 +486,27 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 - **Memory advantage**: native allocations don't touch the JVM heap, reducing GC pressure significantly (0 KB vs 131 MB for string-heavy workloads)
 - **Thread-safe**: all concurrent benchmarks pass with zero crashes (AtomicReference error state, idempotent dispose)
 
+### Rust Benchmarks &mdash; Rust (FFM) vs Pure JVM
+
+Same methodology, same algorithms, Rust shared library via FFM instead of Kotlin/Native. Run with `./gradlew :examples:rust-benchmark:jvmTest`.
+
+| Benchmark | Rust (FFM) | JVM | Ratio | Analysis |
+|-----------|-----------|-----|-------|----------|
+| Fibonacci recursive (n=35) | 18.42 ms | 24.21 ms | **0.76x** | **Rust faster** (no JIT warmup) |
+| Fibonacci iterative (n=1M) | 0.26 ms | 0.26 ms | **1.00x** | Identical |
+| Pi Leibniz series (10M) | 8.44 ms | 8.40 ms | **1.00x** | Identical |
+| Sum array (10M) | ~0 ms | 0.67 ms | **~0x** | **Rust much faster** |
+| String concat (10K) | 0.14 ms | 18.74 ms | **0.01x** | **Rust 100x faster** (Rust string alloc) |
+| Bubble sort (5K) | 13.90 ms | 5.99 ms | 2.32x | JVM JIT better at array access |
+| FFM overhead (100K calls) | 1.86 ms | 0.24 ms | 7.63x | ~19 ns/call FFM overhead |
+| Object create+close (10K) | 1.63 ms | 0.09 ms | 17x | Box alloc+drop cost |
+| String return (10K) | 5.30 ms | 0.64 ms | 8.23x | Buffer copy overhead |
+| Data class return (10K) | 2.06 ms | 0.04 ms | 48x | Out-param marshaling |
+| Concurrent fib (10t&times;1K) | 0.94 ms | 0.45 ms | 2.07x | Thread contention |
+| Concurrent string (10t&times;1K) | 0.97 ms | 1.24 ms | **0.78x** | **Rust faster** |
+
+**Rust vs Kotlin/Native comparison**: Rust and Kotlin/Native show similar FFM overhead profiles. Rust excels at string concatenation (~100x faster than JVM) and array summation. Both are competitive on heavy compute (fibonacci, pi). The FFM call overhead is lower for Rust (~19 ns/call vs ~49 ns/call for KN).
+
 ## What's NOT supported
 
 ### Not yet implemented
@@ -579,21 +697,26 @@ desktop.close()
 
 ## Examples
 
-The repository includes two complete examples in [`examples/`](examples/):
+The repository includes examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 1700+ end-to-end tests: all types, callbacks, collections, suspend, Flow, nested classes, inheritance hierarchies, interfaces, sealed classes, extension functions, concurrency |
+| [`calculator/`](examples/calculator/) | Kotlin/Native Calculator with 1700+ end-to-end tests: all types, callbacks, collections, suspend, Flow, nested classes, inheritance, interfaces, sealed classes, extensions, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
-| [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
+| [`benchmark/`](examples/benchmark/) | Kotlin/Native performance benchmarks: native vs JVM |
+| [`rust-calculator/`](examples/rust-calculator/) | **Rust** Calculator with Compose Desktop UI &mdash; same API as the Kotlin/Native calculator, powered by Rust via FFM |
+| [`rust-benchmark/`](examples/rust-benchmark/) | **Rust** performance benchmarks: Rust vs JVM (same algorithms as KN benchmark) |
 
 Run them:
 
 ```bash
-./gradlew :examples:calculator:run
-./gradlew :examples:systeminfo:run
+# Kotlin/Native examples
 ./gradlew :examples:calculator:jvmTest    # 1700+ end-to-end FFM tests
-./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
+./gradlew :examples:benchmark:jvmTest     # KN performance benchmarks
+
+# Rust examples
+./gradlew :examples:rust-calculator:run           # Compose Desktop UI powered by Rust
+./gradlew :examples:rust-benchmark:jvmTest        # Rust performance benchmarks
 ```
 
 ## Architecture
@@ -606,18 +729,24 @@ The plugin is inspired by two projects:
 
 ```
 plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/nucleusnativeaccess/plugin/
-├── ir/                          # Intermediate representation (inspired by SirModule)
-│   └── KneIR.kt                 # KneModule, KneClass, KneFunction, KneType...
+├── ir/
+│   └── KneIR.kt                    # Shared IR: KneModule, KneClass, KneFunction, KneType...
 ├── analysis/
-│   ├── PsiSourceParser.kt       # Kotlin PSI-based source parser (kotlin-compiler-embeddable)
-│   └── PsiParseWorkAction.kt    # Gradle Worker for isolated PSI classloader
+│   ├── PsiSourceParser.kt          # Kotlin PSI-based parser (Kotlin/Native path)
+│   ├── PsiParseWorkAction.kt       # Gradle Worker for isolated PSI classloader
+│   ├── RustdocJsonParser.kt        # Rustdoc JSON parser (Rust path)
+│   └── RustWorkAction.kt           # Rust pipeline orchestration
 ├── codegen/
-│   ├── NativeBridgeGenerator.kt # @CName + StableRef bridges (inspired by @_cdecl thunks)
-│   └── FfmProxyGenerator.kt     # JVM proxy classes with FFM (inspired by FFMSwift2JavaGenerator)
+│   ├── NativeBridgeGenerator.kt    # @CName + StableRef bridges (Kotlin/Native)
+│   ├── RustBridgeGenerator.kt      # #[no_mangle] extern "C" fn bridges (Rust)
+│   └── FfmProxyGenerator.kt        # JVM proxy classes with FFM (shared, language-agnostic)
 ├── tasks/
-│   └── GenerateNativeBridgesTask.kt  # Single task: PSI parse + native bridges + JVM proxies + GraalVM metadata
-├── KotlinNativeExportExtension.kt
-└── KotlinNativeExportPlugin.kt       # Task wiring, native lib JAR bundling, test configuration
+│   ├── GenerateNativeBridgesTask.kt # Kotlin/Native bridge generation task
+│   ├── GenerateRustBindingsTask.kt  # Rust bridge + proxy generation task
+│   └── CargoBuildTask.kt           # Invokes cargo build
+├── KotlinNativeExportExtension.kt   # kotlinNativeExport { } DSL
+├── RustImportExtension.kt           # rustImport { } DSL
+└── KotlinNativeExportPlugin.kt      # Plugin entry: KMP + Rust wiring
 ```
 
 **Source analysis**: the plugin uses Kotlin PSI (`kotlin-compiler-embeddable`) for proper AST-based parsing, running in an isolated Gradle Worker classloader. This handles nested generics, function types, default parameters, multi-line constructors, and `suspend`/`Flow` detection natively &mdash; no regex.
@@ -636,6 +765,7 @@ Data classes are supported as value types (field marshalling), and `commonMain` 
 - **Gradle** 9.1+ (for JDK 25 support)
 - **JDK** 22+ (FFM stable since JDK 22 / JEP 454), recommended 25
 - **Kotlin/Native** toolchain (bundled with KMP plugin)
+- **Rust** toolchain (for `rustImport`) &mdash; `cargo` must be on PATH or in `~/.cargo/bin/`
 
 ## License
 
