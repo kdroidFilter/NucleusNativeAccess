@@ -98,10 +98,17 @@ class NativeBridgeGenerator {
         val dcTypesInSuspend = collectSuspendDcTypes(module)
         dcTypesInSuspend.forEach { dc -> appendSuspendDcBridges(dc, module.libName) }
 
-        // Generate collection reader bridges for suspend collection returns
+        // Generate collection reader bridges for suspend returns + DC collection fields
         val suspendCollTypes = collectSuspendCollectionTypes(module)
-        if (suspendCollTypes.isNotEmpty()) {
-            appendSuspendCollectionReaderBridges(module.libName, suspendCollTypes)
+        val dcFieldCollTypes = collectDcFieldCollectionTypes(module)
+        val allCollReaderTypes = suspendCollTypes + dcFieldCollTypes
+        if (allCollReaderTypes.isNotEmpty()) {
+            appendSuspendCollectionReaderBridges(module.libName, allCollReaderTypes)
+        }
+
+        // Generate wrap bridges for DC collection fields used as params
+        if (dcFieldCollTypes.isNotEmpty()) {
+            appendDcFieldCollectionWrapBridges(module.libName, dcFieldCollTypes)
         }
 
         // Generate create/add bridges for List<DC> params
@@ -312,6 +319,7 @@ class NativeBridgeGenerator {
                         when {
                             type == KneType.STRING -> "$name: CPointer<ByteVar>?"
                             type == KneType.BYTE_ARRAY -> "$name: CPointer<ByteVar>?, ${name}_size: Int"
+                            type is KneType.LIST || type is KneType.SET || type is KneType.MAP -> "$name: Long"
                             else -> "$name: ${type.nativeBridgeType}"
                         }
                     }
@@ -349,6 +357,8 @@ class NativeBridgeGenerator {
             when {
                 type == KneType.STRING -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
                 type == KneType.BYTE_ARRAY -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
+                type is KneType.LIST || type is KneType.SET || type is KneType.MAP ->
+                    ", $paramName: CPointer<LongVar>?"
                 else -> ", $paramName: CPointer<${type.nativePointerType}>?"
             }
         }
@@ -363,6 +373,9 @@ class NativeBridgeGenerator {
                 is KneType.ENUM -> "${f.name} = ${f.type.fqName}.entries[$paramName]"
                 is KneType.OBJECT -> "${f.name} = $paramName.toCPointer<COpaque>()!!.asStableRef<${f.type.fqName}>().get()"
                 is KneType.DATA_CLASS -> "${f.name} = ${buildDataClassCtorExpr(f.type, paramName)}"
+                is KneType.LIST -> "${f.name} = run { val _ref = $paramName.toCPointer<COpaque>()!!.asStableRef<Any>(); val _v = _ref.get() as List<*>; _ref.dispose(); @Suppress(\"UNCHECKED_CAST\") (_v as List<${f.type.elementType.jvmTypeName}>) }"
+                is KneType.SET -> "${f.name} = run { val _ref = $paramName.toCPointer<COpaque>()!!.asStableRef<Any>(); val _v = _ref.get() as Set<*>; _ref.dispose(); @Suppress(\"UNCHECKED_CAST\") (_v as Set<${f.type.elementType.jvmTypeName}>) }"
+                is KneType.MAP -> "${f.name} = run { val _ref = $paramName.toCPointer<COpaque>()!!.asStableRef<Any>(); val _v = _ref.get() as Map<*, *>; _ref.dispose(); @Suppress(\"UNCHECKED_CAST\") (_v as Map<${(f.type as KneType.MAP).keyType.jvmTypeName}, ${(f.type as KneType.MAP).valueType.jvmTypeName}>) }"
                 else -> "${f.name} = $paramName"
             }
         }
@@ -398,6 +411,8 @@ class NativeBridgeGenerator {
                 is KneType.ENUM -> appendLine("    $outName!![0] = $valueExpr.ordinal")
                 is KneType.OBJECT -> appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
                 is KneType.DATA_CLASS -> writeDataClassFields(valueExpr, f.type, outName)
+                is KneType.LIST, is KneType.SET, is KneType.MAP ->
+                    appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
                 else -> appendLine("    $outName!![0] = $valueExpr")
             }
         }
@@ -1481,6 +1496,148 @@ class NativeBridgeGenerator {
         }
         module.functions.forEach { scan(it) }
         return result
+    }
+
+    /** Collect all collection types used as DataClass fields. */
+    private fun collectDcFieldCollectionTypes(module: KneModule): Set<KneType> {
+        val result = mutableSetOf<KneType>()
+        fun scanDc(dc: KneType.DATA_CLASS) {
+            dc.fields.forEach { f ->
+                when (f.type) {
+                    is KneType.LIST, is KneType.SET, is KneType.MAP -> result.add(f.type)
+                    is KneType.DATA_CLASS -> scanDc(f.type)
+                    else -> {}
+                }
+            }
+        }
+        module.dataClasses.forEach { scanDc(KneType.DATA_CLASS(it.fqName, it.simpleName, it.fields)) }
+        // Also scan DCs used in function params/returns
+        fun scanType(type: KneType) {
+            when (type) {
+                is KneType.DATA_CLASS -> scanDc(type)
+                is KneType.NULLABLE -> scanType(type.inner)
+                is KneType.LIST -> if (type.elementType is KneType.DATA_CLASS) scanDc(type.elementType)
+                is KneType.SET -> if (type.elementType is KneType.DATA_CLASS) scanDc(type.elementType)
+                else -> {}
+            }
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> fn.params.forEach { scanType(it.type) }; scanType(fn.returnType) }
+            cls.companionMethods.forEach { fn -> fn.params.forEach { scanType(it.type) }; scanType(fn.returnType) }
+        }
+        module.functions.forEach { fn -> fn.params.forEach { scanType(it.type) }; scanType(fn.returnType) }
+        return result
+    }
+
+    /** Generate wrap bridges that create StableRef from buffer data (for DC param collection fields). */
+    private fun StringBuilder.appendDcFieldCollectionWrapBridges(prefix: String, types: Set<KneType>) {
+        val elemKeys = mutableSetOf<String>()
+        val mapCombinations = mutableSetOf<Pair<String, String>>()
+        for (type in types) {
+            when (type) {
+                is KneType.LIST -> if (type.elementType !is KneType.DATA_CLASS) elemKeys.add(suspendCollElemKey(type.elementType))
+                is KneType.SET -> if (type.elementType !is KneType.DATA_CLASS) elemKeys.add(suspendCollElemKey(type.elementType))
+                is KneType.MAP -> mapCombinations.add(Pair(suspendCollElemKey(type.keyType), suspendCollElemKey(type.valueType)))
+                else -> {}
+            }
+        }
+        for (key in elemKeys) {
+            appendWrapCollBridgeForKey(prefix, key)
+        }
+        for ((kk, vk) in mapCombinations) {
+            appendWrapMapBridge(prefix, kk, vk)
+        }
+    }
+
+    /** Generate a single wrap bridge for creating a List/Set StableRef from buffer data. */
+    private fun StringBuilder.appendWrapCollBridgeForKey(prefix: String, key: String) {
+        val symbolName = "${prefix}_kne_wrapColl$key"
+        when (key) {
+            "String" -> {
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(buf: CPointer<ByteVar>?, count: Int): Long {")
+                appendLine("    val _list = mutableListOf<String>()")
+                appendLine("    var _offset = 0")
+                appendLine("    for (i in 0 until count) {")
+                appendLine("        val _s = (buf!! + _offset)!!.toKString()")
+                appendLine("        _list.add(_s)")
+                appendLine("        _offset += _s.encodeToByteArray().size + 1")
+                appendLine("    }")
+                appendLine("    return StableRef.create(_list as Any).asCPointer().toLong()")
+                appendLine("}")
+                appendLine()
+            }
+            "ObjHandle" -> {
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(buf: CPointer<LongVar>?, count: Int): Long {")
+                appendLine("    val _list = List(count) { buf!![it].toCPointer<COpaque>()!!.asStableRef<Any>().get() }")
+                appendLine("    return StableRef.create(_list as Any).asCPointer().toLong()")
+                appendLine("}")
+                appendLine()
+            }
+            else -> {
+                val nativeType = when (key) {
+                    "Long" -> "LongVar"
+                    "Double" -> "DoubleVar"
+                    "Float" -> "FloatVar"
+                    else -> "IntVar"
+                }
+                val readExpr = when (key) {
+                    "Boolean" -> "buf!![it] != 0"
+                    "Enum" -> "buf!![it]" // ordinal stored, actual enum resolved on native side
+                    "Short" -> "buf!![it].toShort()"
+                    "Byte" -> "buf!![it].toByte()"
+                    else -> "buf!![it]"
+                }
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(buf: CPointer<$nativeType>?, count: Int): Long {")
+                appendLine("    val _list = List(count) { $readExpr }")
+                appendLine("    return StableRef.create(_list as Any).asCPointer().toLong()")
+                appendLine("}")
+                appendLine()
+            }
+        }
+    }
+
+    /** Generate a wrap bridge for Map StableRef creation. */
+    private fun StringBuilder.appendWrapMapBridge(prefix: String, keyKey: String, valKey: String) {
+        val symbolName = "${prefix}_kne_wrapMap${keyKey}${valKey}"
+        val keyNativeType = if (keyKey == "String") "ByteVar" else "IntVar"
+        val valNativeType = when (valKey) {
+            "String" -> "ByteVar"
+            "Long" -> "LongVar"
+            "Double" -> "DoubleVar"
+            "Float" -> "FloatVar"
+            else -> "IntVar"
+        }
+        val keyParamStr = if (keyKey == "String") "keyBuf: CPointer<ByteVar>?, keyCount: Int" else "keyBuf: CPointer<$keyNativeType>?, count: Int"
+        val valParamStr = if (valKey == "String") "valBuf: CPointer<ByteVar>?, valCount: Int" else "valBuf: CPointer<$valNativeType>?, valCount: Int"
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($keyParamStr, $valParamStr): Long {")
+
+        // Read keys
+        if (keyKey == "String") {
+            appendLine("    val _keys = mutableListOf<String>()")
+            appendLine("    var _kOff = 0")
+            appendLine("    for (i in 0 until keyCount) { val _s = (keyBuf!! + _kOff)!!.toKString(); _keys.add(_s); _kOff += _s.encodeToByteArray().size + 1 }")
+        } else {
+            appendLine("    val _keys = List(count) { keyBuf!![it] }")
+        }
+
+        // Read values
+        if (valKey == "String") {
+            appendLine("    val _vals = mutableListOf<String>()")
+            appendLine("    var _vOff = 0")
+            appendLine("    for (i in 0 until valCount) { val _s = (valBuf!! + _vOff)!!.toKString(); _vals.add(_s); _vOff += _s.encodeToByteArray().size + 1 }")
+        } else {
+            val readExpr = when (valKey) { "Long" -> "valBuf!![it]"; "Double" -> "valBuf!![it]"; "Float" -> "valBuf!![it]"; else -> "valBuf!![it]" }
+            appendLine("    val _vals = List(valCount) { $readExpr }")
+        }
+
+        appendLine("    return StableRef.create(_keys.zip(_vals).toMap() as Any).asCPointer().toLong()")
+        appendLine("}")
+        appendLine()
     }
 
     /** Determine the element layout key for a collection element type. */
