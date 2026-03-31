@@ -215,6 +215,20 @@ class Calculator(initial: Int = 0) {
     fun withShort(fn: (Short) -> Short): Short = fn(accumulator.toShort())
     fun withByte(fn: (Byte) -> Byte): Byte = fn(accumulator.toByte())
 
+    // ── Lambda return type ────────────────────────────────────────────────
+
+    fun getAdder(amount: Int): (Int) -> Int {
+        return { x -> x + amount }
+    }
+
+    fun getFormatter(): (Int) -> String {
+        return { x -> "value=$x (acc=$accumulator)" }
+    }
+
+    fun getNotifier(): (Int) -> Unit {
+        return { x -> accumulator = x }
+    }
+
     // ── ByteArray callback params ─────────────────────────────────────────
 
     fun onBytesReady(callback: (ByteArray) -> Unit) {

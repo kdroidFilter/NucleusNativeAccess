@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (960+ end-to-end FFM tests)
+### Types — test coverage (970+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 960+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
+Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 970+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -396,11 +396,6 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 
-### Callback limitations
-
-| Unsupported | Reason | Alternative |
-|-------------|--------|-------------|
-| Lambda as return type | Callback supported as param only | Return a class with methods instead |
 
 
 ## Configuration reference
@@ -565,7 +560,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 960+ end-to-end tests: all types, callbacks, collections (incl. `List<DataClass>` params), collection properties, data class collection fields, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 970+ end-to-end tests: all types, callbacks, collections (incl. `List<DataClass>` params), collection properties, data class collection fields, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -574,7 +569,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 960+ end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 970+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 
