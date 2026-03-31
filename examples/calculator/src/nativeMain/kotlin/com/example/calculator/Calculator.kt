@@ -511,6 +511,16 @@ class Calculator(initial: Int = 0) {
         return if (accumulator != 0) mapOf("val" to accumulator) else null
     }
 
+    suspend fun delayedGetByteChunks(): List<ByteArray> {
+        kotlinx.coroutines.delay(10)
+        return listOf(byteArrayOf(1, 2, 3), ByteArray(accumulator.coerceAtLeast(0)) { (it % 256).toByte() })
+    }
+
+    suspend fun delayedGetMatrix(): List<List<Int>> {
+        kotlinx.coroutines.delay(10)
+        return listOf(listOf(accumulator, accumulator + 1), listOf(accumulator * 2))
+    }
+
     suspend fun delayedGetSquares(): Map<Int, Int> {
         kotlinx.coroutines.delay(10)
         return mapOf(1 to 1, 2 to 4, accumulator to accumulator * accumulator)
