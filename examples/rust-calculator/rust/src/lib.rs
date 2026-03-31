@@ -211,6 +211,30 @@ impl Calculator {
         }
     }
 
+    // ── Nullable params (Option<T>) ────────────────────────────────────
+
+    pub fn add_optional(&mut self, value: Option<i32>) -> i32 {
+        if let Some(v) = value {
+            self.accumulator += v;
+        }
+        self.accumulator
+    }
+
+    pub fn set_nickname(&mut self, name: Option<String>) {
+        self.nickname = name;
+    }
+
+    pub fn get_nickname(&self) -> Option<String> {
+        self.nickname.clone()
+    }
+
+    pub fn add_point_or_null(&mut self, p: Option<&Point>) -> i32 {
+        if let Some(pt) = p {
+            self.accumulator += pt.x + pt.y;
+        }
+        self.accumulator
+    }
+
     // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {
@@ -313,7 +337,7 @@ mod tests {
     #[test]
     fn test_calculator_echo() {
         let calc = Calculator::new(0);
-        assert_eq!(calc.echo("hello"), "hello");
+        assert_eq!(calc.echo("hello".to_string()), "hello");
     }
 
     #[test]
@@ -346,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_greet() {
-        assert_eq!(greet("World"), "Hello, World!");
+        assert_eq!(greet("World".to_string()), "Hello, World!");
     }
 
     #[test]

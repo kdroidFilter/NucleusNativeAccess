@@ -206,6 +206,43 @@ class RustBridgeGeneratorTest {
         assertTrue(sliceCode.contains("std::slice::from_raw_parts"))
     }
 
+    @Test
+    fun `generates nullable param conversion for Option INT`() {
+        val moduleWithNullable = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "add_optional",
+                    params = listOf(KneParam("value", KneType.NULLABLE(KneType.INT))),
+                    returnType = KneType.INT,
+                    isMutating = true,
+                )
+            ))
+        )
+        val nullableCode = RustBridgeGenerator().generate(moduleWithNullable)
+        assertTrue(nullableCode.contains("value_opt"))
+        assertTrue(nullableCode.contains("Option<i32>"))
+        assertTrue(nullableCode.contains("i64::MIN"))
+    }
+
+    @Test
+    fun `generates nullable String param as pointer`() {
+        val moduleWithNullable = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "set_nickname",
+                    params = listOf(KneParam("name", KneType.NULLABLE(KneType.STRING))),
+                    returnType = KneType.UNIT,
+                    isMutating = true,
+                )
+            ))
+        )
+        val nullableCode = RustBridgeGenerator().generate(moduleWithNullable)
+        assertTrue(nullableCode.contains("name: *const c_char"))
+        assertTrue(nullableCode.contains("name_opt"))
+        assertTrue(nullableCode.contains("Option<String>"))
+        assertTrue(nullableCode.contains("is_null()"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

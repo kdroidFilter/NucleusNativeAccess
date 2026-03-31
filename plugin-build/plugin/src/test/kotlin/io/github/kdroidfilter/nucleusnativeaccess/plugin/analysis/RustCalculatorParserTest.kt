@@ -258,6 +258,36 @@ class RustCalculatorParserTest {
         assertEquals("NamedValue", (setNamed.params[0].type as KneType.DATA_CLASS).simpleName)
     }
 
+    // --- Nullable params ---
+
+    @Test
+    fun `add_optional takes NULLABLE INT param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "add_optional" }
+        assertNotNull(method)
+        assertEquals(1, method!!.params.size)
+        assertTrue("param should be NULLABLE", method.params[0].type is KneType.NULLABLE)
+        assertEquals(KneType.INT, (method.params[0].type as KneType.NULLABLE).inner)
+    }
+
+    @Test
+    fun `set_nickname takes NULLABLE STRING param`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "set_nickname" }
+        assertNotNull(method)
+        assertTrue(method!!.params[0].type is KneType.NULLABLE)
+        assertEquals(KneType.STRING, (method.params[0].type as KneType.NULLABLE).inner)
+    }
+
+    @Test
+    fun `get_nickname returns NULLABLE STRING`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "get_nickname" }
+        assertNotNull(method)
+        assertTrue(method!!.returnType is KneType.NULLABLE)
+        assertEquals(KneType.STRING, (method.returnType as KneType.NULLABLE).inner)
+    }
+
     // --- Operation enum ---
 
     @Test

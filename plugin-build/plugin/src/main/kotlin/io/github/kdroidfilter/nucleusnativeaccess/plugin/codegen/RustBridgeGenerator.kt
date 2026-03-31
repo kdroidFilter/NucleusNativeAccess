@@ -451,6 +451,24 @@ class RustBridgeGenerator {
                 }
                 appendLine("        let ${p.name}_dc = ${dc.simpleName} { $fieldAssignments };")
             }
+            is KneType.NULLABLE -> {
+                val inner = (p.type as KneType.NULLABLE).inner
+                when (inner) {
+                    KneType.INT -> appendLine("        let ${p.name}_opt: Option<i32> = if ${p.name} == i64::MIN { None } else { Some(${p.name} as i32) };")
+                    KneType.LONG -> appendLine("        let ${p.name}_opt: Option<i64> = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
+                    KneType.STRING -> {
+                        appendLine("        let ${p.name}_opt: Option<String> = if ${p.name}.is_null() { None } else {")
+                        appendLine("            Some(unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\").to_string())")
+                        appendLine("        };")
+                    }
+                    KneType.BOOLEAN -> appendLine("        let ${p.name}_opt: Option<bool> = if ${p.name} < 0 { None } else { Some(${p.name} != 0) };")
+                    KneType.DOUBLE -> appendLine("        let ${p.name}_opt: Option<f64> = if ${p.name} == i64::MIN { None } else { Some(f64::from_ne_bytes(${p.name}.to_ne_bytes())) };")
+                    KneType.FLOAT -> appendLine("        let ${p.name}_opt: Option<f32> = if ${p.name} == i64::MIN { None } else { Some(f32::from_ne_bytes((${p.name} as i32).to_ne_bytes())) };")
+                    is KneType.OBJECT -> appendLine("        let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const ${inner.simpleName}) }) };")
+                    is KneType.DATA_CLASS -> appendLine("        let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const ${inner.simpleName}) }) };")
+                    else -> appendLine("        let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
+                }
+            }
             KneType.BYTE_ARRAY -> {
                 appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
             }
@@ -474,6 +492,7 @@ class RustBridgeGenerator {
             "${p.name}_conv"
         }
         is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
+        is KneType.NULLABLE -> "${p.name}_opt"
         KneType.BYTE_ARRAY -> "${p.name}_slice"
         is KneType.LIST -> "${p.name}_slice"
         else -> p.name
@@ -565,7 +584,11 @@ class RustBridgeGenerator {
         is KneType.OBJECT -> "i64" // opaque handle
         is KneType.INTERFACE -> "i64"
         is KneType.ENUM -> "i32" // ordinal
-        is KneType.NULLABLE -> "i64" // widened or sentinel
+        is KneType.NULLABLE -> when ((type).inner) {
+            KneType.STRING -> "*const c_char" // null pointer = None
+            KneType.BOOLEAN -> "i32" // -1 = null
+            else -> "i64" // widened or sentinel
+        }
         is KneType.LIST -> "i64" // pointer handle
         is KneType.SET -> "i64"
         is KneType.MAP -> "i64"
