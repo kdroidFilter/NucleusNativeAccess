@@ -132,6 +132,10 @@ class NativeBridgeGenerator {
         // Generate create/add bridges for List<DC> params
         val dcTypesInListParams = collectDcListParamTypes(module)
         dcTypesInListParams.forEach { dc -> appendListDcParamBridges(dc, module.libName) }
+
+        // Generate invoke bridges for function return types
+        val fnReturnTypes = collectFunctionReturnTypes(module)
+        fnReturnTypes.forEach { fnType -> appendFnInvokeBridge(module.libName, fnType) }
     }
 
     // ── Error query functions ────────────────────────────────────────────────
@@ -1348,6 +1352,7 @@ class NativeBridgeGenerator {
             KneType.BOOLEAN -> appendLine("    return if ($expr) 1 else 0")
             is KneType.OBJECT -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
             is KneType.ENUM -> appendLine("    return ($expr).ordinal")
+            is KneType.FUNCTION -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
             is KneType.NULLABLE -> appendNullableReturn(expr, type)
             else -> appendLine("    return $expr")
         }
@@ -2215,5 +2220,86 @@ class NativeBridgeGenerator {
             }
             else -> appendLine("                _nextFn.invoke($valueExpr.toLong())")
         }
+    }
+
+    // ── Function return type invoke bridges ──────────────────────────────────
+
+    /** Collect all unique FUNCTION types used as method return types. */
+    private fun collectFunctionReturnTypes(module: KneModule): Set<KneType.FUNCTION> {
+        val result = mutableSetOf<KneType.FUNCTION>()
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> if (fn.returnType is KneType.FUNCTION) result.add(fn.returnType) }
+            cls.companionMethods.forEach { fn -> if (fn.returnType is KneType.FUNCTION) result.add(fn.returnType) }
+        }
+        module.functions.forEach { fn -> if (fn.returnType is KneType.FUNCTION) result.add(fn.returnType) }
+        return result
+    }
+
+    /** Generate an invoke bridge for a returned function type. JVM calls this to invoke the returned lambda. */
+    private fun StringBuilder.appendFnInvokeBridge(prefix: String, fnType: KneType.FUNCTION) {
+        val id = fnInvokeId(fnType)
+        val symbolName = "${prefix}_kne_invokeFn_$id"
+
+        // Build params: handle (Long) + expanded function params
+        val paramList = buildList {
+            add("handle: Long")
+            fnType.paramTypes.forEachIndexed { i, t ->
+                when (t) {
+                    KneType.STRING -> add("p$i: CPointer<ByteVar>?")
+                    KneType.BYTE_ARRAY -> { add("p${i}: CPointer<ByteVar>?"); add("p${i}_size: Int") }
+                    KneType.BOOLEAN -> add("p$i: Int")
+                    is KneType.ENUM -> add("p$i: Int")
+                    is KneType.OBJECT -> add("p$i: Long")
+                    else -> add("p$i: ${t.nativeBridgeType}")
+                }
+            }
+        }.joinToString(", ")
+
+        val returnDecl = when (fnType.returnType) {
+            KneType.UNIT -> ""
+            KneType.BOOLEAN -> ": Int"
+            KneType.STRING -> ": Long" // StableRef<String>
+            KneType.BYTE_ARRAY -> ": Long" // StableRef<ByteArray>
+            is KneType.ENUM -> ": Int"
+            is KneType.OBJECT -> ": Long"
+            else -> ": ${fnType.returnType.nativeBridgeType}"
+        }
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($paramList)$returnDecl {")
+        appendLine("    val _fn = handle.toCPointer<COpaque>()!!.asStableRef<Function${fnType.paramTypes.size}<${fnType.paramTypes.joinToString(", ") { it.jvmTypeName }}, ${fnType.returnType.jvmTypeName}>>().get()")
+
+        // Convert params
+        val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
+            when (t) {
+                KneType.STRING -> "p$i?.toKString() ?: \"\""
+                KneType.BYTE_ARRAY -> "ByteArray(p${i}_size) { p${i}!![it] }"
+                KneType.BOOLEAN -> "p$i != 0"
+                is KneType.ENUM -> "${t.fqName}.entries[p$i]"
+                is KneType.OBJECT -> "p$i.toCPointer<COpaque>()!!.asStableRef<${t.fqName}>().get()"
+                else -> "p$i"
+            }
+        }.joinToString(", ")
+
+        when (fnType.returnType) {
+            KneType.UNIT -> appendLine("    _fn.invoke($invokeArgs)")
+            KneType.BOOLEAN -> appendLine("    return if (_fn.invoke($invokeArgs)) 1 else 0")
+            KneType.STRING -> appendLine("    return StableRef.create(_fn.invoke($invokeArgs)).asCPointer().toLong()")
+            KneType.BYTE_ARRAY -> appendLine("    return StableRef.create(_fn.invoke($invokeArgs)).asCPointer().toLong()")
+            is KneType.ENUM -> appendLine("    return _fn.invoke($invokeArgs).ordinal")
+            is KneType.OBJECT -> appendLine("    return StableRef.create(_fn.invoke($invokeArgs)).asCPointer().toLong()")
+            else -> appendLine("    return _fn.invoke($invokeArgs)")
+        }
+
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Generate a unique ID for a function invoke bridge. */
+    private fun fnInvokeId(fnType: KneType.FUNCTION): String {
+        fun sanitize(s: String) = s.replace("<", "_").replace(">", "").replace(", ", "_").replace("?", "N")
+        val params = fnType.paramTypes.joinToString("_") { sanitize(it.jvmTypeName) }
+        val ret = sanitize(fnType.returnType.jvmTypeName)
+        return "${params.ifEmpty { "Void" }}_to_$ret"
     }
 }
