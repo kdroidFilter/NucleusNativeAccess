@@ -316,6 +316,27 @@ impl Calculator {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
         self.accumulator > 0
     }
+    // ── Flow-like methods ────────────────────────────────────────────
+    // Functions annotated with `@kne:flow(ElementType)` are bridged as
+    // Kotlin Flow<T>. The bridge iterates the returned Vec and calls
+    // onNext for each element.
+
+    /// Emits integers from 1 to max with interval_ms delay between each.
+    /// @kne:flow(Int)
+    pub fn count_up(&self, max: i32, interval_ms: i32) -> Vec<i32> {
+        let mut result = Vec::new();
+        for i in 1..=max {
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms as u64));
+            result.push(self.accumulator + i);
+        }
+        result
+    }
+
+    /// Emits score labels as strings.
+    /// @kne:flow(String)
+    pub fn score_labels(&self, count: i32) -> Vec<String> {
+        (1..=count).map(|i| format!("Score #{}: {}", i, self.accumulator * i)).collect()
+    }
 }
 
 // ── Top-level functions ─────────────────────────────────────────────────

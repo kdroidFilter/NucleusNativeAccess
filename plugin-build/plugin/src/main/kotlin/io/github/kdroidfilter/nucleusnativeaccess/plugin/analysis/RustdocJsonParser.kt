@@ -205,11 +205,32 @@ class RustdocJsonParser {
             val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
             val fnDocs = item.get("docs").safeString()
             val isSuspend = fnDocs?.contains("@kne:suspend") == true
+
+            // Detect @kne:flow(Type) annotation
+            val fnFlowMatch = fnDocs?.let { Regex("@kne:flow\\((\\w+)\\)").find(it) }
+            val actualReturnType = if (fnFlowMatch != null) {
+                val elemTypeName = fnFlowMatch.groupValues[1]
+                val elemType = when (elemTypeName) {
+                    "Int" -> KneType.INT
+                    "Long" -> KneType.LONG
+                    "Double" -> KneType.DOUBLE
+                    "Float" -> KneType.FLOAT
+                    "Boolean" -> KneType.BOOLEAN
+                    "String" -> KneType.STRING
+                    "Byte" -> KneType.BYTE
+                    "Short" -> KneType.SHORT
+                    else -> KneType.INT
+                }
+                KneType.FLOW(elemType)
+            } else {
+                returnType
+            }
+
             topLevelFunctions.add(
                 KneFunction(
                     name = name,
                     params = params,
-                    returnType = returnType,
+                    returnType = actualReturnType,
                     isSuspend = isSuspend,
                 )
             )
@@ -357,10 +378,30 @@ class RustdocJsonParser {
         // Detect @kne:suspend annotation in rustdoc comments
         val isSuspend = docs?.contains("@kne:suspend") == true
 
+        // Detect @kne:flow(Type) annotation in rustdoc comments
+        val flowMatch = docs?.let { Regex("@kne:flow\\((\\w+)\\)").find(it) }
+        val actualReturnType = if (flowMatch != null) {
+            val elemTypeName = flowMatch.groupValues[1]
+            val elemType = when (elemTypeName) {
+                "Int" -> KneType.INT
+                "Long" -> KneType.LONG
+                "Double" -> KneType.DOUBLE
+                "Float" -> KneType.FLOAT
+                "Boolean" -> KneType.BOOLEAN
+                "String" -> KneType.STRING
+                "Byte" -> KneType.BYTE
+                "Short" -> KneType.SHORT
+                else -> KneType.INT
+            }
+            KneType.FLOW(elemType)
+        } else {
+            returnType
+        }
+
         return KneFunction(
             name = name,
             params = params,
-            returnType = returnType,
+            returnType = actualReturnType,
             isMutating = isMutating,
             isSuspend = isSuspend,
         )

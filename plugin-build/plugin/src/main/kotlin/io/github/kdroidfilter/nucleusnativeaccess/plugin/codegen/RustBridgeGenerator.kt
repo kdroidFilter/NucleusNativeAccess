@@ -22,10 +22,12 @@ class RustBridgeGenerator {
         sb.appendPreamble()
         sb.appendErrorInfra(prefix)
 
-        // Check if any class or top-level function uses suspend
+        // Check if any class or top-level function uses suspend or flow
         val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } ||
             module.functions.any { it.isSuspend }
-        if (hasSuspend) {
+        val hasFlow = module.classes.any { c -> c.methods.any { it.returnType is KneType.FLOW } } ||
+            module.functions.any { it.returnType is KneType.FLOW }
+        if (hasSuspend || hasFlow) {
             sb.appendSuspendHelpers(prefix)
         }
 
@@ -155,6 +157,10 @@ class RustBridgeGenerator {
     }
 
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        if (fn.returnType is KneType.FLOW) {
+            appendFlowMethod(fn, cls, prefix)
+            return
+        }
         if (fn.isSuspend) {
             appendSuspendMethod(fn, cls, prefix)
             return
@@ -457,6 +463,90 @@ class RustBridgeGenerator {
         appendLine("    len + 1")
         appendLine("}")
         appendLine()
+    }
+
+    private fun StringBuilder.appendFlowMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val sym = "${prefix}_${cls.simpleName}_${fn.name}"
+        val className = cls.simpleName
+        val flowType = fn.returnType as KneType.FLOW
+        val elemType = flowType.elementType
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(handle: i64")
+        for (p in fn.params) {
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        append(", next_ptr: i64, error_ptr: i64, complete_ptr: i64, cancel_out: *mut i64")
+        appendLine(") {")
+
+        // Create cancellation flag
+        appendLine("    let cancel_flag = Box::into_raw(Box::new(std::sync::atomic::AtomicBool::new(false)));")
+        appendLine("    unsafe { *cancel_out = cancel_flag as i64; }")
+        appendLine("    let cancel_addr = cancel_flag as usize;")
+        appendLine()
+
+        // Spawn thread
+        appendLine("    std::thread::spawn(move || {")
+        appendLine("        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        if (fn.isMutating) {
+            appendLine("            let obj = unsafe { &mut *(handle as *mut $className) };")
+        } else {
+            appendLine("            let obj = unsafe { &*(handle as *const $className) };")
+        }
+        // Param conversions inside the closure
+        for (p in fn.params) {
+            appendSuspendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        appendLine("            obj.${fn.name}($callArgs)")
+        appendLine("        }));")
+        appendLine()
+        appendLine("        match result {")
+        appendLine("            Ok(vec) => {")
+        appendLine("                let next_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(next_ptr) };")
+        appendLine("                let cancel = unsafe { &*(cancel_addr as *const std::sync::atomic::AtomicBool) };")
+        appendLine("                for item in vec {")
+        appendLine("                    if cancel.load(std::sync::atomic::Ordering::SeqCst) { break; }")
+        appendLine("                    next_fn(${flowElementEncode(elemType)});")
+        appendLine("                }")
+        appendLine("                let complete_fn: extern \"C\" fn() = unsafe { std::mem::transmute(complete_ptr) };")
+        appendLine("                complete_fn();")
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_panic_error(e);")
+        appendLine("                let msg = KNE_LAST_ERROR.with(|e| e.borrow_mut().take().unwrap_or_default());")
+        appendLine("                let msg_handle = Box::into_raw(Box::new(msg)) as i64;")
+        appendLine("                let error_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(error_ptr) };")
+        appendLine("                error_fn(msg_handle);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Encodes a flow element value to i64 for the next_fn callback. */
+    private fun flowElementEncode(elemType: KneType): String = when (elemType) {
+        KneType.INT -> "item as i64"
+        KneType.LONG -> "item as i64"
+        KneType.BYTE -> "item as i64"
+        KneType.SHORT -> "item as i64"
+        KneType.BOOLEAN -> "if item { 1i64 } else { 0i64 }"
+        KneType.STRING -> "Box::into_raw(Box::new(item)) as i64"
+        KneType.DOUBLE -> "i64::from_ne_bytes(item.to_ne_bytes())"
+        KneType.FLOAT -> "item.to_bits() as i64"
+        is KneType.ENUM -> "item as i64"
+        is KneType.OBJECT -> "Box::into_raw(Box::new(item)) as i64"
+        else -> "item as i64"
     }
 
     private fun StringBuilder.appendSuspendMethod(fn: KneFunction, cls: KneClass, prefix: String) {

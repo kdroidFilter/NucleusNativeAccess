@@ -326,6 +326,64 @@ class RustBridgeGeneratorTest {
         assertTrue(suspendCode.contains("cont_fn(1, 0i64)"))
     }
 
+    // --- Flow ---
+
+    @Test
+    fun `generates flow method bridge with next_ptr error_ptr complete_ptr`() {
+        val moduleWithFlow = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "count_up",
+                    params = listOf(KneParam("max", KneType.INT), KneParam("interval_ms", KneType.INT)),
+                    returnType = KneType.FLOW(KneType.INT),
+                )
+            ))
+        )
+        val flowCode = RustBridgeGenerator().generate(moduleWithFlow)
+        assertTrue(flowCode.contains("fn calculator_Calculator_count_up"))
+        assertTrue(flowCode.contains("next_ptr: i64"))
+        assertTrue(flowCode.contains("error_ptr: i64"))
+        assertTrue(flowCode.contains("complete_ptr: i64"))
+        assertTrue(flowCode.contains("cancel_out: *mut i64"))
+        assertTrue(flowCode.contains("std::thread::spawn"))
+        assertTrue(flowCode.contains("AtomicBool"))
+        assertTrue(flowCode.contains("next_fn(item as i64)"))
+        assertTrue(flowCode.contains("complete_fn()"))
+    }
+
+    @Test
+    fun `generates flow with String element using Box`() {
+        val moduleWithFlow = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "score_labels",
+                    params = listOf(KneParam("count", KneType.INT)),
+                    returnType = KneType.FLOW(KneType.STRING),
+                )
+            ))
+        )
+        val flowCode = RustBridgeGenerator().generate(moduleWithFlow)
+        assertTrue(flowCode.contains("fn calculator_Calculator_score_labels"))
+        assertTrue(flowCode.contains("Box::into_raw(Box::new(item)) as i64"))
+    }
+
+    @Test
+    fun `flow generates suspend helpers for cancelJob and disposeRef`() {
+        val moduleWithFlow = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "count_up",
+                    params = listOf(KneParam("max", KneType.INT)),
+                    returnType = KneType.FLOW(KneType.INT),
+                )
+            ))
+        )
+        val flowCode = RustBridgeGenerator().generate(moduleWithFlow)
+        assertTrue(flowCode.contains("fn calculator_kne_cancelJob"))
+        assertTrue(flowCode.contains("fn calculator_kne_disposeRef"))
+        assertTrue(flowCode.contains("fn calculator_kne_readStringRef"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

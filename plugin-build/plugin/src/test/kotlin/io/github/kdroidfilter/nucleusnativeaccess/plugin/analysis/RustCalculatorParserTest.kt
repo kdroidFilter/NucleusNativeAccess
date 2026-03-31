@@ -433,4 +433,31 @@ class RustCalculatorParserTest {
         val compute = module.functions.find { it.name == "compute" }
         assertFalse(compute!!.isSuspend)
     }
+
+    // --- Flow detection ---
+
+    @Test
+    fun `count_up has Flow Int return type`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "count_up" }
+        assertNotNull(method)
+        assertTrue(method!!.returnType is KneType.FLOW)
+        assertEquals(KneType.INT, (method.returnType as KneType.FLOW).elementType)
+    }
+
+    @Test
+    fun `score_labels has Flow String return type`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "score_labels" }
+        assertNotNull(method)
+        assertTrue(method!!.returnType is KneType.FLOW)
+        assertEquals(KneType.STRING, (method.returnType as KneType.FLOW).elementType)
+    }
+
+    @Test
+    fun `flow methods are not marked as suspend`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val countUp = calc.methods.find { it.name == "count_up" }
+        assertFalse(countUp!!.isSuspend)
+    }
 }
