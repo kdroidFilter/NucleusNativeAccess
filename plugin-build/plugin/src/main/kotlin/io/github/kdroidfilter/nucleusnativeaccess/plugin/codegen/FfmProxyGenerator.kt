@@ -315,17 +315,29 @@ class FfmProxyGenerator {
             files["${dc.simpleName}.kt"] = generateDataClassFile(dc, jvmPackage)
         }
 
-        module.classes.forEach { cls ->
+        module.classes.filter { !it.isCommon }.forEach { cls ->
             files["${cls.simpleName}.kt"] = generateClassProxy(cls, module, jvmPackage)
+        }
+
+        module.interfaces.filter { !it.isCommon }.forEach { iface ->
+            files["${iface.simpleName}.kt"] = generateInterfaceProxy(iface, module, jvmPackage)
         }
 
         module.enums.forEach { enum ->
             files["${enum.simpleName}.kt"] = generateEnumProxy(enum, module, jvmPackage)
         }
 
-        if (module.functions.isNotEmpty()) {
+        // Non-extension top-level functions
+        val regularFunctions = module.functions.filter { !it.isExtension }
+        if (regularFunctions.isNotEmpty()) {
             val objectName = module.libName.replaceFirstChar { it.uppercaseChar() }
-            files["$objectName.kt"] = generateFunctionObject(module.functions, objectName, module, jvmPackage)
+            files["$objectName.kt"] = generateFunctionObject(regularFunctions, objectName, module, jvmPackage)
+        }
+
+        // Extension functions grouped by receiver type
+        val extensionFunctions = module.functions.filter { it.isExtension && it.receiverType != null }
+        if (extensionFunctions.isNotEmpty()) {
+            files["Extensions.kt"] = generateExtensionsFile(extensionFunctions, module, jvmPackage)
         }
 
         return files
@@ -1004,9 +1016,55 @@ class FfmProxyGenerator {
         appendLine(" * Object lifecycle is managed via Java Cleaner (automatic GC) or explicit close().")
         appendLine(" */")
         val hasCallbacks = classHasCallbacks(cls)
+        val isRoot = cls.superClass == null
+        val hasSuperClass = cls.superClass != null
 
-        appendLine("class $n private constructor(internal val handle: Long) : AutoCloseable {")
-        appendLine("    @Volatile private var _disposed = false")
+        // Class modifiers: open/abstract/sealed
+        val modifier = when {
+            cls.isSealed -> "sealed "
+            cls.isAbstract -> "abstract "
+            cls.isOpen -> "open "
+            else -> ""
+        }
+
+        val isInstantiable = !cls.isAbstract && !cls.isSealed
+        val hasHierarchy = hasSuperClass || cls.isOpen || cls.isAbstract || cls.isSealed || cls.interfaces.isNotEmpty()
+
+        // Constructor visibility: private for flat classes (original behavior), internal/protected for hierarchy
+        val ctorVisibility = when {
+            cls.isSealed -> "protected"
+            hasHierarchy -> "internal"
+            else -> "private"
+        }
+
+        // Superclass/interface clause
+        val superParts = mutableListOf<String>()
+        if (hasSuperClass) {
+            val parentSimple = cls.superClass!!.substringAfterLast(".")
+            superParts.add("$parentSimple(handle)")
+        } else {
+            superParts.add("AutoCloseable")
+        }
+        cls.interfaces.forEach { ifaceFq ->
+            val ifaceSimple = ifaceFq.substringAfterLast(".")
+            superParts.add(ifaceSimple)
+        }
+        val superClause = superParts.joinToString(", ")
+
+        // Handle declaration: only on root class. Preserve original visibility for flat classes.
+        val implementsInterface = cls.interfaces.isNotEmpty()
+        val handleDecl = when {
+            !isRoot -> "handle: Long"  // subclass: just a param, inherited from parent
+            implementsInterface -> "override val handle: Long"  // implements interface with handle
+            hasHierarchy -> "val handle: Long"  // open/abstract/sealed: public for subclass access
+            else -> "internal val handle: Long"  // flat class: original behavior
+        }
+
+        appendLine("${modifier}class $n $ctorVisibility constructor($handleDecl) : $superClause {")
+        if (isRoot) {
+            val disposedVisibility = if (hasHierarchy) "protected" else "private"
+            appendLine("    @Volatile $disposedVisibility var _disposed = false")
+        }
         if (hasCallbacks) {
             appendLine("    internal val _callbackArena: Arena = Arena.ofShared()")
         }
@@ -1019,33 +1077,37 @@ class FfmProxyGenerator {
 
         // Companion: MethodHandles + factory
         appendLine("    companion object {")
-        appendLine("        private val CLEANER = Cleaner.create()")
+        if (isInstantiable) {
+            appendLine("        private val CLEANER = Cleaner.create()")
+        }
         if (companionHasCallbacks) {
             appendLine("        private val _companionCallbackArena: Arena = Arena.ofShared()")
         }
         appendLine()
 
-        val ctorDescriptor = buildCtorDescriptor(cls.constructor.params)
-        appendLine("        private val NEW_HANDLE: MethodHandle by lazy {")
-        appendLine("            KneRuntime.handle(\"${p}_${n}_new\",")
-        appendLine("                $ctorDescriptor)")
-        appendLine("        }")
+        if (isInstantiable) {
+            val ctorDescriptor = buildCtorDescriptor(cls.constructor.params)
+            appendLine("        private val NEW_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_${n}_new\",")
+            appendLine("                $ctorDescriptor)")
+            appendLine("        }")
 
-        // Handles for constructor overloads (trailing default params dropped)
-        val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
-        for (drop in 1..trailingDefaults) {
-            val requiredParams = cls.constructor.params.dropLast(drop)
-            val suffix = requiredParams.size.toString()
-            val overloadDescriptor = buildCtorDescriptor(requiredParams)
-            appendLine("        private val NEW_HANDLE_$suffix: MethodHandle by lazy {")
-            appendLine("            KneRuntime.handle(\"${p}_${n}_new$suffix\",")
-            appendLine("                $overloadDescriptor)")
+            // Handles for constructor overloads (trailing default params dropped)
+            val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+            for (drop in 1..trailingDefaults) {
+                val requiredParams = cls.constructor.params.dropLast(drop)
+                val suffix = requiredParams.size.toString()
+                val overloadDescriptor = buildCtorDescriptor(requiredParams)
+                appendLine("        private val NEW_HANDLE_$suffix: MethodHandle by lazy {")
+                appendLine("            KneRuntime.handle(\"${p}_${n}_new$suffix\",")
+                appendLine("                $overloadDescriptor)")
+                appendLine("        }")
+            }
+            appendLine("        private val DISPOSE_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_${n}_dispose\",")
+            appendLine("                FunctionDescriptor.ofVoid(JAVA_LONG))")
             appendLine("        }")
         }
-        appendLine("        private val DISPOSE_HANDLE: MethodHandle by lazy {")
-        appendLine("            KneRuntime.handle(\"${p}_${n}_dispose\",")
-        appendLine("                FunctionDescriptor.ofVoid(JAVA_LONG))")
-        appendLine("        }")
 
         cls.methods.forEach { method ->
             val handleName = "${method.name.uppercase()}_HANDLE"
@@ -1349,41 +1411,46 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
-        // Factory
-        val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
-        appendLine()
-        appendLine("        operator fun invoke($ctorParams): $n {")
-        appendCtorInvokeBody("            ", cls.constructor.params, "NEW_HANDLE")
-        appendLine("        }")
+        // Factory (only for instantiable classes)
+        if (isInstantiable) {
+            val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            appendLine()
+            appendLine("        operator fun invoke($ctorParams): $n {")
+            appendCtorInvokeBody("            ", cls.constructor.params, "NEW_HANDLE")
+            appendLine("        }")
+            appendLine()
+
+            // Constructor overloads for default parameters
+            val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+            for (drop in 1..trailingDefaults) {
+                val requiredParams = cls.constructor.params.dropLast(drop)
+                val suffix = requiredParams.size.toString()
+                val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+                appendLine()
+                appendLine("        operator fun invoke($overloadParams): $n {")
+                appendCtorInvokeBody("            ", requiredParams, "NEW_HANDLE_$suffix")
+                appendLine("        }")
+            }
+        }
         appendLine()
 
-        // Constructor overloads for default parameters
-        for (drop in 1..trailingDefaults) {
-            val requiredParams = cls.constructor.params.dropLast(drop)
-            val suffix = requiredParams.size.toString()
-            val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
-            appendLine()
-            appendLine("        operator fun invoke($overloadParams): $n {")
-            appendCtorInvokeBody("            ", requiredParams, "NEW_HANDLE_$suffix")
+        if (isInstantiable) {
+            appendLine("        internal fun fromNativeHandle(h: Long): $n {")
+            appendLine("            val obj = $n(h)")
+            if (hasCallbacks) {
+                appendLine("            val cbArena = obj._callbackArena")
+                if (classHasSuspend) {
+                    appendLine("            val inFlight = obj._suspendInFlight")
+                    appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; repeat(1000) { if (inFlight.get() <= 0) return@repeat; Thread.sleep(1) }; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+                } else {
+                    appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+                }
+            } else {
+                appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
+            }
+            appendLine("            return obj")
             appendLine("        }")
         }
-        appendLine()
-
-        appendLine("        internal fun fromNativeHandle(h: Long): $n {")
-        appendLine("            val obj = $n(h)")
-        if (hasCallbacks) {
-            appendLine("            val cbArena = obj._callbackArena")
-            if (classHasSuspend) {
-                appendLine("            val inFlight = obj._suspendInFlight")
-                appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; repeat(1000) { if (inFlight.get() <= 0) return@repeat; Thread.sleep(1) }; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
-            } else {
-                appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { cbArena.close() }; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
-            }
-        } else {
-            appendLine("            CLEANER.register(obj) { if (!obj._disposed) { obj._disposed = true; runCatching { DISPOSE_HANDLE.invoke(h) } } }")
-        }
-        appendLine("            return obj")
-        appendLine("        }")
 
         // Companion methods
         cls.companionMethods.forEach { method -> appendCompanionMethodProxy(method) }
@@ -1401,19 +1468,209 @@ class FfmProxyGenerator {
         cls.properties.forEach { prop -> appendPropertyProxy(prop, cls) }
 
         // close() — idempotent, thread-safe, waits for in-flight suspend calls
-        appendLine("    override fun close() {")
-        appendLine("        if (_disposed) return")
-        appendLine("        _disposed = true")
-        if (classHasSuspend) {
-            // Spin-wait for all native coroutines to finish calling back before closing the arena
-            appendLine("        while (_suspendInFlight.get() > 0) { Thread.sleep(1) }")
+        if (isRoot) {
+            val openClose = if (cls.isOpen || cls.isAbstract || cls.isSealed) "open " else ""
+            appendLine("    ${openClose}override fun close() {")
+            appendLine("        if (_disposed) return")
+            appendLine("        _disposed = true")
+            if (classHasSuspend) {
+                appendLine("        while (_suspendInFlight.get() > 0) { Thread.sleep(1) }")
+            }
+            if (hasCallbacks) {
+                appendLine("        runCatching { _callbackArena.close() }")
+            }
+            if (isInstantiable) {
+                appendLine("        runCatching { DISPOSE_HANDLE.invoke(handle) }")
+            }
+            appendLine("    }")
         }
-        if (hasCallbacks) {
-            appendLine("        runCatching { _callbackArena.close() }")
-        }
-        appendLine("        runCatching { DISPOSE_HANDLE.invoke(handle) }")
-        appendLine("    }")
         appendLine("}")
+    }
+
+    // ── Interface Proxy ────────────────────────────────────────────────────
+
+    private fun generateInterfaceProxy(iface: io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneInterface, module: KneModule, pkg: String): String = buildString {
+        appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
+        appendLine("package $pkg")
+        appendLine()
+        appendLine("/**")
+        appendLine(" * JVM interface proxy for Kotlin/Native interface [${iface.simpleName}].")
+        appendLine(" */")
+        appendLine("interface ${iface.simpleName} {")
+        appendLine("    val handle: Long")
+        appendLine()
+        // Interface methods as abstract declarations
+        iface.methods.forEach { method ->
+            val params = method.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            val returnDecl = if (method.returnType == KneType.UNIT) "" else ": ${method.returnType.jvmTypeName}"
+            val suspendMod = if (method.isSuspend) "suspend " else ""
+            appendLine("    ${suspendMod}fun ${method.name}($params)$returnDecl")
+        }
+        // Interface properties as abstract declarations
+        iface.properties.forEach { prop ->
+            if (prop.mutable) {
+                appendLine("    var ${prop.name}: ${prop.type.jvmTypeName}")
+            } else {
+                appendLine("    val ${prop.name}: ${prop.type.jvmTypeName}")
+            }
+        }
+        appendLine("}")
+    }
+
+    // ── Extension Functions File ─────────────────────────────────────────
+
+    private fun generateExtensionsFile(functions: List<KneFunction>, module: KneModule, pkg: String): String = buildString {
+        val p = module.libName
+        appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
+        appendLine("package $pkg")
+        appendLine()
+        appendLine("import java.lang.foreign.Arena")
+        appendLine("import java.lang.foreign.FunctionDescriptor")
+        appendLine("import java.lang.foreign.MemorySegment")
+        appendLine("import java.lang.foreign.ValueLayout.*")
+        appendLine("import java.lang.invoke.MethodHandle")
+        appendLine()
+
+        // MethodHandle declarations as top-level private vals
+        functions.forEach { fn ->
+            val receiverType = fn.receiverType ?: return@forEach
+            val receiverSimpleName = when (receiverType) {
+                is KneType.OBJECT -> receiverType.simpleName
+                is KneType.INTERFACE -> receiverType.simpleName
+                else -> return@forEach
+            }
+            val handleName = "EXT_${receiverSimpleName.uppercase()}_${fn.name.uppercase()}_HANDLE"
+            val descriptor = buildExtensionDescriptor(fn)
+            appendLine("private val $handleName: MethodHandle by lazy {")
+            appendLine("    KneRuntime.handle(\"${p}_${receiverSimpleName}_ext_${fn.name}\",")
+            appendLine("        $descriptor)")
+            appendLine("}")
+            appendLine()
+        }
+
+        // Extension function implementations
+        functions.forEach { fn ->
+            val receiverType = fn.receiverType ?: return@forEach
+            val receiverSimpleName = when (receiverType) {
+                is KneType.OBJECT -> receiverType.simpleName
+                is KneType.INTERFACE -> receiverType.simpleName
+                else -> return@forEach
+            }
+            val handleName = "EXT_${receiverSimpleName.uppercase()}_${fn.name.uppercase()}_HANDLE"
+            val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            val returnDecl = if (fn.returnType == KneType.UNIT) "" else ": ${fn.returnType.jvmTypeName}"
+
+            appendLine("fun $receiverSimpleName.${fn.name}($params)$returnDecl {")
+            // Simple case: primitives only, no arena needed
+            val needsArena = fn.returnType == KneType.STRING || fn.returnType == KneType.BYTE_ARRAY ||
+                fn.params.any { it.type == KneType.STRING }
+            if (needsArena) {
+                appendLine("    Arena.ofConfined().use { arena ->")
+                fn.params.filter { it.type == KneType.STRING }.forEach { param ->
+                    appendLine("        val ${param.name}Seg = arena.allocateFrom(${param.name})")
+                }
+                val invokeArgs = buildList {
+                    add("this.handle")
+                    fn.params.forEach { param ->
+                        when (param.type) {
+                            KneType.STRING -> add("${param.name}Seg")
+                            KneType.BOOLEAN -> add("if (${param.name}) 1 else 0")
+                            is KneType.ENUM -> add("${param.name}.ordinal")
+                            is KneType.OBJECT -> add("${param.name}.handle")
+                            else -> add(param.name)
+                        }
+                    }
+                    if (fn.returnType == KneType.STRING || fn.returnType == KneType.BYTE_ARRAY) {
+                        add("arena.allocate(${STRING_BUF_SIZE}.toLong())")
+                        add(STRING_BUF_SIZE.toString())
+                    }
+                }.joinToString(", ")
+                when (fn.returnType) {
+                    KneType.UNIT -> {
+                        appendLine("        $handleName.invoke($invokeArgs)")
+                        appendLine("        KneRuntime.checkError()")
+                    }
+                    KneType.STRING -> {
+                        appendLine("        val _buf = arena.allocate(${STRING_BUF_SIZE}.toLong())")
+                        appendLine("        val _len = $handleName.invoke(this.handle${if (fn.params.isNotEmpty()) ", " + fn.params.joinToString(", ") { when (it.type) { KneType.STRING -> "${it.name}Seg"; KneType.BOOLEAN -> "if (${it.name}) 1 else 0"; else -> it.name } } else ""}, _buf, $STRING_BUF_SIZE) as Int")
+                        appendLine("        KneRuntime.checkError()")
+                        appendLine("        return _buf.getString(0)")
+                    }
+                    else -> {
+                        appendLine("        val _r = $handleName.invoke($invokeArgs)")
+                        appendLine("        KneRuntime.checkError()")
+                        appendLine("        return _r as ${fn.returnType.jvmTypeName}")
+                    }
+                }
+                appendLine("    }")
+            } else {
+                val invokeArgs = buildList {
+                    add("this.handle")
+                    fn.params.forEach { param ->
+                        when (param.type) {
+                            KneType.BOOLEAN -> add("if (${param.name}) 1 else 0")
+                            is KneType.ENUM -> add("${param.name}.ordinal")
+                            is KneType.OBJECT -> add("${param.name}.handle")
+                            else -> add(param.name)
+                        }
+                    }
+                }.joinToString(", ")
+                when (fn.returnType) {
+                    KneType.UNIT -> {
+                        appendLine("    $handleName.invoke($invokeArgs)")
+                        appendLine("    KneRuntime.checkError()")
+                    }
+                    KneType.BOOLEAN -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs) as Int")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return _r != 0")
+                    }
+                    KneType.INT -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs) as Int")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return _r")
+                    }
+                    KneType.LONG -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs) as Long")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return _r")
+                    }
+                    KneType.DOUBLE -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs) as Double")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return _r")
+                    }
+                    is KneType.OBJECT -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs) as Long")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return ${fn.returnType.simpleName}.fromNativeHandle(_r)")
+                    }
+                    else -> {
+                        appendLine("    val _r = $handleName.invoke($invokeArgs)")
+                        appendLine("    KneRuntime.checkError()")
+                        appendLine("    return _r as ${fn.returnType.jvmTypeName}")
+                    }
+                }
+            }
+            appendLine("}")
+            appendLine()
+        }
+    }
+
+    /** Build FFM descriptor for an extension function (receiver handle as first param). */
+    private fun buildExtensionDescriptor(fn: KneFunction): String {
+        val paramLayouts = buildList {
+            add("JAVA_LONG") // receiver handle
+            fn.params.forEach { p -> add(p.type.ffmLayout) }
+            if (fn.returnType == KneType.STRING || fn.returnType == KneType.BYTE_ARRAY) {
+                add("ADDRESS"); add("JAVA_INT") // out buffer
+            }
+        }
+        val effectiveReturn = when {
+            fn.returnType == KneType.STRING || fn.returnType == KneType.BYTE_ARRAY -> KneType.INT
+            else -> fn.returnType
+        }
+        return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
     /** Generate the invoke body for a constructor (handles DC/String/ByteArray/collection params). */
@@ -1640,8 +1897,10 @@ class FfmProxyGenerator {
         val handleName = "${fn.name.uppercase()}_HANDLE"
         val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
         val retType = fn.returnType.jvmTypeName
+        val overrideMod = if (fn.isOverride) "override " else ""
+        val openMod = if (!fn.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
 
-        appendLine("    suspend fun ${fn.name}($params): $retType = suspendCancellableCoroutine { _cont ->")
+        appendLine("    ${overrideMod}${openMod}suspend fun ${fn.name}($params): $retType = suspendCancellableCoroutine { _cont ->")
         appendLine("        _suspendInFlight.incrementAndGet()")
         // Use the object's shared callback arena — stubs live as long as the proxy object
         appendLine("        val _contStub = KneRuntime.createSuspendContStub({ _hasValue, _value ->")
@@ -1887,8 +2146,10 @@ class FfmProxyGenerator {
     private fun StringBuilder.appendMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
         val handleName = "${fn.name.uppercase()}_HANDLE"
         val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+        val overrideMod = if (fn.isOverride) "override " else ""
+        val openMod = if (!fn.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
 
-        appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
+        appendLine("    ${overrideMod}${openMod}fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
         // Allocate callback stubs in persistent arena (survives async calls)
         appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
@@ -1948,6 +2209,48 @@ class FfmProxyGenerator {
         val paramArgs = buildList {
             add("handle")
             fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            flatFields.forEach { (name, type) ->
+                when (type) {
+                    KneType.STRING -> { add(name); add("$STRING_BUF_SIZE") }
+                    KneType.BYTE_ARRAY -> add(name) // StableRef handle, no size needed
+                    else -> add(name)
+                }
+            }
+        }.joinToString(", ")
+
+        if (nullable) {
+            appendLine("${indent}val _isPresent = $handleName.invoke($paramArgs) as Int")
+            appendLine("${indent}KneRuntime.checkError()")
+            appendLine("${indent}if (_isPresent == 0) return null")
+        } else {
+            appendLine("${indent}$handleName.invoke($paramArgs)")
+            appendLine("${indent}KneRuntime.checkError()")
+        }
+
+        // Read collection fields from StableRef handles, then reconstruct the data class
+        if (dcHasCollectionFields(dc)) {
+            appendDcCollectionFieldReads(indent, dc, "out")
+        }
+        appendLine("${indent}return ${buildDcCtorFromOutParams(dc, "out")}")
+    }
+
+    /** Generate the return-via-out-params pattern for DATA_CLASS property types. */
+    private fun StringBuilder.appendDataClassReturnProxyForProperty(indent: String, prop: KneProperty, handleName: String, nullable: Boolean = false) {
+        val dc = extractDataClass(prop.type)!!
+        val flatFields = flattenDcFields(dc, "out")
+
+        // Allocate out-params for each flat field
+        flatFields.forEach { (name, type) ->
+            when (type) {
+                KneType.STRING -> appendLine("${indent}val $name = arena.allocate($STRING_BUF_SIZE.toLong())")
+                KneType.BYTE_ARRAY -> appendLine("${indent}val $name = arena.allocate(JAVA_LONG)") // StableRef handle
+                else -> appendLine("${indent}val $name = arena.allocate(${type.ffmLayout})")
+            }
+        }
+
+        // Build invoke args: handle + out-params (no method params for properties)
+        val paramArgs = buildList {
+            add("handle")
             flatFields.forEach { (name, type) ->
                 when (type) {
                     KneType.STRING -> { add(name); add("$STRING_BUF_SIZE") }
@@ -2191,10 +2494,14 @@ class FfmProxyGenerator {
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
         val getHandleName = "GET_${prop.name.uppercase()}_HANDLE"
         val isCollProp = prop.type.isCollection()
+        val isDcProp = extractDataClass(prop.type) != null
+        val overrideMod = if (prop.isOverride) "override " else ""
+        val openMod = if (!prop.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
+        val propMod = "$overrideMod$openMod"
         if (prop.mutable) {
-            appendLine("    var ${prop.name}: ${prop.type.jvmTypeName}")
+            appendLine("    ${propMod}var ${prop.name}: ${prop.type.jvmTypeName}")
         } else {
-            appendLine("    val ${prop.name}: ${prop.type.jvmTypeName}")
+            appendLine("    ${propMod}val ${prop.name}: ${prop.type.jvmTypeName}")
         }
         appendLine("        get() {")
         if (isCollProp) {
@@ -2295,6 +2602,12 @@ class FfmProxyGenerator {
                 }
                 else -> appendCallAndReturn("            ", prop.type, getHandleName, "handle")
             }
+        } else if (isDcProp) {
+            // Data class property getter: use out-params pattern
+            val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
+            appendLine("            Arena.ofConfined().use { arena ->")
+            appendDataClassReturnProxyForProperty("                ", prop, getHandleName, returnsNullableDc)
+            appendLine("            }")
         } else {
             val needsArena = prop.type.returnsViaBuffer()
             if (needsArena) {
@@ -2597,15 +2910,32 @@ class FfmProxyGenerator {
 
     private fun buildGetterDescriptor(prop: KneProperty): String {
         val isCollProp = prop.type.isCollection()
+        val returnDc = extractDataClass(prop.type)
+        val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
         val paramLayouts = buildList {
             add("JAVA_LONG")
             if (!isCollProp && prop.type.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
+            // Data class return: add out-param layouts for each flattened field
+            if (returnDc != null) {
+                flattenDcFields(returnDc, "").forEach { (_, type) ->
+                    when (type) {
+                        KneType.STRING -> { add("ADDRESS"); add("JAVA_INT") }
+                        KneType.BYTE_ARRAY -> add("ADDRESS") // StableRef handle in CPointer<LongVar>
+                        else -> add("ADDRESS")
+                    }
+                }
+            }
         }
         // Collection getters return JAVA_LONG (StableRef handle)
-        return if (isCollProp) buildDescriptor(KneType.LONG, paramLayouts)
-        else buildDescriptor(prop.type, paramLayouts)
+        val effectiveReturn = when {
+            returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
+            returnDc != null -> KneType.UNIT
+            isCollProp -> KneType.LONG
+            else -> prop.type
+        }
+        return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
     private fun buildCompanionGetterDescriptor(prop: KneProperty): String {
@@ -3356,10 +3686,15 @@ class FfmProxyGenerator {
                 appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return _r")
             }
-            is KneType.OBJECT -> {
+            is KneType.OBJECT, is KneType.INTERFACE -> {
+                val simpleName = when (returnType) {
+                    is KneType.OBJECT -> returnType.simpleName
+                    is KneType.INTERFACE -> returnType.simpleName
+                    else -> error("unreachable")
+                }
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
                 appendLine("${indent}KneRuntime.checkError()")
-                appendLine("${indent}return ${returnType.simpleName}.fromNativeHandle(resultHandle)")
+                appendLine("${indent}return $simpleName.fromNativeHandle(resultHandle)")
             }
             is KneType.ENUM -> {
                 appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")

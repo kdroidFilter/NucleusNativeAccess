@@ -9,12 +9,22 @@ data class KneModule(
     val dataClasses: List<KneDataClass>,
     val enums: List<KneEnum>,
     val functions: List<KneFunction>,
+    val interfaces: List<KneInterface> = emptyList(),
 ) : Serializable
 
 data class KneDataClass(
     val simpleName: String,
     val fqName: String,
     val fields: List<KneParam>,
+    val isCommon: Boolean = false,
+) : Serializable
+
+data class KneInterface(
+    val simpleName: String,
+    val fqName: String,
+    val methods: List<KneFunction>,
+    val properties: List<KneProperty>,
+    val superInterfaces: List<String> = emptyList(),
     val isCommon: Boolean = false,
 ) : Serializable
 
@@ -26,6 +36,13 @@ data class KneClass(
     val properties: List<KneProperty>,
     val companionMethods: List<KneFunction> = emptyList(),
     val companionProperties: List<KneProperty> = emptyList(),
+    val isOpen: Boolean = false,
+    val isAbstract: Boolean = false,
+    val isSealed: Boolean = false,
+    val superClass: String? = null,
+    val interfaces: List<String> = emptyList(),
+    val sealedSubclasses: List<String> = emptyList(),
+    val isCommon: Boolean = false,
 ) : Serializable
 
 data class KneEnum(
@@ -43,12 +60,16 @@ data class KneFunction(
     val params: List<KneParam>,
     val returnType: KneType,
     val isSuspend: Boolean = false,
+    val isExtension: Boolean = false,
+    val receiverType: KneType? = null,
+    val isOverride: Boolean = false,
 ) : Serializable
 
 data class KneProperty(
     val name: String,
     val type: KneType,
     val mutable: Boolean,
+    val isOverride: Boolean = false,
 ) : Serializable
 
 data class KneParam(
@@ -68,6 +89,7 @@ sealed class KneType : Serializable {
     object STRING : KneType()
     object UNIT : KneType()
     data class OBJECT(val fqName: String, val simpleName: String) : KneType()
+    data class INTERFACE(val fqName: String, val simpleName: String) : KneType()
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
     data class NULLABLE(val inner: KneType) : KneType()
     data class FUNCTION(val paramTypes: List<KneType>, val returnType: KneType) : KneType()
@@ -91,13 +113,14 @@ sealed class KneType : Serializable {
             STRING -> "ADDRESS" // char* (input) or output buffer pattern (return)
             UNIT -> "" // void — used with FunctionDescriptor.ofVoid(...)
             is OBJECT -> "JAVA_LONG" // opaque handle
+            is INTERFACE -> "JAVA_LONG" // opaque handle (same as OBJECT)
             is ENUM -> "JAVA_INT" // ordinal
             is NULLABLE -> when (inner) {
                 STRING -> "ADDRESS"
                 BOOLEAN, is ENUM -> "JAVA_INT"
                 SHORT, BYTE -> "JAVA_INT" // widened for sentinel
                 INT, LONG, FLOAT, DOUBLE -> "JAVA_LONG" // widened or raw bits
-                is OBJECT -> "JAVA_LONG"
+                is OBJECT, is INTERFACE -> "JAVA_LONG"
                 else -> inner.ffmLayout
             }
             is FUNCTION -> "JAVA_LONG" // function pointer address
@@ -122,6 +145,7 @@ sealed class KneType : Serializable {
             STRING -> "String"
             UNIT -> "Unit"
             is OBJECT -> simpleName
+            is INTERFACE -> simpleName
             is ENUM -> simpleName
             is NULLABLE -> if (inner is FUNCTION) "(${inner.jvmTypeName})?" else "${inner.jvmTypeName}?"
             is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
@@ -146,6 +170,7 @@ sealed class KneType : Serializable {
             STRING -> "CPointer<ByteVar>?" // null-terminated char*
             UNIT -> "Unit"
             is OBJECT -> "Long" // opaque handle
+            is INTERFACE -> "Long" // opaque handle (same as OBJECT)
             is ENUM -> "Int" // ordinal
             is NULLABLE -> when (inner) {
                 STRING -> "CPointer<ByteVar>?"
@@ -153,7 +178,7 @@ sealed class KneType : Serializable {
                 SHORT, BYTE -> "Int" // widened, Int.MIN_VALUE = null
                 INT, LONG -> "Long" // widened, Long.MIN_VALUE = null
                 FLOAT, DOUBLE -> "Long" // raw bits, Long.MIN_VALUE = null
-                is OBJECT -> "Long" // 0L = null
+                is OBJECT, is INTERFACE -> "Long" // 0L = null
                 else -> inner.nativeBridgeType
             }
             is FUNCTION -> "Long" // function pointer address
@@ -176,7 +201,7 @@ sealed class KneType : Serializable {
             BYTE -> "ByteVar"
             SHORT -> "ShortVar"
             is ENUM -> "IntVar" // ordinal
-            is OBJECT -> "LongVar" // StableRef handle
+            is OBJECT, is INTERFACE -> "LongVar" // StableRef handle
             else -> "ByteVar"
         }
 
@@ -192,7 +217,7 @@ sealed class KneType : Serializable {
             STRING -> "CPointer<ByteVar>?" // packed null-terminated
             BYTE_ARRAY -> "CPointer<LongVar>?" // StableRef handles
             is ENUM -> "CPointer<IntVar>?" // ordinals
-            is OBJECT -> "CPointer<LongVar>?" // handles
+            is OBJECT, is INTERFACE -> "CPointer<LongVar>?" // handles
             is LIST, is SET, is MAP -> "CPointer<LongVar>?" // nested collection handles
             else -> "CPointer<ByteVar>?"
         }
@@ -206,7 +231,7 @@ sealed class KneType : Serializable {
             SHORT -> "ShortVar"
             BYTE, STRING -> "ByteVar"
             is ENUM -> "IntVar"
-            is OBJECT -> "LongVar"
+            is OBJECT, is INTERFACE -> "LongVar"
             else -> "ByteVar"
         }
 
@@ -220,7 +245,7 @@ sealed class KneType : Serializable {
             BYTE -> "JAVA_BYTE"
             STRING -> "JAVA_BYTE" // packed buffer uses byte layout
             is ENUM -> "JAVA_INT"
-            is OBJECT -> "JAVA_LONG"
+            is OBJECT, is INTERFACE -> "JAVA_LONG"
             BYTE_ARRAY -> "JAVA_LONG" // StableRef handles
             is LIST, is SET, is MAP -> "JAVA_LONG" // nested collection handles
             else -> "JAVA_BYTE"

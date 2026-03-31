@@ -82,9 +82,19 @@ class NativeBridgeGenerator {
             appendSuspendHelpers(module.libName)
         }
 
-        module.classes.forEach { cls -> appendClass(cls, module.libName) }
+        module.classes.filter { !it.isCommon }.forEach { cls -> appendClass(cls, module.libName) }
         module.enums.forEach { enum -> appendEnum(enum, module.libName) }
-        module.functions.forEach { fn -> appendTopLevelFunction(fn, module.libName) }
+        module.functions.filter { !it.isExtension }.forEach { fn -> appendTopLevelFunction(fn, module.libName) }
+
+        // Extension function bridges
+        module.functions.filter { it.isExtension && it.receiverType != null }.forEach { fn ->
+            appendExtensionFunction(fn, module.libName)
+        }
+
+        // Sealed class ordinal bridges
+        module.classes.filter { it.isSealed && !it.isCommon }.forEach { cls ->
+            appendSealedOrdinalBridge(cls, module.libName)
+        }
 
         // Generate list-of-DC accessor bridges for each DC used in collections
         val dcTypesInLists = collectDcListTypes(module)
@@ -183,14 +193,14 @@ class NativeBridgeGenerator {
         KneType.SHORT -> "0"
         KneType.STRING -> "0"
         KneType.UNIT -> ""
-        is KneType.OBJECT -> "0L"
+        is KneType.OBJECT, is KneType.INTERFACE -> "0L"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when (type.inner) {
             KneType.STRING -> "-1"
             KneType.BOOLEAN, is KneType.ENUM -> "-1"
             KneType.INT, KneType.LONG, KneType.FLOAT, KneType.DOUBLE -> "Long.MIN_VALUE"
             KneType.SHORT, KneType.BYTE -> "Int.MIN_VALUE"
-            is KneType.OBJECT -> "0L"
+            is KneType.OBJECT, is KneType.INTERFACE -> "0L"
             else -> "0"
         }
         KneType.BYTE_ARRAY -> "0"
@@ -208,49 +218,53 @@ class NativeBridgeGenerator {
         val p = prefix
         val n = cls.simpleName
         val fq = cls.fqName
+        val isInstantiable = !cls.isAbstract && !cls.isSealed
+        val isRoot = cls.superClass == null
 
-        // Constructor (full — all params, expanded for DC/ByteArray/collections)
-        val ctorArgs = buildExpandedParamList(cls.constructor.params)
-        appendLine("@CName(\"${p}_${n}_new\")")
-        appendLine("fun `${p}_${n}_new`($ctorArgs): Long {")
-        appendTryCatchStart()
-        val dummyCtorFn = KneFunction("_ctor", cls.constructor.params, KneType.UNIT)
-        appendObjectParamConversions(dummyCtorFn)
-        val ctorCall = cls.constructor.params.joinToString(", ") { buildCallArg(it.name, it.type) }
-        appendLine("    return StableRef.create($fq($ctorCall)).asCPointer().toLong()")
-        appendTryCatchEnd(KneType.LONG)
-        appendLine("}")
-        appendLine()
-
-        // Constructor overloads — drop trailing default params one at a time
-        val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
-        for (drop in 1..trailingDefaults) {
-            val requiredParams = cls.constructor.params.dropLast(drop)
-            val suffix = requiredParams.size.toString()
-            // Expand DC/ByteArray/collection params into flat native args
-            val oArgs = buildExpandedParamList(requiredParams)
-            appendLine("@CName(\"${p}_${n}_new$suffix\")")
-            appendLine("fun `${p}_${n}_new$suffix`($oArgs): Long {")
+        // Constructor (only for instantiable classes)
+        if (isInstantiable) {
+            val ctorArgs = buildExpandedParamList(cls.constructor.params)
+            appendLine("@CName(\"${p}_${n}_new\")")
+            appendLine("fun `${p}_${n}_new`($ctorArgs): Long {")
             appendTryCatchStart()
-            // Reconstruct complex types from flat params (String, ByteArray, Object, DC, collections)
-            val dummyFn = KneFunction("_ctor", requiredParams, KneType.UNIT)
-            appendObjectParamConversions(dummyFn)
-            val oCall = requiredParams.joinToString(", ") { "${it.name} = ${buildCallArg(it.name, it.type)}" }
-            appendLine("    return StableRef.create($fq($oCall)).asCPointer().toLong()")
+            val dummyCtorFn = KneFunction("_ctor", cls.constructor.params, KneType.UNIT)
+            appendObjectParamConversions(dummyCtorFn)
+            val ctorCall = cls.constructor.params.joinToString(", ") { buildCallArg(it.name, it.type) }
+            appendLine("    return StableRef.create($fq($ctorCall)).asCPointer().toLong()")
             appendTryCatchEnd(KneType.LONG)
             appendLine("}")
             appendLine()
+
+            // Constructor overloads — drop trailing default params one at a time
+            val trailingDefaults = cls.constructor.params.reversed().takeWhile { it.hasDefault }.size
+            for (drop in 1..trailingDefaults) {
+                val requiredParams = cls.constructor.params.dropLast(drop)
+                val suffix = requiredParams.size.toString()
+                val oArgs = buildExpandedParamList(requiredParams)
+                appendLine("@CName(\"${p}_${n}_new$suffix\")")
+                appendLine("fun `${p}_${n}_new$suffix`($oArgs): Long {")
+                appendTryCatchStart()
+                val dummyFn = KneFunction("_ctor", requiredParams, KneType.UNIT)
+                appendObjectParamConversions(dummyFn)
+                val oCall = requiredParams.joinToString(", ") { "${it.name} = ${buildCallArg(it.name, it.type)}" }
+                appendLine("    return StableRef.create($fq($oCall)).asCPointer().toLong()")
+                appendTryCatchEnd(KneType.LONG)
+                appendLine("}")
+                appendLine()
+            }
         }
 
-        // Dispose (safe against double-call and concurrent access)
-        appendLine("@CName(\"${p}_${n}_dispose\")")
-        appendLine("fun `${p}_${n}_dispose`(handle: Long) {")
-        appendLine("    if (handle == 0L) return")
-        appendLine("    try {")
-        appendLine("        handle.toCPointer<COpaque>()?.asStableRef<$fq>()?.dispose()")
-        appendLine("    } catch (_: Throwable) {}")
-        appendLine("}")
-        appendLine()
+        // Dispose — every instantiable class gets its own dispose bridge
+        if (isInstantiable) {
+            appendLine("@CName(\"${p}_${n}_dispose\")")
+            appendLine("fun `${p}_${n}_dispose`(handle: Long) {")
+            appendLine("    if (handle == 0L) return")
+            appendLine("    try {")
+            appendLine("        handle.toCPointer<COpaque>()?.asStableRef<$fq>()?.dispose()")
+            appendLine("    } catch (_: Throwable) {}")
+            appendLine("}")
+            appendLine()
+        }
 
         // Methods (dispatch suspend / flow / regular)
         cls.methods.forEach { method ->
@@ -601,6 +615,8 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
         val getterName = "${prefix}_${cls.simpleName}_get_${prop.name}"
         val isCollProp = prop.type.isCollection()
+        val returnDc = extractDataClass(prop.type)
+        val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
 
         if (isCollProp) {
             // Collection property getter: return StableRef handle (Long)
@@ -610,6 +626,22 @@ class NativeBridgeGenerator {
             appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
             appendLine("    return StableRef.create(obj.${prop.name} as Any).asCPointer().toLong()")
             appendTryCatchEnd(KneType.LONG)
+            appendLine("}")
+            appendLine()
+        } else if (returnDc != null) {
+            // Data class property getter: expand fields into out-params
+            val dcOutParams = buildDataClassOutParams(returnDc)
+            val returnDecl = if (returnsNullableDc) ": Int" else ""
+            appendLine("@CName(\"$getterName\")")
+            appendLine("fun `$getterName`(handle: Long$dcOutParams)$returnDecl {")
+            appendTryCatchStart()
+            appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+            if (returnsNullableDc) {
+                appendNullableDataClassReturn("obj.${prop.name}", returnDc)
+            } else {
+                appendDataClassReturn("obj.${prop.name}", returnDc)
+            }
+            appendTryCatchEnd(if (returnsNullableDc) KneType.INT else KneType.UNIT)
             appendLine("}")
             appendLine()
         } else {
@@ -763,6 +795,81 @@ class NativeBridgeGenerator {
         appendLine()
     }
 
+    // ── Extension Functions ─────────────────────────────────────────────────
+
+    private fun StringBuilder.appendExtensionFunction(fn: KneFunction, prefix: String) {
+        val receiverType = fn.receiverType ?: return
+        val receiverSimpleName = when (receiverType) {
+            is KneType.OBJECT -> receiverType.simpleName
+            is KneType.INTERFACE -> receiverType.simpleName
+            else -> return
+        }
+        val receiverFqName = when (receiverType) {
+            is KneType.OBJECT -> receiverType.fqName
+            is KneType.INTERFACE -> receiverType.fqName
+            else -> return
+        }
+        val symbolName = "${prefix}_${receiverSimpleName}_ext_${fn.name}"
+        val returnsViaBuffer = fn.returnType.returnsViaBuffer()
+        val returnsCollection = fn.returnType.returnsViaCollectionBuffer()
+        val returnDc = extractDataClass(fn.returnType)
+        val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
+
+        val extraParams = if (returnsViaBuffer) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
+        val dcOutParams = if (returnDc != null) buildDataClassOutParams(returnDc) else ""
+        val collectionOutParams = if (returnsCollection) buildCollectionOutParams(fn.returnType) else ""
+        val expandedParams = buildExpandedParamList(fn.params)
+        val allParams = "receiverHandle: Long${if (expandedParams.isNotEmpty()) ", $expandedParams" else ""}$extraParams$dcOutParams$collectionOutParams"
+
+        val dcCollection = returnsCollection && isDcCollectionReturn(fn.returnType)
+        val returnDecl = when {
+            returnsNullableDc -> ": Int"
+            returnDc != null -> ""
+            dcCollection -> ": Long"
+            returnsCollection -> ": Int"
+            else -> buildReturnDecl(fn.returnType)
+        }
+
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`($allParams)$returnDecl {")
+        appendTryCatchStart()
+        appendLine("    val receiver = receiverHandle.toCPointer<COpaque>()!!.asStableRef<$receiverFqName>().get()")
+        appendObjectParamConversions(fn)
+        val callArgs = fn.params.joinToString(", ") { p -> buildCallArg(p.name, p.type) }
+        if (returnsNullableDc) {
+            appendNullableDataClassReturn("receiver.${fn.name}($callArgs)", returnDc!!)
+        } else if (returnDc != null) {
+            appendDataClassReturn("receiver.${fn.name}($callArgs)", returnDc)
+        } else if (returnsCollection) {
+            appendCollectionReturn("receiver.${fn.name}($callArgs)", fn.returnType)
+        } else {
+            appendReturnStatement("receiver.${fn.name}($callArgs)", fn.returnType)
+        }
+        appendTryCatchEnd(if (returnsNullableDc) KneType.INT else if (returnDc != null) KneType.UNIT else if (dcCollection) KneType.LONG else if (returnsCollection) KneType.INT else fn.returnType)
+        appendLine("}")
+        appendLine()
+    }
+
+    // ── Sealed Classes ──────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendSealedOrdinalBridge(cls: KneClass, prefix: String) {
+        if (cls.sealedSubclasses.isEmpty()) return
+        val symbolName = "${prefix}_${cls.simpleName}_getSubclassOrdinal"
+        appendLine("@CName(\"$symbolName\")")
+        appendLine("fun `$symbolName`(handle: Long): Int {")
+        appendTryCatchStart()
+        appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+        appendLine("    return when (obj) {")
+        cls.sealedSubclasses.forEachIndexed { index, subFq ->
+            appendLine("        is $subFq -> $index")
+        }
+        appendLine("        else -> -1")
+        appendLine("    }")
+        appendTryCatchEnd(KneType.INT)
+        appendLine("}")
+        appendLine()
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /** Build the return type declaration for a bridge function. */
@@ -771,6 +878,7 @@ class NativeBridgeGenerator {
         type.returnsViaCollectionBuffer() -> ": Int" // element count
         type == KneType.UNIT -> ""
         type is KneType.OBJECT -> ": Long"
+        type is KneType.INTERFACE -> ": Long"
         type is KneType.ENUM -> ": Int"
         type is KneType.NULLABLE -> ": ${type.nativeBridgeType}"
         else -> ": ${type.nativeBridgeType}"
@@ -788,6 +896,7 @@ class NativeBridgeGenerator {
         type is KneType.NULLABLE && type.inner is KneType.SET -> "${paramName}Set"
         type is KneType.NULLABLE && type.inner is KneType.MAP -> "${paramName}Map"
         type is KneType.OBJECT -> "${paramName}Obj"
+        type is KneType.INTERFACE -> "${paramName}Obj"
         type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         type is KneType.FUNCTION -> "${paramName}Fn"
         type is KneType.DATA_CLASS -> "${paramName}Obj"
@@ -806,6 +915,7 @@ class NativeBridgeGenerator {
         KneType.FLOAT -> "if ($paramName != Long.MIN_VALUE) Float.fromBits($paramName.toInt()) else null"
         KneType.DOUBLE -> "if ($paramName != Long.MIN_VALUE) Double.fromBits($paramName) else null"
         is KneType.OBJECT -> "if ($paramName != 0L) $paramName.toCPointer<COpaque>()!!.asStableRef<${type.inner.fqName}>().get() else null"
+        is KneType.INTERFACE -> "if ($paramName != 0L) $paramName.toCPointer<COpaque>()!!.asStableRef<${type.inner.fqName}>().get() else null"
         is KneType.ENUM -> "if ($paramName >= 0) ${type.inner.fqName}.entries[$paramName] else null"
         else -> paramName
     }
@@ -961,8 +1071,9 @@ class NativeBridgeGenerator {
             is KneType.ENUM -> {
                 appendLine("    val $listVar = List(${paramName}_size) { ${elemType.fqName}.entries[$paramName!![it]] }")
             }
-            is KneType.OBJECT -> {
-                appendLine("    val $listVar = List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
+            is KneType.OBJECT, is KneType.INTERFACE -> {
+                val fqn = when (elemType) { is KneType.OBJECT -> elemType.fqName; is KneType.INTERFACE -> elemType.fqName; else -> error("unreachable") }
+                appendLine("    val $listVar = List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<$fqn>().get() }")
             }
             KneType.BYTE_ARRAY -> {
                 // ByteArray elements: each is a StableRef handle
@@ -1003,6 +1114,7 @@ class NativeBridgeGenerator {
             KneType.BOOLEAN -> appendLine("        List(${paramName}_size) { $paramName!![it] != 0 }")
             is KneType.ENUM -> appendLine("        List(${paramName}_size) { ${elemType.fqName}.entries[$paramName!![it]] }")
             is KneType.OBJECT -> appendLine("        List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
+            is KneType.INTERFACE -> appendLine("        List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
             else -> appendLine("        List(${paramName}_size) { $paramName!![it] }")
         }
     }
@@ -1350,7 +1462,7 @@ class NativeBridgeGenerator {
             KneType.STRING -> appendStringReturn(expr)
             KneType.UNIT -> appendLine("    $expr")
             KneType.BOOLEAN -> appendLine("    return if ($expr) 1 else 0")
-            is KneType.OBJECT -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
+            is KneType.OBJECT, is KneType.INTERFACE -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
             is KneType.ENUM -> appendLine("    return ($expr).ordinal")
             is KneType.FUNCTION -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
             is KneType.NULLABLE -> appendNullableReturn(expr, type)
@@ -1377,7 +1489,7 @@ class NativeBridgeGenerator {
             KneType.BYTE -> appendLine("    return _result?.toInt() ?: Int.MIN_VALUE")
             KneType.FLOAT -> appendLine("    return _result?.toRawBits()?.toLong() ?: Long.MIN_VALUE")
             KneType.DOUBLE -> appendLine("    return _result?.toRawBits() ?: Long.MIN_VALUE")
-            is KneType.OBJECT -> appendLine("    return if (_result != null) StableRef.create(_result).asCPointer().toLong() else 0L")
+            is KneType.OBJECT, is KneType.INTERFACE -> appendLine("    return if (_result != null) StableRef.create(_result).asCPointer().toLong() else 0L")
             is KneType.ENUM -> appendLine("    return _result?.ordinal ?: -1")
             KneType.UNIT -> appendLine("    _result")
             else -> appendLine("    return _result")
@@ -1391,6 +1503,7 @@ class NativeBridgeGenerator {
             KneType.BOOLEAN -> appendLine("    $target = value != 0")
             is KneType.ENUM -> appendLine("    $target = ${type.fqName}.entries[value]")
             is KneType.OBJECT -> appendLine("    $target = value.toCPointer<COpaque>()!!.asStableRef<${type.fqName}>().get()")
+            is KneType.INTERFACE -> appendLine("    $target = value.toCPointer<COpaque>()!!.asStableRef<${type.fqName}>().get()")
             is KneType.NULLABLE -> appendNullableSetterBody(target, type)
             else -> appendLine("    $target = value")
         }
