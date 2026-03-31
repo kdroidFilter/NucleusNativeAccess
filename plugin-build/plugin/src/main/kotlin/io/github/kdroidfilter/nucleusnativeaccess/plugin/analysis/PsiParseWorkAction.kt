@@ -29,9 +29,14 @@ abstract class PsiParseWorkAction : WorkAction<PsiParseWorkAction.Params> {
         val nativeFiles = parameters.nativeSourceFiles.files
         val commonFiles = parameters.commonSourceFiles.files
         val libName = parameters.libName.get()
-        val jvmPackage = parameters.jvmPackage.get()
+        val configuredPackage = parameters.jvmPackage.get()
 
         val module = PsiSourceParser().parse(nativeFiles, libName, commonFiles)
+
+        // Auto-detect package from sources if not explicitly configured
+        val jvmPackage = configuredPackage.ifEmpty {
+            module.packages.firstOrNull() ?: ""
+        }
 
         // Generate native bridges
         val nativeBridgesDir = parameters.nativeBridgesDir.get().asFile

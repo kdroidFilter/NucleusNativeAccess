@@ -73,7 +73,8 @@ kotlin {
 
 kotlinNativeExport {
     nativeLibName = "mylib"         // output: libmylib.so (release ~700KB)
-    nativePackage = "com.example"   // package for generated JVM proxies
+    // nativePackage is auto-detected from your Kotlin source package declarations
+    // nativePackage = "com.example"   // override only if needed
     buildType = "release"           // "release" (default, optimized) or "debug"
 }
 ```
@@ -427,8 +428,9 @@ kotlinNativeExport {
     // Produces: libmylib.so (Linux), libmylib.dylib (macOS), mylib.dll (Windows)
     nativeLibName = "mylib"
 
-    // Package for the generated JVM proxy classes (required)
-    nativePackage = "com.example"
+    // Package for JVM proxies — auto-detected from your Kotlin source package declarations
+    // Only set this if you have multiple packages and want to override the auto-detection
+    // nativePackage = "com.example"
 
     // Build type: "release" (default, ~700KB .so) or "debug" (~6MB .so)
     buildType = "release"
@@ -498,7 +500,7 @@ kotlin {
 
 kotlinNativeExport {
     nativeLibName = "mylib"
-    nativePackage = "com.example.mylib"
+    // nativePackage auto-detected from source package declarations
 }
 ```
 
