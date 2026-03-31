@@ -26,13 +26,23 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
+          version: 1.0
 
       - name: Build calculator (compile tests without running)
         run: ./gradlew :examples:calculator:jvmTestClasses :examples:calculator:compileKotlinLinuxX64
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs
+          path: |
+            examples/calculator/build/
+            plugin-build/plugin/build/
+          retention-days: 1
 
   test:
     needs: build
@@ -40,49 +50,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - CoreTest
-          - EnumTest
-          - ObjectTest
-          - NullableTest
-          - DataClassTest
-          - NestedDataClassTest
-          - CallbackTest
-          - NestedClassTest
-          - FlowTest
-          - LoadAndConcurrencyTest
-          - CollectionTest
-          - EdgeCaseTest
-          - SuspendBasicTest
-          - SuspendHeavyTest
-          - SuspendCrossFeatureTest
-          - FlowDataClassTest
-          - SuspendDataClassTest
-          - SuspendCollectionTest
-          - ListDataClassParamTest
-          - DcCollectionFieldTest
-          - CollectionPropertyTest
-          - NullableCallbackTest
-          - FlowCollectionTest
-          - NestedCollectionTest
-          - FlowByteArrayTest
-          - ByteArrayEverywhereTest
-          - LambdaReturnTest
-          - SuspendEdgeCaseTest
-          - CoroutineCrossFeatureTest
-          - AsyncCallbackTest
-          - AsyncCoreTest
-          - AsyncCollectionTest
-          - AsyncDataClassEnumTest
-          - AsyncSuspendFlowTest
-          - InterfaceTest
-          - ExtensionFunctionTest
-          - InheritanceTest
-          - SealedClassTest
-          - InheritanceEdgeCaseTest
-          - AsyncInheritanceTest
-          - LoadInheritanceTest
-    name: "Test: ${{ matrix.test }}"
+        include:
+          # Batch 1: Core features (fast tests grouped)
+          - name: core-basic
+            tests: "CoreTest,EnumTest,ObjectTest,NullableTest,SealedClassTest"
+          # Batch 2: Data classes & nested
+          - name: dataclass
+            tests: "DataClassTest,NestedDataClassTest,NestedClassTest,NestedCollectionTest"
+          # Batch 3: Collections
+          - name: collections
+            tests: "CollectionTest,CollectionPropertyTest,DcCollectionFieldTest,ListDataClassParamTest"
+          # Batch 4: Callbacks & lambdas
+          - name: callbacks
+            tests: "CallbackTest,NullableCallbackTest,LambdaReturnTest"
+          # Batch 5: Flow
+          - name: flow
+            tests: "FlowTest,FlowDataClassTest,FlowCollectionTest,FlowByteArrayTest"
+          # Batch 6: Suspend basic
+          - name: suspend-basic
+            tests: "SuspendBasicTest,SuspendDataClassTest,SuspendCollectionTest"
+          # Batch 7: Suspend heavy + edge
+          - name: suspend-heavy
+            tests: "SuspendHeavyTest,SuspendCrossFeatureTest,SuspendEdgeCaseTest"
+          # Batch 8: Edge cases & ByteArray
+          - name: edge-cases
+            tests: "EdgeCaseTest,ByteArrayEverywhereTest"
+          # Batch 9: Inheritance & interfaces
+          - name: inheritance
+            tests: "InheritanceTest,InterfaceTest,ExtensionFunctionTest,InheritanceEdgeCaseTest"
+          # Batch 10: Async tests (heavier, keep separate)
+          - name: async-core
+            tests: "AsyncCoreTest,AsyncCallbackTest"
+          - name: async-data
+            tests: "AsyncDataClassEnumTest,AsyncCollectionTest"
+          - name: async-suspend
+            tests: "AsyncSuspendFlowTest,CoroutineCrossFeatureTest"
+          # Batch 13: Load & concurrency
+          - name: load
+            tests: "LoadAndConcurrencyTest,LoadInheritanceTest,AsyncInheritanceTest"
+    name: "Test: ${{ matrix.name }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,10 +102,22 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libnotify-dev libglib2.0-dev libdbusmenu-glib-dev libpipewire-0.3-dev
+          version: 1.0
 
-      - name: "Run ${{ matrix.test }}"
-        run: ./gradlew :examples:calculator:jvmTest --tests "com.example.calculator.${{ matrix.test }}"
+      - name: Download build outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+
+      - name: "Run ${{ matrix.name }}"
+        run: |
+          IFS=',' read -ra TESTS <<< "${{ matrix.tests }}"
+          ARGS=""
+          for t in "${TESTS[@]}"; do
+            ARGS="$ARGS --tests com.example.calculator.$t"
+          done
+          ./gradlew :examples:calculator:jvmTest $ARGS

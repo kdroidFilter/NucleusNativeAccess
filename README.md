@@ -121,9 +121,9 @@ No JNI. No annotations. No boilerplate. Just write Kotlin/Native and use it from
 
 ## What's supported
 
-### Types — test coverage (1350+ end-to-end FFM tests)
+### Types — test coverage (1700+ end-to-end FFM tests)
 
-Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 1350+ tests cross the real native boundary. Includes 25 load tests (500K+ FFM calls), concurrent stress tests (10 threads), 110+ suspend function tests with cancellation (incl. ByteArray, DataClass, List, Set, Map), and 50+ Flow tests (including `Flow<DataClass>`).
+Every test compiles Kotlin/Native → `libcalculator.so` (470+ exported symbols) → loads via FFM `MethodHandle` → verifies on JVM. Zero mocks — all 1700+ tests cross the real native boundary. Includes load tests (500K+ FFM calls), concurrent stress tests, 110+ suspend function tests with cancellation, 50+ Flow tests, and 300+ inheritance/interface/extension tests.
 
 | Feature | As param | As return | As property | CB param | CB return | Notes |
 |---------|----------|-----------|-------------|----------|-----------|-------|
@@ -157,9 +157,14 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Feature | Supported | Notes |
 |---------|-----------|-------|
 | Top-level classes | ✅ | `StableRef` lifecycle, `AutoCloseable` on JVM |
+| Open / abstract classes | ✅ | `open class Shape` → JVM `open class Shape`, hierarchy mirrored |
+| Inheritance | ✅ | `class Circle : Shape` → JVM `class Circle : Shape(handle)`, multi-level (3+) |
+| Interfaces | ✅ | `interface Measurable` → JVM `interface Measurable`, multi-interface impl |
+| Sealed classes | ✅ | `sealed class AppResult` → JVM `sealed class`, subclass ordinal bridges |
+| Extension functions | ✅ | `fun Shape.displayName()` → real Kotlin extension on JVM proxy |
 | Nested classes | ✅ | exported as `Outer_Inner`, qualified bridge symbols |
-| Methods (fun) | ✅ | instance methods with any supported param/return types |
-| Properties (val/var) | ✅ | getters + setters, all supported types |
+| Methods (fun) | ✅ | instance methods with any supported param/return types, `override` preserved |
+| Properties (val/var) | ✅ | getters + setters, all supported types, including constructor `val`/`var` params |
 | Constructors | ✅ | primary constructor with supported param types |
 | Constructor default params | ✅ | generates overloads for trailing default parameters |
 | Companion objects | ✅ | static methods and properties on JVM proxy |
@@ -167,8 +172,8 @@ Every test compiles Kotlin/Native → `libcalculator.so` (200+ exported symbols)
 | Enum classes | ✅ | auto-generated JVM enum with ordinal mapping |
 | Data classes (nativeMain) | ✅ | auto-generates JVM data class + field marshalling |
 | Data classes (commonMain) | ✅ | reuses existing JVM type, no proxy generated |
-| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (110+ tests, incl. ByteArray, DataClass, List, Set, Map) |
-| Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (50+ tests, incl. DataClass) |
+| Suspend functions | ✅ | `suspendCancellableCoroutine` + bidirectional cancellation (110+ tests) |
+| Flow&lt;T&gt; return | ✅ | `channelFlow` + onNext/onError/onComplete callbacks (50+ tests) |
 | Exception propagation | ✅ | `try/catch` wrapping, `KotlinNativeException` on JVM |
 | Object lifecycle | ✅ | `Cleaner` for GC + `close()` for explicit release |
 
@@ -383,16 +388,14 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 - **Memory advantage**: native allocations don't touch the JVM heap, reducing GC pressure significantly (0 KB vs 131 MB for string-heavy workloads)
 - **Thread-safe**: all concurrent benchmarks pass with zero crashes (AtomicReference error state, idempotent dispose)
 
-## What's NOT supported
+## What's NOT supported (yet)
 
 ### Language features
 
-| Feature | Reason | Alternative |
-|---------|--------|-------------|
-| Interfaces | Can live in `commonMain` | Define in shared KMP code |
-| Inheritance / open classes | Can live in `commonMain` | Define in shared KMP code |
-| Sealed classes | Can live in `commonMain` | Define in shared KMP code |
-| Generics | Complex type erasure at FFM boundary | Use concrete types or collections |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Generics (`class Box<T>`) | Not yet | Complex type erasure at FFM boundary — use concrete types |
+| Interface / sealed class as return type | Not yet | Methods returning interface types must return the concrete type |
 | Private/internal members | By design | Only public API is exported |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
 
@@ -560,7 +563,7 @@ The repository includes two complete examples in [`examples/`](examples/):
 
 | Example | Description |
 |---------|-------------|
-| [`calculator/`](examples/calculator/) | Stateful Calculator class with 1350+ end-to-end tests: all types, callbacks, collections (incl. `List<DataClass>` params), collection properties, data class collection fields, suspend (incl. DataClass, List, Set, Map), Flow (incl. DataClass), nested classes, concurrency |
+| [`calculator/`](examples/calculator/) | Stateful Calculator class with 1700+ end-to-end tests: all types, callbacks, collections, suspend, Flow, nested classes, inheritance hierarchies, interfaces, sealed classes, extension functions, concurrency |
 | [`systeminfo/`](examples/systeminfo/) | Linux system info (`/proc`, POSIX, `gethostname`) + native notifications via `libnotify` cinterop, with Compose Desktop UI |
 | [`benchmark/`](examples/benchmark/) | Performance benchmarks: native vs JVM (fibonacci, pi, sort, string, allocation, concurrent) |
 
@@ -569,7 +572,7 @@ Run them:
 ```bash
 ./gradlew :examples:calculator:run
 ./gradlew :examples:systeminfo:run
-./gradlew :examples:calculator:jvmTest    # 1350+ end-to-end FFM tests
+./gradlew :examples:calculator:jvmTest    # 1700+ end-to-end FFM tests
 ./gradlew :examples:benchmark:jvmTest     # Performance benchmarks (native vs JVM)
 ```
 
@@ -601,9 +604,11 @@ plugin-build/plugin/src/main/kotlin/io/github/kdroidfilter/nucleusnativeaccess/p
 
 ### Design philosophy
 
-This plugin binds **only what must cross the native boundary** &mdash; platform-specific APIs (cinterop, POSIX, C libraries), performance-critical native code, and types that cannot exist in common Kotlin.
+This plugin bridges **Kotlin/Native code to the JVM transparently** &mdash; platform-specific APIs (cinterop, POSIX, C libraries), performance-critical native code, and types that cannot exist in common Kotlin.
 
-Features like interfaces, inheritance, sealed classes, and generics belong in `commonMain` (shared KMP code) and do not need FFM bridges. Data classes are supported as value types (field marshalling) to enable natural APIs, and `commonMain` data classes are reused directly without generating duplicates.
+The bridge supports the full Kotlin OOP model: inheritance hierarchies are mirrored on the JVM side (`open class Shape` → `class Circle : Shape`), interfaces generate JVM interfaces with `val handle: Long`, and `override` modifiers are preserved. Extension functions become real Kotlin extensions on the JVM proxy. Sealed classes generate sealed JVM classes with subclass dispatch.
+
+Data classes are supported as value types (field marshalling), and `commonMain` data classes are reused directly without generating duplicates.
 
 ## Requirements
 
