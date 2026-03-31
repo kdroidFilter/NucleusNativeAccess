@@ -789,6 +789,7 @@ class NativeBridgeGenerator {
         type is KneType.OBJECT -> "${paramName}Obj"
         type is KneType.ENUM -> "${type.fqName}.entries[$paramName]"
         type is KneType.FUNCTION -> "${paramName}Fn"
+        type is KneType.NULLABLE && type.inner is KneType.FUNCTION -> "${paramName}NullFn"
         type is KneType.DATA_CLASS -> "${paramName}Obj"
         type is KneType.NULLABLE && type.inner is KneType.DATA_CLASS -> "${paramName}Obj"
         type is KneType.NULLABLE -> buildNullableCallArg(paramName, type)
@@ -831,6 +832,14 @@ class NativeBridgeGenerator {
         fn.params.filter { it.type is KneType.FUNCTION }.forEach { p ->
             val fnType = p.type as KneType.FUNCTION
             appendFunctionParamConversion(p.name, fnType)
+        }
+        // Nullable function params: generate lambda conversion, wrap as nullable
+        fn.params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner is KneType.FUNCTION }.forEach { p ->
+            val fnType = (p.type as KneType.NULLABLE).inner as KneType.FUNCTION
+            // Generate the conversion as if non-null (creates ${p.name}Fn variable)
+            appendFunctionParamConversion(p.name, fnType)
+            // Then create the nullable wrapper
+            appendLine("    val ${p.name}NullFn = if (${p.name} == 0L) null else ${p.name}Fn")
         }
         // Reconstruct data classes from flattened fields (including nullable variants and nested)
         fn.params.forEach { p ->

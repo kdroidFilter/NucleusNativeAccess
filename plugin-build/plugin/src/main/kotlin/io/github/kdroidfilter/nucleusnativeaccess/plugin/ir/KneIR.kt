@@ -123,7 +123,7 @@ sealed class KneType : Serializable {
             UNIT -> "Unit"
             is OBJECT -> simpleName
             is ENUM -> simpleName
-            is NULLABLE -> "${inner.jvmTypeName}?"
+            is NULLABLE -> if (inner is FUNCTION) "(${inner.jvmTypeName})?" else "${inner.jvmTypeName}?"
             is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
             is DATA_CLASS -> simpleName
             BYTE_ARRAY -> "ByteArray"
