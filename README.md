@@ -388,16 +388,34 @@ Measured on Intel Core i5-14600 (20 cores), 45 GB RAM, Ubuntu 25.10, JDK 25 (Gra
 - **Memory advantage**: native allocations don't touch the JVM heap, reducing GC pressure significantly (0 KB vs 131 MB for string-heavy workloads)
 - **Thread-safe**: all concurrent benchmarks pass with zero crashes (AtomicReference error state, idempotent dispose)
 
-## What's NOT supported (yet)
+## What's NOT supported
 
-### Language features
+### Not yet implemented
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Generics (`class Box<T>`) | Not yet | Complex type erasure at FFM boundary — use concrete types |
-| Interface / sealed class as return type | Not yet | Methods returning interface types must return the concrete type |
-| Private/internal members | By design | Only public API is exported |
+| Feature | Notes |
+|---------|-------|
+| Generics (`class Box<T>`) | Complex type erasure at FFM boundary — use concrete types |
+| Interface / sealed class as return type | Methods must return the concrete type, not the interface/sealed parent |
+| Operator overloading (`operator fun plus`) | Use named methods (`fun add()`) |
+| Infix functions | Use regular method syntax |
+| Extension functions on stdlib types | Only extensions on project classes are bridged |
+
+### By design
+
+| Feature | Reason | Alternative |
+|---------|--------|-------------|
+| Private/internal/protected members | Only public API is exported | Use `public` modifier |
 | Expect/actual declarations | KMP's responsibility | Use platform-specific source sets |
+| `ByteArray` in collections | Buffer lifecycle complexity across FFM | Use `List<Int>` or Base64 String |
+| `ByteArray` as data class field | Out-param buffer not wired for DC fields | Use separate method or String |
+| `ByteArray` as callback param | Buffer lifecycle across callback boundary | Use String (Base64) |
+| Lambda as callback return type | Callbacks supported as parameters only | Return object with methods |
+| CInterop types in public API (`CPointer`, `COpaque`) | Kotlin/Native-only types, not marshallable | Wrap behind a Kotlin API |
+| Subclassing from JVM | JVM proxy classes are handles, not real native objects | Subclass on native side |
+
+### Scope limitations
+
+The bridge is designed for **Kotlin-level APIs** — clean classes, interfaces, data classes, functions. It is **not** a C FFI wrapper. Projects that expose raw C types in their public API (like GTK bindings with `CPointer<GtkWidget>`) are not compatible. Wrap them behind a clean Kotlin API first.
 
 
 
