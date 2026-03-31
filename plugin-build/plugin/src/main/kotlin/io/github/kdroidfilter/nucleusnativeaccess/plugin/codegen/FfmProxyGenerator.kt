@@ -1130,6 +1130,36 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
+        // DC collection field wrap handles
+        val dcFieldCollKeys = mutableSetOf<String>()
+        val dcFieldMapKeys = mutableSetOf<Pair<String, String>>()
+        fun scanDcFieldColls(dc: KneType.DATA_CLASS) {
+            dc.fields.forEach { f ->
+                when (f.type) {
+                    is KneType.LIST -> if (f.type.elementType !is KneType.DATA_CLASS) dcFieldCollKeys.add(suspendCollElemKey(f.type.elementType))
+                    is KneType.SET -> if (f.type.elementType !is KneType.DATA_CLASS) dcFieldCollKeys.add(suspendCollElemKey(f.type.elementType))
+                    is KneType.MAP -> dcFieldMapKeys.add(Pair(suspendCollElemKey(f.type.keyType), suspendCollElemKey(f.type.valueType)))
+                    is KneType.DATA_CLASS -> scanDcFieldColls(f.type)
+                    else -> {}
+                }
+            }
+        }
+        // Scan DC params for collection fields
+        cls.methods.forEach { m -> m.params.forEach { pp -> extractDataClass(pp.type)?.let { scanDcFieldColls(it) } } }
+        for (key in dcFieldCollKeys) {
+            val uk = key.uppercase()
+            appendLine("        private val WRAP_COLL_${uk}_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_kne_wrapColl$key\", FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("        }")
+        }
+        for ((kk, vk) in dcFieldMapKeys) {
+            val ukk = kk.uppercase()
+            val uvk = vk.uppercase()
+            appendLine("        private val WRAP_MAP_${ukk}_${uvk}_HANDLE: MethodHandle by lazy {")
+            appendLine("            KneRuntime.handle(\"${p}_kne_wrapMap$kk$vk\", FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT))")
+            appendLine("        }")
+        }
+
         // Flow<DC> reader handles
         val dcFlowTypes = mutableSetOf<KneType.DATA_CLASS>()
         cls.methods.forEach { m -> if (m.returnType is KneType.FLOW && (m.returnType as KneType.FLOW).elementType is KneType.DATA_CLASS) dcFlowTypes.add((m.returnType as KneType.FLOW).elementType as KneType.DATA_CLASS) }
@@ -1175,7 +1205,7 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
-        // Suspend collection reader handles
+        // Suspend collection reader handles (also used for DC collection fields)
         val suspendCollKeys = mutableSetOf<String>()
         val suspendMapKeys = mutableSetOf<Pair<String, String>>()
         fun extractSuspendColl(fn: KneFunction) {
@@ -1193,6 +1223,23 @@ class FfmProxyGenerator {
         }
         cls.methods.forEach { extractSuspendColl(it) }
         cls.companionMethods.forEach { extractSuspendColl(it) }
+        // Also scan DC return types for collection fields (reader bridges needed)
+        fun scanDcFieldsForCollReaders(dc: KneType.DATA_CLASS) {
+            dc.fields.forEach { f ->
+                when (f.type) {
+                    is KneType.LIST -> if (f.type.elementType !is KneType.DATA_CLASS) suspendCollKeys.add(suspendCollElemKey(f.type.elementType))
+                    is KneType.SET -> if (f.type.elementType !is KneType.DATA_CLASS) suspendCollKeys.add(suspendCollElemKey(f.type.elementType))
+                    is KneType.MAP -> suspendMapKeys.add(Pair(suspendCollElemKey(f.type.keyType), suspendCollElemKey(f.type.valueType)))
+                    is KneType.DATA_CLASS -> scanDcFieldsForCollReaders(f.type)
+                    else -> {}
+                }
+            }
+        }
+        cls.methods.forEach { m ->
+            extractDataClass(m.returnType)?.let { scanDcFieldsForCollReaders(it) }
+            m.params.forEach { pp -> extractDataClass(pp.type)?.let { scanDcFieldsForCollReaders(it) } }
+        }
+        cls.companionMethods.forEach { m -> extractDataClass(m.returnType)?.let { scanDcFieldsForCollReaders(it) } }
         for (key in suspendCollKeys) {
             val uk = key.uppercase()
             val layout = when (key) {
@@ -1388,6 +1435,7 @@ class FfmProxyGenerator {
                 }.joinToString(", ")
                 val dn = elemType.simpleName.uppercase()
                 appendLine("${indent}    FLOWDC_${dn}_READ_HANDLE.invoke($readArgs)")
+                if (dcHasCollectionFields(elemType)) appendDcCollectionFieldReads("${indent}    ", elemType, "out")
                 appendLine("${indent}    trySend(${buildDcCtorFromOutParams(elemType, "out")})")
                 appendLine("${indent}}")
             }
@@ -1478,6 +1526,7 @@ class FfmProxyGenerator {
                 }.joinToString(", ")
                 val dn = type.simpleName.uppercase()
                 appendLine("${indent}    SUSPENDDC_${dn}_READ_HANDLE.invoke($readArgs)")
+                if (dcHasCollectionFields(type)) appendDcCollectionFieldReads("${indent}    ", type, "out")
                 appendLine("${indent}    _cont.resume(${buildDcCtorFromOutParams(type, "out")})")
                 appendLine("${indent}}")
             }
@@ -1713,11 +1762,142 @@ class FfmProxyGenerator {
             appendLine("${indent}KneRuntime.checkError()")
         }
 
-        // Reconstruct the data class from flat out-params (recursive)
+        // Read collection fields from StableRef handles, then reconstruct the data class
+        if (dcHasCollectionFields(dc)) {
+            appendDcCollectionFieldReads(indent, dc, "out")
+        }
         appendLine("${indent}return ${buildDcCtorFromOutParams(dc, "out")}")
     }
 
     /** Build a constructor call that reads from out-params (recursive for nested data classes). */
+    /** Check if a DC (or nested DCs) has any collection fields. */
+    private fun dcHasCollectionFields(dc: KneType.DATA_CLASS): Boolean =
+        dc.fields.any { f ->
+            f.type is KneType.LIST || f.type is KneType.SET || f.type is KneType.MAP ||
+                (f.type is KneType.DATA_CLASS && dcHasCollectionFields(f.type))
+        }
+
+    /** Emit local variables for reading collection fields from StableRef handles before constructing the DC. */
+    private fun StringBuilder.appendDcCollectionFieldReads(indent: String, dc: KneType.DATA_CLASS, prefix: String) {
+        dc.fields.forEach { f ->
+            val name = "${prefix}_${f.name}"
+            when (f.type) {
+                is KneType.LIST -> {
+                    val elemType = f.type.elementType
+                    val handle = "${name}_collHandle"
+                    appendLine("${indent}val $handle = $name.get(JAVA_LONG, 0) as Long")
+                    if (elemType is KneType.DATA_CLASS) {
+                        val dn = elemType.simpleName.uppercase()
+                        appendLine("${indent}val ${name}_collVal = run {")
+                        appendLine("${indent}    val _size = LIST_${dn}_SIZE_HANDLE.invoke($handle) as Int")
+                        appendLine("${indent}    val _list = ArrayList<${elemType.simpleName}>(_size)")
+                        appendLine("${indent}    Arena.ofConfined().use { _dcArena ->")
+                        val flatFields = flattenDcFields(elemType, "out")
+                        flatFields.forEach { (fn, ft) ->
+                            when (ft) {
+                                KneType.STRING, KneType.BYTE_ARRAY -> appendLine("${indent}        val $fn = _dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                                else -> appendLine("${indent}        val $fn = _dcArena.allocate(${ft.ffmLayout})")
+                            }
+                        }
+                        appendLine("${indent}        for (_i in 0 until _size) {")
+                        val getArgs = buildList {
+                            add(handle); add("_i")
+                            flatFields.forEach { (fn, ft) -> when (ft) { KneType.STRING, KneType.BYTE_ARRAY -> { add(fn); add("$STRING_BUF_SIZE") }; else -> add(fn) } }
+                        }.joinToString(", ")
+                        appendLine("${indent}            LIST_${dn}_GET_HANDLE.invoke($getArgs)")
+                        if (dcHasCollectionFields(elemType)) {
+                            appendDcCollectionFieldReads("${indent}            ", elemType, "out")
+                        }
+                        appendLine("${indent}            _list.add(${buildDcCtorFromOutParams(elemType, "out")})")
+                        appendLine("${indent}        }")
+                        appendLine("${indent}    }")
+                        appendLine("${indent}    LIST_${dn}_DISPOSE_HANDLE.invoke($handle)")
+                        appendLine("${indent}    _list as List<${elemType.simpleName}>")
+                        appendLine("${indent}}")
+                    } else {
+                        appendCollFieldPrimitiveListRead(indent, name, elemType, handle)
+                    }
+                }
+                is KneType.SET -> {
+                    val elemType = f.type.elementType
+                    val handle = "${name}_collHandle"
+                    appendLine("${indent}val $handle = $name.get(JAVA_LONG, 0) as Long")
+                    appendCollFieldPrimitiveListRead(indent, name, elemType, handle, isSet = true)
+                }
+                is KneType.MAP -> {
+                    val kk = suspendCollElemKey(f.type.keyType)
+                    val vk = suspendCollElemKey(f.type.valueType)
+                    val handle = "${name}_collHandle"
+                    appendLine("${indent}val $handle = $name.get(JAVA_LONG, 0) as Long")
+                    appendLine("${indent}val ${name}_collVal = run {")
+                    appendLine("${indent}    Arena.ofConfined().use { _mapArena ->")
+                    val isKeyString = f.type.keyType == KneType.STRING
+                    val isValString = f.type.valueType == KneType.STRING
+                    if (isKeyString) appendLine("${indent}        val _keysBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("${indent}        val _keysBuf = _mapArena.allocate(${KneType.collectionElementLayout(f.type.keyType)}, $MAX_COLLECTION_SIZE.toLong())")
+                    if (isValString) appendLine("${indent}        val _valsBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("${indent}        val _valsBuf = _mapArena.allocate(${KneType.collectionElementLayout(f.type.valueType)}, $MAX_COLLECTION_SIZE.toLong())")
+                    val keySizeArg = if (isKeyString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                    val valSizeArg = if (isValString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                    appendLine("${indent}        val _count = SUSPEND_READMAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke($handle, _keysBuf, $keySizeArg, _valsBuf, $valSizeArg) as Int")
+                    if (isKeyString) {
+                        appendLine("${indent}        val _keys = mutableListOf<String>()")
+                        appendLine("${indent}        var _kOff = 0L")
+                        appendLine("${indent}        repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                    } else {
+                        appendLine("${indent}        val _keys = List(_count) { _keysBuf.getAtIndex(${KneType.collectionElementLayout(f.type.keyType)}, it.toLong()) as ${f.type.keyType.jvmTypeName} }")
+                    }
+                    if (isValString) {
+                        appendLine("${indent}        val _vals = mutableListOf<String>()")
+                        appendLine("${indent}        var _vOff = 0L")
+                        appendLine("${indent}        repeat(_count) { _vals.add(_valsBuf.getString(_vOff)); _vOff += _vals.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                    } else {
+                        appendLine("${indent}        val _vals = List(_count) { _valsBuf.getAtIndex(${KneType.collectionElementLayout(f.type.valueType)}, it.toLong()) as ${f.type.valueType.jvmTypeName} }")
+                    }
+                    appendLine("${indent}        _keys.zip(_vals).toMap()")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                }
+                is KneType.DATA_CLASS -> {
+                    if (dcHasCollectionFields(f.type)) {
+                        appendDcCollectionFieldReads(indent, f.type, name)
+                    }
+                }
+                else -> {}
+            }
+        }
+    }
+
+    /** Read a primitive/string/enum/object list from StableRef handle into a local variable. */
+    private fun StringBuilder.appendCollFieldPrimitiveListRead(indent: String, name: String, elemType: KneType, handle: String, isSet: Boolean = false) {
+        val key = suspendCollElemKey(elemType)
+        appendLine("${indent}val ${name}_collVal = run {")
+        appendLine("${indent}    Arena.ofConfined().use { _collArena ->")
+        if (elemType == KneType.STRING) {
+            appendLine("${indent}        val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
+            appendLine("${indent}        val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke($handle, _outBuf, $STRING_BUF_SIZE) as Int")
+            appendLine("${indent}        val _list = mutableListOf<String>()")
+            appendLine("${indent}        var _off = 0L")
+            appendLine("${indent}        repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
+            if (isSet) appendLine("${indent}        _list.toSet()")
+            else appendLine("${indent}        _list as List<String>")
+        } else {
+            val layout = KneType.collectionElementLayout(elemType)
+            appendLine("${indent}        val _outBuf = _collArena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("${indent}        val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke($handle, _outBuf, $MAX_COLLECTION_SIZE) as Int")
+            when (elemType) {
+                KneType.BOOLEAN -> appendLine("${indent}        val _list = List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+                is KneType.ENUM -> appendLine("${indent}        val _list = List(_count) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+                is KneType.OBJECT -> appendLine("${indent}        val _list = List(_count) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                else -> appendLine("${indent}        val _list = List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+            }
+            if (isSet) appendLine("${indent}        _list.toSet()")
+            else appendLine("${indent}        _list")
+        }
+        appendLine("${indent}    }")
+        appendLine("${indent}}")
+    }
+
     private fun buildDcCtorFromOutParams(dc: KneType.DATA_CLASS, prefix: String): String {
         val args = dc.fields.joinToString(", ") { f ->
             val name = "${prefix}_${f.name}"
@@ -1727,6 +1907,7 @@ class FfmProxyGenerator {
                 is KneType.ENUM -> "${f.name} = ${f.type.simpleName}.entries[$name.get(JAVA_INT, 0)]"
                 is KneType.OBJECT -> "${f.name} = ${f.type.simpleName}.fromNativeHandle($name.get(JAVA_LONG, 0) as Long)"
                 is KneType.DATA_CLASS -> "${f.name} = ${buildDcCtorFromOutParams(f.type, name)}"
+                is KneType.LIST, is KneType.SET, is KneType.MAP -> "${f.name} = ${name}_collVal"
                 else -> "${f.name} = $name.get(${f.type.ffmLayout}, 0) as ${f.type.jvmTypeName}"
             }
         }
@@ -1792,6 +1973,7 @@ class FfmProxyGenerator {
                 is KneType.ENUM -> listOf("$access?.ordinal ?: 0")
                 is KneType.OBJECT -> listOf("$access?.handle ?: 0L")
                 is KneType.DATA_CLASS -> buildFlatInvokeArgs(f.type, access ?: "null", paramName, nullable)
+                is KneType.LIST, is KneType.SET, is KneType.MAP -> listOf("${paramName}CollHandle")
                 else -> listOf("$access ?: 0")
             }
         }
@@ -1988,8 +2170,9 @@ class FfmProxyGenerator {
                     if (p.type is KneType.NULLABLE) add("JAVA_INT") // isNull flag
                     // Param: String fields are just ADDRESS (null-terminated), no size needed
                     flattenDcFields(dc, "").forEach { (_, type) ->
-                        when (type) {
-                            KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
+                        when {
+                            type == KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
+                            type is KneType.LIST || type is KneType.SET || type is KneType.MAP -> add("JAVA_LONG")
                             else -> add(type.ffmLayout)
                         }
                     }
@@ -2222,7 +2405,144 @@ class FfmProxyGenerator {
                     appendLine("${indent}val ${p.name}_${f.name}Seg = arena.allocateFrom(${p.name}.${f.name})")
                 }
             }
+            // Wrap collection fields from DC params into StableRef handles
+            appendDcCollectionFieldWraps(indent, dc, p.name, isNullable)
         }
+    }
+
+    /** Emit wrap bridge calls for collection fields in DC params. */
+    private fun StringBuilder.appendDcCollectionFieldWraps(indent: String, dc: KneType.DATA_CLASS, objExpr: String, nullable: Boolean) {
+        dc.fields.forEach { f ->
+            val paramName = "${objExpr}_${f.name}"
+            val access = if (nullable) "$objExpr?.${f.name}" else "$objExpr.${f.name}"
+            when (f.type) {
+                is KneType.LIST -> {
+                    val elemType = f.type.elementType
+                    if (elemType is KneType.DATA_CLASS) {
+                        // Use listparam_create/add bridges (already exist)
+                        val dn = elemType.simpleName.uppercase()
+                        appendLine("${indent}val ${paramName}CollHandle = run {")
+                        appendLine("${indent}    val _src = $access")
+                        appendLine("${indent}    val _h = LISTPARAM_${dn}_CREATE_HANDLE.invoke(_src.size) as Long")
+                        appendLine("${indent}    for (_elem in _src) {")
+                        val fieldsWithPaths = buildDcFieldsWithAccessPaths(elemType, "_elem")
+                        fieldsWithPaths.filter { it.type == KneType.STRING }.forEach { ff ->
+                            appendLine("${indent}        val ${ff.segName} = arena.allocateFrom(${ff.accessExpr})")
+                        }
+                        val addArgs = buildList {
+                            add("_h")
+                            fieldsWithPaths.forEach { ff ->
+                                when (ff.type) {
+                                    KneType.STRING -> add(ff.segName)
+                                    KneType.BOOLEAN -> add("if (${ff.accessExpr}) 1 else 0")
+                                    is KneType.ENUM -> add("${ff.accessExpr}.ordinal")
+                                    is KneType.OBJECT -> add("${ff.accessExpr}.handle")
+                                    else -> add(ff.accessExpr)
+                                }
+                            }
+                        }.joinToString(", ")
+                        appendLine("${indent}        LISTPARAM_${dn}_ADD_HANDLE.invoke($addArgs)")
+                        appendLine("${indent}    }")
+                        appendLine("${indent}    _h")
+                        appendLine("${indent}}")
+                    } else {
+                        val key = suspendCollElemKey(elemType)
+                        appendLine("${indent}val ${paramName}CollHandle = run {")
+                        appendLine("${indent}    val _src = $access")
+                        appendCollFieldWrapPrimitive("${indent}    ", "_src", elemType, key)
+                        appendLine("${indent}}")
+                    }
+                }
+                is KneType.SET -> {
+                    val elemType = f.type.elementType
+                    val key = suspendCollElemKey(elemType)
+                    appendLine("${indent}val ${paramName}CollHandle = run {")
+                    appendLine("${indent}    val _src = ($access).toList()")
+                    appendCollFieldWrapPrimitive("${indent}    ", "_src", elemType, key)
+                    appendLine("${indent}}")
+                }
+                is KneType.MAP -> {
+                    val kk = suspendCollElemKey(f.type.keyType)
+                    val vk = suspendCollElemKey(f.type.valueType)
+                    appendLine("${indent}val ${paramName}CollHandle = run {")
+                    appendLine("${indent}    val _src = $access")
+                    appendCollFieldWrapMap("${indent}    ", "_src", f.type, kk, vk)
+                    appendLine("${indent}}")
+                }
+                is KneType.DATA_CLASS -> {
+                    if (dcHasCollectionFields(f.type)) {
+                        appendDcCollectionFieldWraps(indent, f.type, access, nullable)
+                    }
+                }
+                else -> {}
+            }
+        }
+    }
+
+    /** Emit code to wrap a primitive list into a StableRef via wrap bridge. */
+    private fun StringBuilder.appendCollFieldWrapPrimitive(indent: String, srcExpr: String, elemType: KneType, key: String) {
+        when (elemType) {
+            KneType.STRING -> {
+                appendLine("${indent}val _totalBytes = $srcExpr.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
+                appendLine("${indent}val _buf = arena.allocate(_totalBytes.toLong().coerceAtLeast(1))")
+                appendLine("${indent}var _off = 0L")
+                appendLine("${indent}for (_s in $srcExpr) { _buf.setString(_off, _s); _off += _s.toByteArray(Charsets.UTF_8).size + 1 }")
+                appendLine("${indent}WRAP_COLL_${key.uppercase()}_HANDLE.invoke(_buf, $srcExpr.size) as Long")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}val _buf = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> _buf.setAtIndex(JAVA_INT, i.toLong(), if (v) 1 else 0) }")
+                appendLine("${indent}WRAP_COLL_${key.uppercase()}_HANDLE.invoke(_buf, $srcExpr.size) as Long")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}val _buf = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> _buf.setAtIndex(JAVA_INT, i.toLong(), v.ordinal) }")
+                appendLine("${indent}WRAP_COLL_${key.uppercase()}_HANDLE.invoke(_buf, $srcExpr.size) as Long")
+            }
+            else -> {
+                val layout = KneType.collectionElementLayout(elemType)
+                appendLine("${indent}val _buf = arena.allocate($layout, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> _buf.setAtIndex($layout, i.toLong(), v) }")
+                appendLine("${indent}WRAP_COLL_${key.uppercase()}_HANDLE.invoke(_buf, $srcExpr.size) as Long")
+            }
+        }
+    }
+
+    /** Emit code to wrap a map into a StableRef via wrap bridge. */
+    private fun StringBuilder.appendCollFieldWrapMap(indent: String, srcExpr: String, type: KneType.MAP, kk: String, vk: String) {
+        val isKeyString = type.keyType == KneType.STRING
+        val isValString = type.valueType == KneType.STRING
+
+        appendLine("${indent}val _keys = $srcExpr.keys.toList()")
+        appendLine("${indent}val _vals = $srcExpr.values.toList()")
+
+        // Serialize keys
+        if (isKeyString) {
+            appendLine("${indent}val _kBytes = _keys.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
+            appendLine("${indent}val _kBuf = arena.allocate(_kBytes.toLong().coerceAtLeast(1))")
+            appendLine("${indent}var _kOff = 0L")
+            appendLine("${indent}for (_s in _keys) { _kBuf.setString(_kOff, _s); _kOff += _s.toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            val kLayout = KneType.collectionElementLayout(type.keyType)
+            appendLine("${indent}val _kBuf = arena.allocate($kLayout, _keys.size.toLong())")
+            appendLine("${indent}_keys.forEachIndexed { i, v -> _kBuf.setAtIndex($kLayout, i.toLong(), v) }")
+        }
+
+        // Serialize values
+        if (isValString) {
+            appendLine("${indent}val _vBytes = _vals.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
+            appendLine("${indent}val _vBuf = arena.allocate(_vBytes.toLong().coerceAtLeast(1))")
+            appendLine("${indent}var _vOff = 0L")
+            appendLine("${indent}for (_s in _vals) { _vBuf.setString(_vOff, _s); _vOff += _s.toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            val vLayout = KneType.collectionElementLayout(type.valueType)
+            appendLine("${indent}val _vBuf = arena.allocate($vLayout, _vals.size.toLong())")
+            appendLine("${indent}_vals.forEachIndexed { i, v -> _vBuf.setAtIndex($vLayout, i.toLong(), v) }")
+        }
+
+        val kCountArg = if (isKeyString) "_keys.size" else "_keys.size"
+        val vCountArg = if (isValString) "_vals.size" else "_vals.size"
+        appendLine("${indent}WRAP_MAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke(_kBuf, $kCountArg, _vBuf, $vCountArg) as Long")
     }
 
     /** Emit callback stub allocation using the persistent arena. */
@@ -2407,6 +2727,7 @@ class FfmProxyGenerator {
                 }
             }.joinToString(", ")
             appendLine("${indent}            LIST_${elemType.simpleName.uppercase()}_GET_HANDLE.invoke($getArgs)")
+            if (dcHasCollectionFields(elemType)) appendDcCollectionFieldReads("${indent}            ", elemType, "out")
             appendLine("${indent}            _list.add(${buildDcCtorFromOutParams(elemType, "out")})")
             appendLine("${indent}        }")
             appendLine("${indent}    }")

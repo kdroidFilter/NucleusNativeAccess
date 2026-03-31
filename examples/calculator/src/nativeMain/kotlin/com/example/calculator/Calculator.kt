@@ -714,6 +714,36 @@ class Calculator(initial: Int = 0) {
         return persons.maxOfOrNull { it.age } ?: -1
     }
 
+    // ── DataClass with collection fields ────────────────────────────────────
+
+    fun getTaggedList(): TaggedList {
+        return TaggedList(label.ifEmpty { "default" }, listOf(accumulator, accumulator * 2, accumulator * 3))
+    }
+
+    fun applyTaggedList(tl: TaggedList): Int {
+        label = tl.label
+        accumulator = tl.scores.sum()
+        return accumulator
+    }
+
+    fun getMetadataHolder(): MetadataHolder {
+        return MetadataHolder(label.ifEmpty { "calc" }, mapOf("current" to accumulator, "scale" to scale.toInt()))
+    }
+
+    fun applyMetadataHolder(mh: MetadataHolder): String {
+        label = mh.name
+        accumulator = mh.metadata.values.sum()
+        return "$label:$accumulator"
+    }
+
+    fun getMultiCollDC(): MultiCollDC {
+        return MultiCollDC(
+            tags = listOf(label.ifEmpty { "default" }, "item_$accumulator"),
+            flags = listOf(accumulator > 0, accumulator % 2 == 0),
+            counts = listOf(accumulator, accumulator + 1, accumulator + 2),
+        )
+    }
+
     // ── Nullable collections ────────────────────────────────────────────────
 
     fun getScoresOrNull(): List<Int>? = if (accumulator != 0) listOf(accumulator, accumulator * 2) else null

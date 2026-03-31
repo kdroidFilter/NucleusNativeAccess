@@ -23,3 +23,9 @@ data class DeepNested(val tagged: TaggedPoint, val style: Style, val scale: Doub
 data class Address(val street: String, val city: String)
 
 data class Person(val name: String, val age: Int, val address: Address)
+
+data class TaggedList(val label: String, val scores: List<Int>)
+
+data class MetadataHolder(val name: String, val metadata: Map<String, Int>)
+
+data class MultiCollDC(val tags: List<String>, val flags: List<Boolean>, val counts: List<Int>)
