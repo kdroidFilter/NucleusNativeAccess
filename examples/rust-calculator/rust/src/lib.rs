@@ -276,6 +276,46 @@ impl Calculator {
     pub fn get_recent_scores(&self) -> Vec<i32> {
         vec![self.accumulator, self.accumulator * 2, self.accumulator * 3]
     }
+
+    // ── Async/suspend-like methods ────────────────────────────────────
+    // Functions annotated with `@kne:suspend` in doc comments are bridged
+    // as Kotlin suspend functions. The bridge spawns a thread, calls the
+    // function, then invokes the continuation callback.
+
+    /// Adds value after a delay and returns the new accumulator.
+    /// @kne:suspend
+    pub fn delayed_add(&mut self, value: i32, delay_ms: i32) -> i32 {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        self.accumulator += value;
+        self.accumulator
+    }
+
+    /// Returns a description string after a delay.
+    /// @kne:suspend
+    pub fn delayed_describe(&self, delay_ms: i32) -> String {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        format!("Calculator(current={})", self.accumulator)
+    }
+
+    /// Panics after a delay (tests suspend error propagation).
+    /// @kne:suspend
+    pub fn fail_after_delay(&self, delay_ms: i32) -> String {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        panic!("Intentional delayed error");
+    }
+
+    /// Does nothing after a delay (suspend returning Unit).
+    /// @kne:suspend
+    pub fn delayed_noop(&self, delay_ms: i32) {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+    }
+
+    /// Returns whether accumulator is positive, after a delay.
+    /// @kne:suspend
+    pub fn delayed_is_positive(&self, delay_ms: i32) -> bool {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        self.accumulator > 0
+    }
 }
 
 // ── Top-level functions ─────────────────────────────────────────────────

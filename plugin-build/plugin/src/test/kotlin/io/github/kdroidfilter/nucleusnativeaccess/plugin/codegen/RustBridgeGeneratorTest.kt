@@ -243,6 +243,89 @@ class RustBridgeGeneratorTest {
         assertTrue(nullableCode.contains("is_null()"))
     }
 
+    // --- Suspend ---
+
+    @Test
+    fun `generates suspend helpers when module has suspend functions`() {
+        val moduleWithSuspend = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "delayed_add",
+                    params = listOf(KneParam("value", KneType.INT), KneParam("delay_ms", KneType.INT)),
+                    returnType = KneType.INT,
+                    isSuspend = true,
+                    isMutating = true,
+                )
+            ))
+        )
+        val suspendCode = RustBridgeGenerator().generate(moduleWithSuspend)
+        assertTrue(suspendCode.contains("fn calculator_kne_cancelJob"))
+        assertTrue(suspendCode.contains("fn calculator_kne_disposeRef"))
+        assertTrue(suspendCode.contains("fn calculator_kne_readStringRef"))
+    }
+
+    @Test
+    fun `does not generate suspend helpers when no suspend functions`() {
+        assertFalse(code.contains("kne_cancelJob"))
+        assertFalse(code.contains("kne_disposeRef"))
+        assertFalse(code.contains("kne_readStringRef"))
+    }
+
+    @Test
+    fun `generates suspend method bridge with cont_ptr and exc_ptr`() {
+        val moduleWithSuspend = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "delayed_add",
+                    params = listOf(KneParam("value", KneType.INT), KneParam("delay_ms", KneType.INT)),
+                    returnType = KneType.INT,
+                    isSuspend = true,
+                    isMutating = true,
+                )
+            ))
+        )
+        val suspendCode = RustBridgeGenerator().generate(moduleWithSuspend)
+        assertTrue(suspendCode.contains("fn calculator_Calculator_delayed_add"))
+        assertTrue(suspendCode.contains("cont_ptr: i64"))
+        assertTrue(suspendCode.contains("exc_ptr: i64"))
+        assertTrue(suspendCode.contains("cancel_out: *mut i64"))
+        assertTrue(suspendCode.contains("std::thread::spawn"))
+        assertTrue(suspendCode.contains("AtomicBool"))
+    }
+
+    @Test
+    fun `suspend method with String return uses Box String handle`() {
+        val moduleWithSuspend = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "delayed_describe",
+                    params = listOf(KneParam("delay_ms", KneType.INT)),
+                    returnType = KneType.STRING,
+                    isSuspend = true,
+                )
+            ))
+        )
+        val suspendCode = RustBridgeGenerator().generate(moduleWithSuspend)
+        assertTrue(suspendCode.contains("fn calculator_Calculator_delayed_describe"))
+        assertTrue(suspendCode.contains("Box::into_raw(Box::new(value))"))
+    }
+
+    @Test
+    fun `suspend method with Unit return calls cont_fn with zero`() {
+        val moduleWithSuspend = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "delayed_noop",
+                    params = listOf(KneParam("delay_ms", KneType.INT)),
+                    returnType = KneType.UNIT,
+                    isSuspend = true,
+                )
+            ))
+        )
+        val suspendCode = RustBridgeGenerator().generate(moduleWithSuspend)
+        assertTrue(suspendCode.contains("cont_fn(1, 0i64)"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

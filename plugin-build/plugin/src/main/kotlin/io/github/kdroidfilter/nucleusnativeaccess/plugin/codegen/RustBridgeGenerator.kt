@@ -22,6 +22,13 @@ class RustBridgeGenerator {
         sb.appendPreamble()
         sb.appendErrorInfra(prefix)
 
+        // Check if any class or top-level function uses suspend
+        val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } ||
+            module.functions.any { it.isSuspend }
+        if (hasSuspend) {
+            sb.appendSuspendHelpers(prefix)
+        }
+
         for (cls in module.classes) {
             sb.appendClass(cls, prefix)
         }
@@ -148,6 +155,10 @@ class RustBridgeGenerator {
     }
 
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        if (fn.isSuspend) {
+            appendSuspendMethod(fn, cls, prefix)
+            return
+        }
         val sym = "${prefix}_${cls.simpleName}_${fn.name}"
         val needsBufOutput = needsOutputBuffer(fn.returnType)
 
@@ -412,6 +423,152 @@ class RustBridgeGenerator {
         appendLine("    }")
         appendLine("}")
         appendLine()
+    }
+
+    // --- Suspend infrastructure ---
+
+    private fun StringBuilder.appendSuspendHelpers(prefix: String) {
+        appendLine("// ── Suspend helpers ──────────────────────────────────────────────────")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_cancelJob(job_handle: i64) {")
+        appendLine("    if job_handle == 0 { return; }")
+        appendLine("    let flag = unsafe { &*(job_handle as *const std::sync::atomic::AtomicBool) };")
+        appendLine("    flag.store(true, std::sync::atomic::Ordering::SeqCst);")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_disposeRef(handle: i64) {")
+        appendLine("    if handle == 0 { return; }")
+        appendLine("    unsafe { drop(Box::from_raw(handle as *mut String)); }")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_readStringRef(handle: i64, out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+        appendLine("    let s = unsafe { &*(handle as *const String) };")
+        appendLine("    let bytes = s.as_bytes();")
+        appendLine("    let len = bytes.len() as i32;")
+        appendLine("    if len < out_buf_len {")
+        appendLine("        unsafe {")
+        appendLine("            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("            *out_buf.add(bytes.len()) = 0;")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("    len + 1")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendSuspendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val sym = "${prefix}_${cls.simpleName}_${fn.name}"
+        val className = cls.simpleName
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(handle: i64")
+        for (p in fn.params) {
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        append(", cont_ptr: i64, exc_ptr: i64, cancel_out: *mut i64")
+        appendLine(") {")
+
+        // Create cancellation flag
+        appendLine("    let cancel_flag = Box::into_raw(Box::new(std::sync::atomic::AtomicBool::new(false)));")
+        appendLine("    unsafe { *cancel_out = cancel_flag as i64; }")
+        appendLine()
+
+        // Spawn thread
+        appendLine("    std::thread::spawn(move || {")
+        appendLine("        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        if (fn.isMutating) {
+            appendLine("            let obj = unsafe { &mut *(handle as *mut $className) };")
+        } else {
+            appendLine("            let obj = unsafe { &*(handle as *const $className) };")
+        }
+        // Param conversions inside the closure
+        for (p in fn.params) {
+            appendSuspendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        appendLine("            obj.${fn.name}($callArgs)")
+        appendLine("        }));")
+        appendLine()
+        appendLine("        match result {")
+        appendLine("            Ok(value) => {")
+        appendSuspendContinuationCall(fn.returnType)
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_panic_error(e);")
+        appendLine("                let msg = KNE_LAST_ERROR.with(|e| e.borrow_mut().take().unwrap_or_default());")
+        appendLine("                let msg_handle = Box::into_raw(Box::new(msg)) as i64;")
+        appendLine("                let exc_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(exc_ptr) };")
+        appendLine("                exc_fn(msg_handle);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Generates the continuation callback invocation based on the return type. */
+    private fun StringBuilder.appendSuspendContinuationCall(returnType: KneType) {
+        appendLine("                let cont_fn: extern \"C\" fn(i32, i64) = unsafe { std::mem::transmute(cont_ptr) };")
+        when (returnType) {
+            KneType.INT -> appendLine("                cont_fn(1, value as i64);")
+            KneType.LONG -> appendLine("                cont_fn(1, value);")
+            KneType.DOUBLE -> appendLine("                cont_fn(1, f64::to_bits(value) as i64);")
+            KneType.FLOAT -> appendLine("                cont_fn(1, f32::to_bits(value) as i64);")
+            KneType.BOOLEAN -> appendLine("                cont_fn(1, (value as i32) as i64);")
+            KneType.BYTE -> appendLine("                cont_fn(1, value as i64);")
+            KneType.SHORT -> appendLine("                cont_fn(1, value as i64);")
+            KneType.STRING -> {
+                appendLine("                let str_handle = Box::into_raw(Box::new(value)) as i64;")
+                appendLine("                cont_fn(1, str_handle);")
+            }
+            KneType.UNIT -> appendLine("                cont_fn(1, 0i64);")
+            is KneType.OBJECT -> {
+                appendLine("                let obj_handle = Box::into_raw(Box::new(value)) as i64;")
+                appendLine("                cont_fn(1, obj_handle);")
+            }
+            is KneType.ENUM -> appendLine("                cont_fn(1, (value as i32) as i64);")
+            else -> appendLine("                cont_fn(1, value as i64);")
+        }
+    }
+
+    /** Param conversion for suspend methods (indented one extra level for the thread closure). */
+    private fun StringBuilder.appendSuspendParamConversion(p: KneParam) {
+        when (p.type) {
+            KneType.STRING -> {
+                appendLine("            let ${p.name}_conv = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
+                appendLine("            let ${p.name}_str: String = ${p.name}_conv.to_string();")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("            let ${p.name}_conv = ${p.name} != 0;")
+            }
+            is KneType.ENUM -> {
+                val enumName = (p.type as KneType.ENUM).simpleName
+                appendLine("            let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
+            }
+            is KneType.OBJECT -> {
+                val typeName = (p.type as KneType.OBJECT).simpleName
+                appendLine("            let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
+            }
+            KneType.BYTE_ARRAY -> {
+                appendLine("            let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+            }
+            is KneType.LIST -> {
+                appendLine("            let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+            }
+            else -> {} // Primitives need no conversion
+        }
     }
 
     // --- Helpers ---

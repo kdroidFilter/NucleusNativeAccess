@@ -375,4 +375,62 @@ class RustCalculatorParserTest {
         // Operation = 1
         assertEquals(1, module.enums.size)
     }
+
+    // --- Suspend detection ---
+
+    @Test
+    fun `delayed_add is marked as suspend`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "delayed_add" }
+        assertNotNull(method)
+        assertTrue(method!!.isSuspend)
+    }
+
+    @Test
+    fun `delayed_describe is marked as suspend`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "delayed_describe" }
+        assertNotNull(method)
+        assertTrue(method!!.isSuspend)
+        assertEquals(KneType.STRING, method.returnType)
+    }
+
+    @Test
+    fun `non-suspend methods are not marked as suspend`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val add = calc.methods.find { it.name == "add" }
+        assertFalse(add!!.isSuspend)
+    }
+
+    @Test
+    fun `delayed_noop is suspend with Unit return`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "delayed_noop" }
+        assertNotNull(method)
+        assertTrue(method!!.isSuspend)
+        assertEquals(KneType.UNIT, method.returnType)
+    }
+
+    @Test
+    fun `delayed_is_positive is suspend with Boolean return`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "delayed_is_positive" }
+        assertNotNull(method)
+        assertTrue(method!!.isSuspend)
+        assertEquals(KneType.BOOLEAN, method.returnType)
+    }
+
+    @Test
+    fun `fail_after_delay is marked as suspend`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val method = calc.methods.find { it.name == "fail_after_delay" }
+        assertNotNull(method)
+        assertTrue(method!!.isSuspend)
+    }
+
+    @Test
+    fun `top-level functions are not marked as suspend`() {
+        val compute = module.functions.find { it.name == "compute" }
+        assertFalse(compute!!.isSuspend)
+    }
 }

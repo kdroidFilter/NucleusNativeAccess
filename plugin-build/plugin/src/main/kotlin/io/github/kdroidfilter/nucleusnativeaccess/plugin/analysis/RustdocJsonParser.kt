@@ -58,7 +58,7 @@ class RustdocJsonParser {
 
         // Collect inherent impl blocks (trait_ == null) and map struct id → method items
         // Each method item is paired with a Boolean indicating if &mut self
-        val implMethods = mutableMapOf<Int, MutableList<Pair<JsonObject, Boolean>>>() // struct id → (item, isMutating)
+        val implMethods = mutableMapOf<Int, MutableList<Triple<JsonObject, Boolean, String?>>>() // struct id → (item, isMutating, docs)
         val implConstructors = mutableMapOf<Int, JsonObject?>()        // struct id → new() fn
 
         for ((_, item) in index.entrySet()) {
@@ -87,7 +87,8 @@ class RustdocJsonParser {
                     implConstructors[structId] = methodItem
                 } else if (hasSelfParam(inputs)) {
                     val isMutating = isSelfMutable(inputs)
-                    implMethods.getOrPut(structId) { mutableListOf() }.add(methodItem to isMutating)
+                    val docs = methodItem.get("docs").safeString()
+                    implMethods.getOrPut(structId) { mutableListOf() }.add(Triple(methodItem, isMutating, docs))
                 }
                 // Static methods (no self, not "new") → could be companion, skip for now
             }
@@ -122,8 +123,8 @@ class RustdocJsonParser {
             val constructor = buildConstructor(implConstructors[id], structItem, index, knownStructs, knownEnums)
 
             // Build methods (passing isMutating from the self param)
-            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { (methodItem, isMutating) ->
-                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating)
+            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { (methodItem, isMutating, docs) ->
+                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating, docs)
             }
 
             // Extract properties from get_/set_ patterns
@@ -202,11 +203,14 @@ class RustdocJsonParser {
 
             val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses)
             val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
+            val fnDocs = item.get("docs").safeString()
+            val isSuspend = fnDocs?.contains("@kne:suspend") == true
             topLevelFunctions.add(
                 KneFunction(
                     name = name,
                     params = params,
                     returnType = returnType,
+                    isSuspend = isSuspend,
                 )
             )
         }
@@ -337,6 +341,7 @@ class RustdocJsonParser {
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
         isMutating: Boolean = false,
+        docs: String? = null,
     ): KneFunction? {
         val name = methodItem.get("name").safeString() ?: return null
         val inner = methodItem.getAsJsonObject("inner").getAsJsonObject("function")
@@ -349,11 +354,15 @@ class RustdocJsonParser {
         val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses, skipSelf = true)
         val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
 
+        // Detect @kne:suspend annotation in rustdoc comments
+        val isSuspend = docs?.contains("@kne:suspend") == true
+
         return KneFunction(
             name = name,
             params = params,
             returnType = returnType,
             isMutating = isMutating,
+            isSuspend = isSuspend,
         )
     }
 
