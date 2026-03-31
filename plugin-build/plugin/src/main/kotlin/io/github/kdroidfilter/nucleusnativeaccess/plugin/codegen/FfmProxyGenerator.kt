@@ -333,11 +333,15 @@ class FfmProxyGenerator {
 
     // ── Runtime helper ────────────────────────────────────────────────────────
 
-    /** Collect all unique KneType.FUNCTION signatures used as parameters in the module. */
+    /** Collect all unique KneType.FUNCTION signatures used as parameters in the module (including nullable). */
     private fun collectCallbackSignatures(module: KneModule): Set<KneType.FUNCTION> {
         val signatures = mutableSetOf<KneType.FUNCTION>()
         fun scanParams(params: List<KneParam>) {
-            params.forEach { p -> if (p.type is KneType.FUNCTION) signatures.add(p.type) }
+            params.forEach { p ->
+                if (p.type is KneType.FUNCTION) signatures.add(p.type)
+                else if (p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner is KneType.FUNCTION)
+                    signatures.add((p.type as KneType.NULLABLE).inner as KneType.FUNCTION)
+            }
         }
         module.classes.forEach { cls ->
             cls.methods.forEach { scanParams(it.params) }
@@ -2491,6 +2495,7 @@ class FfmProxyGenerator {
         KneType.DOUBLE -> "if ($name != null) $name.toRawBits() else Long.MIN_VALUE"
         is KneType.OBJECT -> "$name?.handle ?: 0L"
         is KneType.ENUM -> "$name?.ordinal ?: -1"
+        is KneType.FUNCTION -> "${name}Stub"
         else -> name
     }
 
@@ -2692,6 +2697,12 @@ class FfmProxyGenerator {
             val fnType = p.type as KneType.FUNCTION
             val id = callbackId(fnType)
             appendLine("${indent}val ${p.name}Stub = KneRuntime.createUpcallStub_$id(${p.name}, $arenaExpr)")
+        }
+        // Nullable callback params: create stub only if non-null, pass 0L for null
+        params.filter { it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner is KneType.FUNCTION }.forEach { p ->
+            val fnType = (p.type as KneType.NULLABLE).inner as KneType.FUNCTION
+            val id = callbackId(fnType)
+            appendLine("${indent}val ${p.name}Stub = if (${p.name} != null) KneRuntime.createUpcallStub_$id(${p.name}!!, $arenaExpr) else 0L")
         }
     }
 

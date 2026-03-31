@@ -215,6 +215,25 @@ class Calculator(initial: Int = 0) {
     fun withShort(fn: (Short) -> Short): Short = fn(accumulator.toShort())
     fun withByte(fn: (Byte) -> Byte): Byte = fn(accumulator.toByte())
 
+    // ── Nullable callback params ──────────────────────────────────────────
+
+    fun onValueChangedOrNull(callback: ((Int) -> Unit)?): Boolean {
+        if (callback != null) {
+            callback(accumulator)
+            return true
+        }
+        return false
+    }
+
+    fun transformOrDefault(fn: ((Int) -> Int)?, default: Int): Int {
+        accumulator = if (fn != null) fn(accumulator) else default
+        return accumulator
+    }
+
+    fun formatOrNull(formatter: ((Int) -> String)?): String {
+        return formatter?.invoke(accumulator) ?: "null"
+    }
+
     fun onPointComputed(callback: (Point) -> Unit) {
         callback(Point(accumulator, accumulator * 2))
     }
