@@ -218,11 +218,18 @@ class PsiSourceParser {
     private fun parseClass(ktClass: KtClass, pkg: String, typeMaps: TypeMaps, isCommon: Boolean = false): KneClass? {
         val name = ktClass.name ?: return null
         val fq = if (pkg.isNotEmpty()) "$pkg.$name" else name
-        val ctorParams = ktClass.primaryConstructor?.valueParameters?.mapNotNull { param ->
+        val rawCtorParams = ktClass.primaryConstructor?.valueParameters ?: emptyList()
+        val ctorParams = rawCtorParams.mapNotNull { param ->
             val pName = param.name ?: return@mapNotNull null
             val type = resolveTypeFromMaps(param.typeReference, typeMaps) ?: return@mapNotNull null
             KneParam(pName, type, hasDefault = param.hasDefaultValue())
-        } ?: emptyList()
+        }
+        // Constructor val/var params are properties — collect them for getter/setter generation
+        val ctorProperties = rawCtorParams.filter { it.hasValOrVar() }.mapNotNull { param ->
+            val pName = param.name ?: return@mapNotNull null
+            val type = resolveTypeFromMaps(param.typeReference, typeMaps) ?: return@mapNotNull null
+            KneProperty(pName, type, param.isMutable)
+        }
 
         // Extract modifiers
         val isOpen = ktClass.hasModifier(KtTokens.OPEN_KEYWORD)
@@ -257,6 +264,22 @@ class PsiSourceParser {
         val companionMethods = mutableListOf<KneFunction>()
         val companionProperties = mutableListOf<KneProperty>()
         val ctorParamNames = ctorParams.map { it.name }.toSet()
+
+        // Collect body method names first to detect manual getters that would clash with ctor properties
+        val bodyMethodNames = ktClass.declarations
+            .filterIsInstance<KtNamedFunction>()
+            .filter { !it.isPrivateOrInternal() }
+            .mapNotNull { it.name }
+            .toSet()
+
+        // Add constructor val/var properties, but skip those with explicit getter methods in the body
+        ctorProperties.forEach { prop ->
+            val getterName = "get${prop.name.replaceFirstChar { it.uppercaseChar() }}"
+            if (getterName !in bodyMethodNames) {
+                properties.add(prop)
+            }
+        }
+
         for (decl in ktClass.declarations) {
             if (decl.isPrivateOrInternal()) continue
             when (decl) {

@@ -2234,6 +2234,48 @@ class FfmProxyGenerator {
         appendLine("${indent}return ${buildDcCtorFromOutParams(dc, "out")}")
     }
 
+    /** Generate the return-via-out-params pattern for DATA_CLASS property types. */
+    private fun StringBuilder.appendDataClassReturnProxyForProperty(indent: String, prop: KneProperty, handleName: String, nullable: Boolean = false) {
+        val dc = extractDataClass(prop.type)!!
+        val flatFields = flattenDcFields(dc, "out")
+
+        // Allocate out-params for each flat field
+        flatFields.forEach { (name, type) ->
+            when (type) {
+                KneType.STRING -> appendLine("${indent}val $name = arena.allocate($STRING_BUF_SIZE.toLong())")
+                KneType.BYTE_ARRAY -> appendLine("${indent}val $name = arena.allocate(JAVA_LONG)") // StableRef handle
+                else -> appendLine("${indent}val $name = arena.allocate(${type.ffmLayout})")
+            }
+        }
+
+        // Build invoke args: handle + out-params (no method params for properties)
+        val paramArgs = buildList {
+            add("handle")
+            flatFields.forEach { (name, type) ->
+                when (type) {
+                    KneType.STRING -> { add(name); add("$STRING_BUF_SIZE") }
+                    KneType.BYTE_ARRAY -> add(name) // StableRef handle, no size needed
+                    else -> add(name)
+                }
+            }
+        }.joinToString(", ")
+
+        if (nullable) {
+            appendLine("${indent}val _isPresent = $handleName.invoke($paramArgs) as Int")
+            appendLine("${indent}KneRuntime.checkError()")
+            appendLine("${indent}if (_isPresent == 0) return null")
+        } else {
+            appendLine("${indent}$handleName.invoke($paramArgs)")
+            appendLine("${indent}KneRuntime.checkError()")
+        }
+
+        // Read collection fields from StableRef handles, then reconstruct the data class
+        if (dcHasCollectionFields(dc)) {
+            appendDcCollectionFieldReads(indent, dc, "out")
+        }
+        appendLine("${indent}return ${buildDcCtorFromOutParams(dc, "out")}")
+    }
+
     /** Build a constructor call that reads from out-params (recursive for nested data classes). */
     /** Check if a DC (or nested DCs) has any collection fields. */
     private fun dcHasCollectionFields(dc: KneType.DATA_CLASS): Boolean =
@@ -2452,6 +2494,7 @@ class FfmProxyGenerator {
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
         val getHandleName = "GET_${prop.name.uppercase()}_HANDLE"
         val isCollProp = prop.type.isCollection()
+        val isDcProp = extractDataClass(prop.type) != null
         val overrideMod = if (prop.isOverride) "override " else ""
         val openMod = if (!prop.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
         val propMod = "$overrideMod$openMod"
@@ -2559,6 +2602,12 @@ class FfmProxyGenerator {
                 }
                 else -> appendCallAndReturn("            ", prop.type, getHandleName, "handle")
             }
+        } else if (isDcProp) {
+            // Data class property getter: use out-params pattern
+            val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
+            appendLine("            Arena.ofConfined().use { arena ->")
+            appendDataClassReturnProxyForProperty("                ", prop, getHandleName, returnsNullableDc)
+            appendLine("            }")
         } else {
             val needsArena = prop.type.returnsViaBuffer()
             if (needsArena) {
@@ -2861,15 +2910,32 @@ class FfmProxyGenerator {
 
     private fun buildGetterDescriptor(prop: KneProperty): String {
         val isCollProp = prop.type.isCollection()
+        val returnDc = extractDataClass(prop.type)
+        val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
         val paramLayouts = buildList {
             add("JAVA_LONG")
             if (!isCollProp && prop.type.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
+            // Data class return: add out-param layouts for each flattened field
+            if (returnDc != null) {
+                flattenDcFields(returnDc, "").forEach { (_, type) ->
+                    when (type) {
+                        KneType.STRING -> { add("ADDRESS"); add("JAVA_INT") }
+                        KneType.BYTE_ARRAY -> add("ADDRESS") // StableRef handle in CPointer<LongVar>
+                        else -> add("ADDRESS")
+                    }
+                }
+            }
         }
         // Collection getters return JAVA_LONG (StableRef handle)
-        return if (isCollProp) buildDescriptor(KneType.LONG, paramLayouts)
-        else buildDescriptor(prop.type, paramLayouts)
+        val effectiveReturn = when {
+            returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
+            returnDc != null -> KneType.UNIT
+            isCollProp -> KneType.LONG
+            else -> prop.type
+        }
+        return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
     private fun buildCompanionGetterDescriptor(prop: KneProperty): String {

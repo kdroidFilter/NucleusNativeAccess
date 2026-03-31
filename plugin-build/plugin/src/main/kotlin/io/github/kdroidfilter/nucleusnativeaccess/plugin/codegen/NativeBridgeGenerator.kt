@@ -615,6 +615,8 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
         val getterName = "${prefix}_${cls.simpleName}_get_${prop.name}"
         val isCollProp = prop.type.isCollection()
+        val returnDc = extractDataClass(prop.type)
+        val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
 
         if (isCollProp) {
             // Collection property getter: return StableRef handle (Long)
@@ -624,6 +626,22 @@ class NativeBridgeGenerator {
             appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
             appendLine("    return StableRef.create(obj.${prop.name} as Any).asCPointer().toLong()")
             appendTryCatchEnd(KneType.LONG)
+            appendLine("}")
+            appendLine()
+        } else if (returnDc != null) {
+            // Data class property getter: expand fields into out-params
+            val dcOutParams = buildDataClassOutParams(returnDc)
+            val returnDecl = if (returnsNullableDc) ": Int" else ""
+            appendLine("@CName(\"$getterName\")")
+            appendLine("fun `$getterName`(handle: Long$dcOutParams)$returnDecl {")
+            appendTryCatchStart()
+            appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+            if (returnsNullableDc) {
+                appendNullableDataClassReturn("obj.${prop.name}", returnDc)
+            } else {
+                appendDataClassReturn("obj.${prop.name}", returnDc)
+            }
+            appendTryCatchEnd(if (returnsNullableDc) KneType.INT else KneType.UNIT)
             appendLine("}")
             appendLine()
         } else {

@@ -172,10 +172,10 @@ class ExtensionFunctionTest {
     @Test fun `Calculator addTwice - after other operations`() {
         Calculator(0).use { calc ->
             calc.add(10)
-            calc.subtract(2)
-            val result = calc.addTwice(3)
-            assertEquals(22, result)
-            assertEquals(22, calc.current)
+            calc.subtract(2)  // current = 8
+            val result = calc.addTwice(3)  // add(3)=11, add(3)=14
+            assertEquals(14, result)
+            assertEquals(14, calc.current)
         }
     }
 

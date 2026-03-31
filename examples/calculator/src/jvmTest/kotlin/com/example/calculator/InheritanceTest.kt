@@ -93,7 +93,7 @@ class InheritanceTest {
         }
     }
 
-    @Test fun `Circle - area with radius 0.5`() {
+    @Test fun `Circle - area with radius half`() {
         Circle(0.5).use { circle ->
             assertEquals(PI * 0.25, circle.area(), 0.0001)
         }
@@ -213,14 +213,14 @@ class InheritanceTest {
         }
     }
 
-    @Test fun `Rectangle - wide rectangle (width > height)`() {
+    @Test fun `Rectangle - wide rectangle wider than tall`() {
         Rectangle(10.0, 2.0).use { rect ->
             assertEquals(20.0, rect.area())
             assertEquals(24.0, rect.perimeter())
         }
     }
 
-    @Test fun `Rectangle - tall rectangle (height > width)`() {
+    @Test fun `Rectangle - tall rectangle taller than wide`() {
         Rectangle(2.0, 10.0).use { rect ->
             assertEquals(20.0, rect.area())
             assertEquals(24.0, rect.perimeter())
@@ -307,7 +307,7 @@ class InheritanceTest {
         }
     }
 
-    @Test fun `Cube - small cube side 0.1`() {
+    @Test fun `Cube - small cube side tenth`() {
         Cube(0.1).use { cube ->
             assertEquals(0.01, cube.area(), 0.0001)
             assertEquals(0.001, cube.volume(), 0.0001)
@@ -718,7 +718,7 @@ class InheritanceTest {
         Shape3D("custom", 2.0).use { s3d ->
             Cube(2.0).use { cube ->
                 assertNotEquals(s3d.volume(), cube.volume())
-                assertEquals(4.0, cube.volume())
+                assertEquals(8.0, cube.volume())  // side^3 = 2^3 = 8
             }
         }
     }

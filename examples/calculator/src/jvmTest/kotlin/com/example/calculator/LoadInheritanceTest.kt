@@ -267,7 +267,7 @@ class LoadInheritanceTest {
             repeat(10_000) {
                 ruler.reset()
                 val measure = ruler.measure()
-                assertEquals(30.0, measure, 0.0001)
+                assertEquals(0.0, measure, 0.0001)  // reset sets currentLength to 0
             }
         }
     }

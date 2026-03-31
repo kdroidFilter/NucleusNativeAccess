@@ -175,9 +175,10 @@ class AsyncInheritanceTest {
                         }
                     }.awaitAll()
                     assertEquals(N, results.size)
-                    assertEquals(Math.PI * 4.0, results[0], 0.0001)
-                    assertEquals(12.0, results[1], 0.0001)
-                    assertEquals(4.0, results[2], 0.0001)
+                    // i=1 → 1%3=1 → rect, i=2 → 2%3=2 → cube, i=3 → 3%3=0 → circle
+                    assertEquals(12.0, results[0], 0.0001)   // rect 3*4
+                    assertEquals(4.0, results[1], 0.0001)    // cube 2^2
+                    assertEquals(Math.PI * 4.0, results[2], 0.0001) // circle pi*2^2
                 }
             }
         }
@@ -198,9 +199,10 @@ class AsyncInheritanceTest {
                         }
                     }.awaitAll()
                     assertEquals(N, results.size)
-                    assertTrue(results[0].contains("circle"))
-                    assertTrue(results[1].contains("rectangle"))
-                    assertTrue(results[2].contains("cube"))
+                    // i=1 → 1%3=1 → rect, i=2 → 2%3=2 → cube, i=3 → 3%3=0 → circle
+                    assertTrue(results[0].contains("rectangle"))
+                    assertTrue(results[1].contains("cube"))
+                    assertTrue(results[2].contains("circle"))
                 }
             }
         }
@@ -221,9 +223,10 @@ class AsyncInheritanceTest {
                         }
                     }.awaitAll()
                     assertEquals(N, results.size)
-                    assertTrue(results[0].contains("Circle"))
-                    assertTrue(results[1].contains("Shape"))
-                    assertTrue(results[2].contains("Cube"))
+                    // i=1 → 1%3=1 → rect, i=2 → 2%3=2 → cube, i=3 → 3%3=0 → circle
+                    assertTrue(results[0].contains("Rect"))
+                    assertTrue(results[1].contains("Cube"))
+                    assertTrue(results[2].contains("Circle"))
                 }
             }
         }
