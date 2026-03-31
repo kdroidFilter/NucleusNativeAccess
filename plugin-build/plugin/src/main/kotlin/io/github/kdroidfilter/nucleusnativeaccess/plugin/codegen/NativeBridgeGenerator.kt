@@ -108,8 +108,23 @@ class NativeBridgeGenerator {
             appendSuspendCollectionReaderBridges(module.libName, allCollReaderTypes)
         }
 
-        // Generate wrap bridges for DC collection fields + mutable collection properties
-        val allWrapTypes = dcFieldCollTypes + propCollTypes
+        // Collect collection param types that need wrap bridges (ByteArray/nested collection elements)
+        val paramWrapTypes = mutableSetOf<KneType>()
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn ->
+                fn.params.forEach { p ->
+                    val inner = when (val t = p.type) { is KneType.NULLABLE -> t.inner; else -> t }
+                    when (inner) {
+                        is KneType.LIST -> if (inner.elementType == KneType.BYTE_ARRAY || inner.elementType is KneType.LIST || inner.elementType is KneType.SET || inner.elementType is KneType.MAP) paramWrapTypes.add(KneType.LIST(inner.elementType))
+                        is KneType.SET -> if (inner.elementType == KneType.BYTE_ARRAY) paramWrapTypes.add(KneType.SET(inner.elementType))
+                        else -> {}
+                    }
+                }
+            }
+        }
+
+        // Generate wrap bridges for DC collection fields + mutable collection properties + collection params
+        val allWrapTypes = dcFieldCollTypes + propCollTypes + paramWrapTypes
         if (allWrapTypes.isNotEmpty()) {
             appendDcFieldCollectionWrapBridges(module.libName, allWrapTypes)
         }
@@ -359,7 +374,7 @@ class NativeBridgeGenerator {
         flattenDataClassFields(dc, prefix).joinToString("") { (paramName, type) ->
             when {
                 type == KneType.STRING -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
-                type == KneType.BYTE_ARRAY -> ", $paramName: CPointer<ByteVar>?, ${paramName}_len: Int"
+                type == KneType.BYTE_ARRAY -> ", $paramName: CPointer<LongVar>?" // StableRef handle
                 type is KneType.LIST || type is KneType.SET || type is KneType.MAP ->
                     ", $paramName: CPointer<LongVar>?"
                 else -> ", $paramName: CPointer<${type.nativePointerType}>?"
@@ -373,6 +388,7 @@ class NativeBridgeGenerator {
             when (f.type) {
                 KneType.BOOLEAN -> "${f.name} = $paramName != 0"
                 KneType.STRING -> "${f.name} = $paramName?.toKString() ?: \"\""
+                KneType.BYTE_ARRAY -> "${f.name} = ByteArray(${paramName}_size) { $paramName!![it] }"
                 is KneType.ENUM -> "${f.name} = ${f.type.fqName}.entries[$paramName]"
                 is KneType.OBJECT -> "${f.name} = $paramName.toCPointer<COpaque>()!!.asStableRef<${f.type.fqName}>().get()"
                 is KneType.DATA_CLASS -> "${f.name} = ${buildDataClassCtorExpr(f.type, paramName)}"
@@ -414,6 +430,8 @@ class NativeBridgeGenerator {
                 is KneType.ENUM -> appendLine("    $outName!![0] = $valueExpr.ordinal")
                 is KneType.OBJECT -> appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
                 is KneType.DATA_CLASS -> writeDataClassFields(valueExpr, f.type, outName)
+                KneType.BYTE_ARRAY ->
+                    appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
                 is KneType.LIST, is KneType.SET, is KneType.MAP ->
                     appendLine("    $outName!![0] = StableRef.create($valueExpr).asCPointer().toLong()")
                 else -> appendLine("    $outName!![0] = $valueExpr")
@@ -509,6 +527,12 @@ class NativeBridgeGenerator {
                 appendLine("    return $listExpr.size")
             }
             is KneType.OBJECT -> {
+                appendLine("    val _writeLen = minOf($listExpr.size, outLen)")
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create($listExpr[i]).asCPointer().toLong()")
+                appendLine("    return $listExpr.size")
+            }
+            KneType.BYTE_ARRAY -> {
+                // ByteArray elements: wrap each as StableRef handle
                 appendLine("    val _writeLen = minOf($listExpr.size, outLen)")
                 appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create($listExpr[i]).asCPointer().toLong()")
                 appendLine("    return $listExpr.size")
@@ -936,6 +960,13 @@ class NativeBridgeGenerator {
             is KneType.OBJECT -> {
                 appendLine("    val $listVar = List(${paramName}_size) { $paramName!![it].toCPointer<COpaque>()!!.asStableRef<${elemType.fqName}>().get() }")
             }
+            KneType.BYTE_ARRAY -> {
+                // ByteArray elements: each is a StableRef handle
+                appendLine("    val $listVar = List(${paramName}_size) {")
+                appendLine("        val _ref = $paramName!![it].toCPointer<COpaque>()!!.asStableRef<ByteArray>()")
+                appendLine("        val _ba = _ref.get(); _ref.dispose(); _ba")
+                appendLine("    }")
+            }
             is KneType.LIST, is KneType.SET, is KneType.MAP -> {
                 // Nested collection: each element is a StableRef handle, cast to correct type
                 appendLine("    val $listVar: List<${elemType.jvmTypeName}> = List(${paramName}_size) {")
@@ -1026,7 +1057,7 @@ class NativeBridgeGenerator {
         val lambdaParams = fnType.paramTypes.mapIndexed { i, t -> "_p$i: ${t.jvmTypeName}" }
         val lambdaParamsStr = lambdaParams.joinToString(", ")
         val hasStringInvoke = fnType.paramTypes.any {
-            it == KneType.STRING || (it is KneType.DATA_CLASS && it.fields.any { f -> f.type == KneType.STRING })
+            it == KneType.STRING || it == KneType.BYTE_ARRAY || (it is KneType.DATA_CLASS && it.fields.any { f -> f.type == KneType.STRING })
         }
         val hasCollectionInvoke = fnType.paramTypes.any { it is KneType.LIST || it is KneType.SET || it is KneType.MAP }
         val needsMemScoped = hasStringInvoke || hasCollectionInvoke
@@ -1076,10 +1107,19 @@ class NativeBridgeGenerator {
         }
 
         // Build invoke args — decompose DATA_CLASS into fields, convert enum to ordinal, expand collections to ptr+size
+        // Pre-allocate ByteArray buffers for CFunction invoke
+        fnType.paramTypes.forEachIndexed { i, t ->
+            if (t == KneType.BYTE_ARRAY) {
+                appendLine("        val _baBuf$i = allocArray<ByteVar>(_p$i.size)")
+                appendLine("        _p$i.forEachIndexed { j, b -> _baBuf${i}[j] = b }")
+            }
+        }
+
         val invokeArgs = fnType.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "if (_p$i) 1 else 0"
                 KneType.STRING -> "_p$i.cstr.ptr"
+                KneType.BYTE_ARRAY -> "_baBuf$i, _p$i.size"
                 is KneType.ENUM -> "_p$i.ordinal"
                 is KneType.OBJECT -> "StableRef.create(_p$i).asCPointer().toLong()"
                 is KneType.DATA_CLASS -> t.fields.joinToString(", ") { f ->
@@ -1097,6 +1137,11 @@ class NativeBridgeGenerator {
 
         if (fnType.returnType == KneType.UNIT) {
             appendLine("        _fnPtr.invoke($invokeArgs)")
+        } else if (fnType.returnType == KneType.BYTE_ARRAY) {
+            // Callback returns ByteArray as packed buffer: [size:Int32][pad:4][data...]
+            appendLine("        val _retPtr = _fnPtr.invoke($invokeArgs)!!")
+            appendLine("        val _baSize = _retPtr.reinterpret<IntVar>().pointed.value")
+            appendLine("        ByteArray(_baSize) { (_retPtr + 8 + it)!!.pointed.value }")
         } else if (fnType.returnType == KneType.BOOLEAN) {
             appendLine("        _fnPtr.invoke($invokeArgs) != 0")
         } else if (fnType.returnType == KneType.STRING) {
@@ -1255,6 +1300,7 @@ class NativeBridgeGenerator {
 
     /** Expand a type into its C ABI param type(s). DATA_CLASS becomes multiple field types. LIST/SET/MAP become pointer+size. */
     private fun expandCFuncParamTypes(type: KneType): List<String> = when (type) {
+        KneType.BYTE_ARRAY -> listOf("CPointer<ByteVar>?", "Int") // ptr + size
         is KneType.DATA_CLASS -> type.fields.map { cFunctionParamType(it.type) }
         is KneType.LIST -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
         is KneType.SET -> listOf(KneType.collectionPointerType(type.elementType).replace("?", "") + "?", "Int")
@@ -1285,6 +1331,7 @@ class NativeBridgeGenerator {
         KneType.UNIT -> "Unit"
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.STRING -> "CPointer<ByteVar>?"
+        KneType.BYTE_ARRAY -> "CPointer<ByteVar>?" // packed buffer: [size][pad][data]
         is KneType.OBJECT -> "Long" // opaque StableRef handle
         is KneType.ENUM -> "Int"
         is KneType.DATA_CLASS -> "CPointer<ByteVar>?" // pointer to struct
@@ -1676,6 +1723,15 @@ class NativeBridgeGenerator {
                 appendLine("}")
                 appendLine()
             }
+            "ByteArray" -> {
+                // Single ByteArray → StableRef (takes raw ptr + size)
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(buf: CPointer<ByteVar>?, size: Int): Long {")
+                appendLine("    val _ba = ByteArray(size) { buf!![it] }")
+                appendLine("    return StableRef.create(_ba).asCPointer().toLong()")
+                appendLine("}")
+                appendLine()
+            }
             else -> {
                 val nativeType = when (key) {
                     "Long" -> "LongVar"
@@ -1753,6 +1809,7 @@ class NativeBridgeGenerator {
         KneType.STRING -> "String"
         is KneType.ENUM -> "Enum"
         is KneType.OBJECT -> "ObjHandle"
+        KneType.BYTE_ARRAY -> "ByteArray"
         else -> "Int" // fallback
     }
 
@@ -1814,6 +1871,19 @@ class NativeBridgeGenerator {
                 appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
                 appendLine("    val _writeLen = minOf(_list.size, outLen)")
                 appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create(_list[i]!!).asCPointer().toLong()")
+                appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
+                appendLine("    return _list.size")
+                appendLine("}")
+                appendLine()
+            }
+            "ByteArray" -> {
+                // Each ByteArray element wrapped as StableRef handle (Long)
+                appendLine("@CName(\"$symbolName\")")
+                appendLine("fun `$symbolName`(handle: Long, outBuf: CPointer<LongVar>?, outLen: Int): Int {")
+                appendLine("    val _coll = handle.toCPointer<COpaque>()!!.asStableRef<Any>().get()")
+                appendLine("    val _list = when (_coll) { is List<*> -> _coll; is Set<*> -> _coll.toList(); else -> emptyList() }")
+                appendLine("    val _writeLen = minOf(_list.size, outLen)")
+                appendLine("    for (i in 0 until _writeLen) outBuf!![i] = StableRef.create(_list[i] as ByteArray).asCPointer().toLong()")
                 appendLine("    handle.toCPointer<COpaque>()!!.asStableRef<Any>().dispose()")
                 appendLine("    return _list.size")
                 appendLine("}")

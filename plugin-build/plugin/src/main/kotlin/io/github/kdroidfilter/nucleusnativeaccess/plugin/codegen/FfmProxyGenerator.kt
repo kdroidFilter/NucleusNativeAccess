@@ -618,6 +618,10 @@ class FfmProxyGenerator {
         val flatParams = mutableListOf<FlatParam>()
         sig.paramTypes.forEachIndexed { i, t ->
             when (t) {
+                KneType.BYTE_ARRAY -> {
+                    flatParams.add(FlatParam("p${i}_ptr", KneType.STRING)) // MemorySegment (ADDRESS)
+                    flatParams.add(FlatParam("p${i}_size", KneType.INT))
+                }
                 is KneType.DATA_CLASS -> t.fields.forEach { f -> flatParams.add(FlatParam("p${i}_${f.name}", f.type)) }
                 is KneType.LIST, is KneType.SET -> {
                     flatParams.add(FlatParam("p${i}_ptr", KneType.STRING)) // MemorySegment (ADDRESS)
@@ -647,9 +651,12 @@ class FfmProxyGenerator {
         appendLine("        @Suppress(\"UNCHECKED_CAST\")")
         appendLine("        val _fn = fn as ${sig.jvmTypeName}")
 
-        // Reconstruct DATA_CLASS/LIST/SET params from flat fields, convert others
-        // First emit collection reconstruction as local vals
+        // Reconstruct DATA_CLASS/LIST/SET/ByteArray params from flat fields, convert others
+        // First emit ByteArray/collection reconstruction as local vals
         sig.paramTypes.forEachIndexed { i, t ->
+            if (t == KneType.BYTE_ARRAY) {
+                appendLine("        val _ba$i = p${i}_ptr.reinterpret(p${i}_size.toLong()).toArray(JAVA_BYTE)")
+            }
             // MAP reconstruction
             if (t is KneType.MAP) {
                 appendUpcallMapReconstruction(i, t)
@@ -687,6 +694,7 @@ class FfmProxyGenerator {
         val invokeConvertedArgs = sig.paramTypes.mapIndexed { i, t ->
             when (t) {
                 KneType.BOOLEAN -> "p$i != 0"
+                KneType.BYTE_ARRAY -> "_ba$i"
                 KneType.STRING -> "p$i.reinterpret(Long.MAX_VALUE).getString(0)"
                 is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
                 is KneType.OBJECT -> "${t.simpleName}.fromNativeHandle(p$i)"
@@ -712,6 +720,14 @@ class FfmProxyGenerator {
             appendLine("        _fn.invoke($invokeConvertedArgs)")
         } else if (sig.returnType == KneType.BOOLEAN) {
             appendLine("        return if (_fn.invoke($invokeConvertedArgs)) 1 else 0")
+        } else if (sig.returnType == KneType.BYTE_ARRAY) {
+            // Return ByteArray as packed buffer: [size:Int32][padding:4bytes][data...] via auto Arena
+            appendLine("        val _result = _fn.invoke($invokeConvertedArgs)")
+            appendLine("        val _arena = Arena.ofAuto()")
+            appendLine("        val _buf = _arena.allocate((8 + _result.size).toLong())")
+            appendLine("        _buf.set(JAVA_INT, 0, _result.size)")
+            appendLine("        MemorySegment.copy(_result, 0, _buf, JAVA_BYTE, 8, _result.size)")
+            appendLine("        return _buf")
         } else if (sig.returnType == KneType.STRING) {
             appendLine("        return Arena.ofAuto().allocateFrom(_fn.invoke($invokeConvertedArgs))")
         } else if (sig.returnType is KneType.ENUM) {
@@ -908,6 +924,7 @@ class FfmProxyGenerator {
         KneType.SHORT -> "Short"
         KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
+        KneType.BYTE_ARRAY -> "MemorySegment" // packed buffer for return; expanded to ADDRESS+INT for params
         is KneType.OBJECT -> "Long" // opaque StableRef handle
         is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "MemorySegment" // packed buffer
@@ -918,6 +935,7 @@ class FfmProxyGenerator {
     private fun upcallMethodTypeArg(type: KneType): String = when (type) {
         KneType.UNIT -> "Void.TYPE"
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
+        KneType.BYTE_ARRAY -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.OBJECT -> "Long::class.javaPrimitiveType"
         is KneType.DATA_CLASS -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "java.lang.foreign.MemorySegment::class.java"
@@ -934,6 +952,7 @@ class FfmProxyGenerator {
         KneType.BYTE -> "JAVA_BYTE"
         KneType.SHORT -> "JAVA_SHORT"
         KneType.STRING -> "ADDRESS"
+        KneType.BYTE_ARRAY -> "ADDRESS" // packed buffer for return; expanded for params
         is KneType.OBJECT -> "JAVA_LONG" // opaque handle
         is KneType.DATA_CLASS -> "ADDRESS" // struct pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "ADDRESS" // packed buffer
@@ -1148,8 +1167,19 @@ class FfmProxyGenerator {
                 }
             }
         }
-        // Scan DC params for collection fields + mutable collection properties
-        cls.methods.forEach { m -> m.params.forEach { pp -> extractDataClass(pp.type)?.let { scanDcFieldColls(it) } } }
+        // Scan DC params for collection fields + mutable collection properties + collection params with ByteArray/nested elements
+        cls.methods.forEach { m ->
+            m.params.forEach { pp ->
+                extractDataClass(pp.type)?.let { scanDcFieldColls(it) }
+                // Scan collection params for ByteArray/nested collection element wrapping
+                val inner = pp.type.unwrapCollection()
+                when (inner) {
+                    is KneType.LIST -> if (inner.elementType == KneType.BYTE_ARRAY || inner.elementType is KneType.LIST || inner.elementType is KneType.SET || inner.elementType is KneType.MAP) dcFieldCollKeys.add(suspendCollElemKey(inner.elementType))
+                    is KneType.SET -> if (inner.elementType == KneType.BYTE_ARRAY) dcFieldCollKeys.add(suspendCollElemKey(inner.elementType))
+                    else -> {}
+                }
+            }
+        }
         cls.properties.filter { it.mutable && it.type.isCollection() }.forEach { prop ->
             val inner = prop.type.unwrapCollection()
             when (inner) {
@@ -1679,6 +1709,7 @@ class FfmProxyGenerator {
         KneType.BYTE -> "Byte"
         KneType.BOOLEAN -> "Boolean"
         KneType.STRING -> "String"
+        KneType.BYTE_ARRAY -> "ByteArray"
         is KneType.ENUM -> "Enum"
         is KneType.OBJECT -> "ObjHandle"
         else -> "Int"
@@ -1856,7 +1887,8 @@ class FfmProxyGenerator {
         // Allocate out-params for each flat field
         flatFields.forEach { (name, type) ->
             when (type) {
-                KneType.STRING, KneType.BYTE_ARRAY -> appendLine("${indent}val $name = arena.allocate($STRING_BUF_SIZE.toLong())")
+                KneType.STRING -> appendLine("${indent}val $name = arena.allocate($STRING_BUF_SIZE.toLong())")
+                KneType.BYTE_ARRAY -> appendLine("${indent}val $name = arena.allocate(JAVA_LONG)") // StableRef handle
                 else -> appendLine("${indent}val $name = arena.allocate(${type.ffmLayout})")
             }
         }
@@ -1867,7 +1899,8 @@ class FfmProxyGenerator {
             fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
             flatFields.forEach { (name, type) ->
                 when (type) {
-                    KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }
+                    KneType.STRING -> { add(name); add("$STRING_BUF_SIZE") }
+                    KneType.BYTE_ARRAY -> add(name) // StableRef handle, no size needed
                     else -> add(name)
                 }
             }
@@ -1893,15 +1926,19 @@ class FfmProxyGenerator {
     /** Check if a DC (or nested DCs) has any collection fields. */
     private fun dcHasCollectionFields(dc: KneType.DATA_CLASS): Boolean =
         dc.fields.any { f ->
+            f.type == KneType.BYTE_ARRAY ||
             f.type is KneType.LIST || f.type is KneType.SET || f.type is KneType.MAP ||
                 (f.type is KneType.DATA_CLASS && dcHasCollectionFields(f.type))
         }
 
-    /** Emit local variables for reading collection fields from StableRef handles before constructing the DC. */
+    /** Emit local variables for reading collection/ByteArray fields from StableRef handles before constructing the DC. */
     private fun StringBuilder.appendDcCollectionFieldReads(indent: String, dc: KneType.DATA_CLASS, prefix: String) {
         dc.fields.forEach { f ->
             val name = "${prefix}_${f.name}"
             when (f.type) {
+                KneType.BYTE_ARRAY -> {
+                    appendLine("${indent}val ${name}_baVal = KneRuntime.readByteArrayFromRef($name.get(JAVA_LONG, 0) as Long)")
+                }
                 is KneType.LIST -> {
                     val elemType = f.type.elementType
                     val handle = "${name}_collHandle"
@@ -2023,6 +2060,7 @@ class FfmProxyGenerator {
             val name = "${prefix}_${f.name}"
             when (f.type) {
                 KneType.STRING -> "${f.name} = $name.getString(0)"
+                KneType.BYTE_ARRAY -> "${f.name} = ${name}_baVal"
                 KneType.BOOLEAN -> "${f.name} = $name.get(JAVA_INT, 0) != 0"
                 is KneType.ENUM -> "${f.name} = ${f.type.simpleName}.entries[$name.get(JAVA_INT, 0)]"
                 is KneType.OBJECT -> "${f.name} = ${f.type.simpleName}.fromNativeHandle($name.get(JAVA_LONG, 0) as Long)"
@@ -2089,6 +2127,7 @@ class FfmProxyGenerator {
             val paramName = "${prefix}_${f.name}"
             when (f.type) {
                 KneType.STRING -> listOf("${paramName}Seg")
+                KneType.BYTE_ARRAY -> listOf("${paramName}Seg", "$access?.size ?: 0")
                 KneType.BOOLEAN -> listOf("if ($access == true) 1 else 0")
                 is KneType.ENUM -> listOf("$access?.ordinal ?: 0")
                 is KneType.OBJECT -> listOf("$access?.handle ?: 0L")
@@ -2459,7 +2498,8 @@ class FfmProxyGenerator {
             if (!skipReturnParams && returnDc != null) {
                 flattenDcFields(returnDc, "").forEach { (_, type) ->
                     when (type) {
-                        KneType.STRING, KneType.BYTE_ARRAY -> { add("ADDRESS"); add("JAVA_INT") }
+                        KneType.STRING -> { add("ADDRESS"); add("JAVA_INT") }
+                        KneType.BYTE_ARRAY -> add("ADDRESS") // StableRef handle in CPointer<LongVar>
                         else -> add("ADDRESS")
                     }
                 }
@@ -2656,6 +2696,13 @@ class FfmProxyGenerator {
                     appendLine("${indent}val ${p.name}_${f.name}Seg = if (${p.name} != null) arena.allocateFrom(${p.name}.${f.name}) else MemorySegment.NULL")
                 } else {
                     appendLine("${indent}val ${p.name}_${f.name}Seg = arena.allocateFrom(${p.name}.${f.name})")
+                }
+            }
+            dc.fields.filter { it.type == KneType.BYTE_ARRAY }.forEach { f ->
+                if (isNullable) {
+                    appendLine("${indent}val ${p.name}_${f.name}Seg = if (${p.name} != null) { val _ba = ${p.name}.${f.name}; val _s = arena.allocate(_ba.size.toLong()); MemorySegment.copy(_ba, 0, _s, JAVA_BYTE, 0, _ba.size); _s } else MemorySegment.NULL")
+                } else {
+                    appendLine("${indent}val ${p.name}_${f.name}Seg = run { val _ba = ${p.name}.${f.name}; val _s = arena.allocate(_ba.size.toLong()); MemorySegment.copy(_ba, 0, _s, JAVA_BYTE, 0, _ba.size); _s }")
                 }
             }
             // Wrap collection fields from DC params into StableRef handles
@@ -2882,6 +2929,15 @@ class FfmProxyGenerator {
                 appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
                 appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), v.handle) }")
             }
+            KneType.BYTE_ARRAY -> {
+                // ByteArray elements: wrap each as StableRef handle via wrap bridge
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v ->")
+                appendLine("${indent}    val _baSeg = arena.allocate(v.size.toLong())")
+                appendLine("${indent}    MemorySegment.copy(v, 0, _baSeg, JAVA_BYTE, 0, v.size)")
+                appendLine("${indent}    ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), WRAP_COLL_BYTEARRAY_HANDLE.invoke(_baSeg, v.size) as Long)")
+                appendLine("${indent}}")
+            }
             is KneType.LIST, is KneType.SET, is KneType.MAP -> {
                 // Nested collection: wrap each inner collection as StableRef handle via wrap bridge
                 val innerKey = suspendCollElemKey(when (elemType) {
@@ -3055,6 +3111,12 @@ class FfmProxyGenerator {
             }
             is KneType.OBJECT -> {
                 appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+            }
+            KneType.BYTE_ARRAY -> {
+                // ByteArray elements: each is a StableRef handle
+                appendLine("${indent}val _list = List($countExpr) { _idx ->")
+                appendLine("${indent}    KneRuntime.readByteArrayFromRef(_outBuf.getAtIndex(JAVA_LONG, _idx.toLong()) as Long)")
+                appendLine("${indent}}")
             }
             is KneType.LIST, is KneType.SET, is KneType.MAP -> {
                 // Nested collection: each element is a StableRef handle — read inner collection from each handle

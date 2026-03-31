@@ -267,7 +267,7 @@ class PsiSourceParser {
             }
             val returnType = resolveType(typeElem.returnTypeReference, knownEnums, knownClasses, knownDataClasses) ?: KneType.UNIT
             val supported = setOf(KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT, KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING)
-            fun ok(t: KneType) = t in supported || t is KneType.DATA_CLASS || t is KneType.ENUM || t is KneType.OBJECT || t is KneType.LIST || t is KneType.SET || t is KneType.MAP
+            fun ok(t: KneType) = t in supported || t == KneType.BYTE_ARRAY || t is KneType.DATA_CLASS || t is KneType.ENUM || t is KneType.OBJECT || t is KneType.LIST || t is KneType.SET || t is KneType.MAP
             fun okRet(t: KneType) = ok(t) || t == KneType.UNIT
             if (paramTypes.any { !ok(it) } || !okRet(returnType)) return null
             return KneType.FUNCTION(paramTypes, returnType)
