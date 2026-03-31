@@ -1433,6 +1433,7 @@ class FfmProxyGenerator {
             KneType.DOUBLE -> appendLine("${indent}trySend(Double.fromBits(_value))")
             KneType.BOOLEAN -> appendLine("${indent}trySend(_value != 0L)")
             KneType.STRING -> appendLine("${indent}trySend(KneRuntime.readStringFromRef(_value))")
+            KneType.BYTE_ARRAY -> appendLine("${indent}trySend(KneRuntime.readByteArrayFromRef(_value))")
             is KneType.OBJECT -> appendLine("${indent}trySend(${elemType.simpleName}.fromNativeHandle(_value))")
             is KneType.ENUM -> appendLine("${indent}trySend(${elemType.simpleName}.entries[_value.toInt()])")
             is KneType.DATA_CLASS -> {
