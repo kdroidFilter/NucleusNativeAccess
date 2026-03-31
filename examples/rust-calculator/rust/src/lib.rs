@@ -20,6 +20,24 @@ pub struct NamedValue {
     pub value: i32,
 }
 
+// ── Traits (→ Kotlin interfaces) ────────────────────────────────────────
+
+/// Something that can describe itself.
+pub trait Describable {
+    fn describe_self(&self) -> String;
+}
+
+/// Something that can be reset to its initial state.
+pub trait Resettable {
+    fn reset_to_default(&mut self);
+}
+
+/// Something that can measure a numeric value.
+pub trait Measurable {
+    fn measure(&self) -> f64;
+    fn unit(&self) -> String;
+}
+
 /// A stateful calculator that accumulates a value.
 ///
 /// Mirrors the Kotlin/Native Calculator class:
@@ -336,6 +354,33 @@ impl Calculator {
     /// @kne:flow(String)
     pub fn score_labels(&self, count: i32) -> Vec<String> {
         (1..=count).map(|i| format!("Score #{}: {}", i, self.accumulator * i)).collect()
+    }
+}
+
+// ── Trait implementations ───────────────────────────────────────────────
+
+impl Describable for Calculator {
+    fn describe_self(&self) -> String {
+        format!("Calculator(current={}, label={})", self.accumulator, self.label)
+    }
+}
+
+impl Resettable for Calculator {
+    fn reset_to_default(&mut self) {
+        self.accumulator = 0;
+        self.label = String::new();
+        self.scale = 1.0;
+        self.enabled = true;
+    }
+}
+
+impl Measurable for Calculator {
+    fn measure(&self) -> f64 {
+        self.accumulator as f64 * self.scale
+    }
+
+    fn unit(&self) -> String {
+        "units".to_string()
     }
 }
 

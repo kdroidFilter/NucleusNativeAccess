@@ -460,4 +460,49 @@ class RustCalculatorParserTest {
         val countUp = calc.methods.find { it.name == "count_up" }
         assertFalse(countUp!!.isSuspend)
     }
+
+    // --- Traits → Interfaces ---
+
+    @Test
+    fun `parses Describable trait as KneInterface`() {
+        val iface = module.interfaces.find { it.simpleName == "Describable" }
+        assertNotNull("Describable interface should exist", iface)
+        assertEquals(1, iface!!.methods.size)
+        assertEquals("describe_self", iface.methods[0].name)
+        assertEquals(KneType.STRING, iface.methods[0].returnType)
+    }
+
+    @Test
+    fun `parses Measurable trait with 2 methods`() {
+        val iface = module.interfaces.find { it.simpleName == "Measurable" }
+        assertNotNull("Measurable interface should exist", iface)
+        assertEquals(2, iface!!.methods.size)
+        assertTrue(iface.methods.any { it.name == "measure" && it.returnType == KneType.DOUBLE })
+        assertTrue(iface.methods.any { it.name == "unit" && it.returnType == KneType.STRING })
+    }
+
+    @Test
+    fun `parses Resettable trait`() {
+        val iface = module.interfaces.find { it.simpleName == "Resettable" }
+        assertNotNull("Resettable interface should exist", iface)
+        assertEquals(1, iface!!.methods.size)
+        assertEquals("reset_to_default", iface.methods[0].name)
+    }
+
+    @Test
+    fun `Calculator implements all 3 traits`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        assertTrue("Expected >= 3 interfaces, got: ${calc.interfaces}", calc.interfaces.size >= 3)
+        assertTrue(calc.interfaces.any { "Describable" in it })
+        assertTrue(calc.interfaces.any { "Resettable" in it })
+        assertTrue(calc.interfaces.any { "Measurable" in it })
+    }
+
+    @Test
+    fun `Calculator has trait methods with isOverride`() {
+        val calc = module.classes.first { it.simpleName == "Calculator" }
+        val describeSelf = calc.methods.find { it.name == "describe_self" }
+        assertNotNull("describe_self should exist", describeSelf)
+        assertTrue(describeSelf!!.isOverride)
+    }
 }

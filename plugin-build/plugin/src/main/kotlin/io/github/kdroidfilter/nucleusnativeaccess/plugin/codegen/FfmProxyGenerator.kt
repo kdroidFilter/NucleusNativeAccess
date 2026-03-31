@@ -1028,7 +1028,7 @@ class FfmProxyGenerator {
         }
 
         val isInstantiable = !cls.isAbstract && !cls.isSealed
-        val hasHierarchy = hasSuperClass || cls.isOpen || cls.isAbstract || cls.isSealed || cls.interfaces.isNotEmpty()
+        val hasHierarchy = hasSuperClass || cls.isOpen || cls.isAbstract || cls.isSealed
 
         // Constructor visibility: private for flat classes (original behavior), internal/protected for hierarchy
         val ctorVisibility = when {
@@ -1052,10 +1052,8 @@ class FfmProxyGenerator {
         val superClause = superParts.joinToString(", ")
 
         // Handle declaration: only on root class. Preserve original visibility for flat classes.
-        val implementsInterface = cls.interfaces.isNotEmpty()
         val handleDecl = when {
             !isRoot -> "handle: Long"  // subclass: just a param, inherited from parent
-            implementsInterface -> "override val handle: Long"  // implements interface with handle
             hasHierarchy -> "val handle: Long"  // open/abstract/sealed: public for subclass access
             else -> "internal val handle: Long"  // flat class: original behavior
         }
@@ -1497,7 +1495,6 @@ class FfmProxyGenerator {
         appendLine(" * JVM interface proxy for Kotlin/Native interface [${iface.simpleName}].")
         appendLine(" */")
         appendLine("interface ${iface.simpleName} {")
-        appendLine("    val handle: Long")
         appendLine()
         // Interface methods as abstract declarations
         iface.methods.forEach { method ->

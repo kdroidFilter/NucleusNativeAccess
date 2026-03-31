@@ -40,6 +40,7 @@ class RustdocJsonParser {
         // Collect known types first (for type resolution)
         val knownStructs = mutableMapOf<Int, String>() // id → simpleName
         val knownEnums = mutableMapOf<Int, String>()    // id → simpleName
+        val knownTraits = mutableMapOf<Int, String>()   // id → simpleName
 
         for ((id, item) in index.entrySet()) {
             val inner = item.asJsonObject.getAsJsonObject("inner") ?: continue
@@ -53,44 +54,72 @@ class RustdocJsonParser {
             when {
                 inner.has("struct") -> knownStructs[id.toInt()] = name
                 inner.has("enum") -> knownEnums[id.toInt()] = name
+                inner.has("trait") -> knownTraits[id.toInt()] = name
             }
         }
 
-        // Collect inherent impl blocks (trait_ == null) and map struct id → method items
-        // Each method item is paired with a Boolean indicating if &mut self
-        val implMethods = mutableMapOf<Int, MutableList<Triple<JsonObject, Boolean, String?>>>() // struct id → (item, isMutating, docs)
+        // Collect inherent impl blocks and map struct id → method items
+        data class MethodEntry(val item: JsonObject, val isMutating: Boolean, val docs: String?, val isOverride: Boolean = false)
+        val implMethods = mutableMapOf<Int, MutableList<MethodEntry>>() // struct id → method entries
         val implConstructors = mutableMapOf<Int, JsonObject?>()        // struct id → new() fn
+        val structTraitImpls = mutableMapOf<Int, MutableList<String>>() // struct id → trait names
 
         for ((_, item) in index.entrySet()) {
             val inner = item.asJsonObject.getAsJsonObject("inner") ?: continue
             if (!inner.has("impl")) continue
             val implObj = inner.getAsJsonObject("impl")
-            // Skip trait impls
-            if (implObj.get("trait_") != null && !implObj.get("trait_").isJsonNull) continue
+
+            // Rustdoc JSON format 56 uses "trait" (not "trait_")
+            // Inherent impls have "trait": null; trait impls have "trait": { "path": "TraitName", ... }
+            val traitField = implObj.get("trait")
+            val isTraitImpl = traitField != null && !traitField.isJsonNull && traitField.isJsonObject
+
             // Get the type this impl is for
             val forType = implObj.getAsJsonObject("for") ?: continue
             val structId = resolveTypeId(forType) ?: continue
-            // Collect method items
-            val items = implObj.getAsJsonArray("items") ?: continue
-            for (methodIdElem in items) {
-                val methodId = methodIdElem.asInt
-                val methodItem = index.get(methodId.toString())?.asJsonObject ?: continue
-                val methodInner = methodItem.getAsJsonObject("inner") ?: continue
-                if (!methodInner.has("function")) continue
-                val methodVis = methodItem.get("visibility").safeString() ?: continue
-                if (methodVis != "public") continue
-                val methodName = methodItem.get("name").safeString() ?: continue
-                val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
-                val inputs = sig.getAsJsonArray("inputs")
-                // Check if this is a constructor (fn new(...) -> Self, no &self)
-                if (methodName == "new" && !hasSelfParam(inputs)) {
-                    implConstructors[structId] = methodItem
-                } else if (hasSelfParam(inputs)) {
-                    val isMutating = isSelfMutable(inputs)
-                    val docs = methodItem.get("docs").safeString()
-                    implMethods.getOrPut(structId) { mutableListOf() }.add(Triple(methodItem, isMutating, docs))
+
+            if (isTraitImpl) {
+                // Only collect methods for known user-defined traits
+                val traitName = traitField.asJsonObject.get("path")?.asString ?: continue
+                if (!knownTraits.values.contains(traitName)) continue
+                structTraitImpls.getOrPut(structId) { mutableListOf() }.add(traitName)
+                // Collect trait impl methods (note: visibility is "default" in trait impls, not "public")
+                val items = implObj.getAsJsonArray("items") ?: continue
+                for (methodIdElem in items) {
+                    val methodId = methodIdElem.asInt
+                    val methodItem = index.get(methodId.toString())?.asJsonObject ?: continue
+                    val methodInner = methodItem.getAsJsonObject("inner") ?: continue
+                    if (!methodInner.has("function")) continue
+                    val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
+                    val inputs = sig.getAsJsonArray("inputs")
+                    if (hasSelfParam(inputs)) {
+                        val isMutating = isSelfMutable(inputs)
+                        val docs = methodItem.get("docs").safeString()
+                        implMethods.getOrPut(structId) { mutableListOf() }.add(MethodEntry(methodItem, isMutating, docs, isOverride = true))
+                    }
                 }
-                // Static methods (no self, not "new") → could be companion, skip for now
+            } else {
+                // Inherent impl: collect public methods and constructors
+                val items = implObj.getAsJsonArray("items") ?: continue
+                for (methodIdElem in items) {
+                    val methodId = methodIdElem.asInt
+                    val methodItem = index.get(methodId.toString())?.asJsonObject ?: continue
+                    val methodInner = methodItem.getAsJsonObject("inner") ?: continue
+                    if (!methodInner.has("function")) continue
+                    val methodVis = methodItem.get("visibility").safeString() ?: continue
+                    if (methodVis != "public") continue
+                    val methodName = methodItem.get("name").safeString() ?: continue
+                    val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
+                    val inputs = sig.getAsJsonArray("inputs")
+                    // Check if this is a constructor (fn new(...) -> Self, no &self)
+                    if (methodName == "new" && !hasSelfParam(inputs)) {
+                        implConstructors[structId] = methodItem
+                    } else if (hasSelfParam(inputs)) {
+                        val isMutating = isSelfMutable(inputs)
+                        val docs = methodItem.get("docs").safeString()
+                        implMethods.getOrPut(structId) { mutableListOf() }.add(MethodEntry(methodItem, isMutating, docs))
+                    }
+                }
             }
         }
 
@@ -123,14 +152,17 @@ class RustdocJsonParser {
             val constructor = buildConstructor(implConstructors[id], structItem, index, knownStructs, knownEnums)
 
             // Build methods (passing isMutating from the self param)
-            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { (methodItem, isMutating, docs) ->
-                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating, docs)
+            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { entry ->
+                buildMethod(entry.item, knownStructs, knownEnums, knownDataClasses, entry.isMutating, entry.docs)?.let {
+                    if (entry.isOverride) it.copy(isOverride = true) else it
+                }
             }
 
             // Extract properties from get_/set_ patterns
             val (methods, properties) = extractProperties(allMethods)
 
             val fqName = "$crateName.$name"
+            val traitNames = structTraitImpls[id]?.map { "$crateName.$it" } ?: emptyList()
             classes.add(
                 KneClass(
                     simpleName = name,
@@ -138,6 +170,7 @@ class RustdocJsonParser {
                     constructor = constructor,
                     methods = methods,
                     properties = properties,
+                    interfaces = traitNames,
                 )
             )
         }
@@ -236,6 +269,31 @@ class RustdocJsonParser {
             )
         }
 
+        // Build KneInterfaces from known traits
+        val interfaces = mutableListOf<KneInterface>()
+        for ((id, traitName) in knownTraits) {
+            val traitItem = index.get(id.toString())?.asJsonObject ?: continue
+            val traitInner = traitItem.getAsJsonObject("inner")?.getAsJsonObject("trait") ?: continue
+            val traitItemIds = traitInner.getAsJsonArray("items") ?: continue
+            val traitMethods = traitItemIds.mapNotNull { mid ->
+                val methodItem = index.get(mid.asInt.toString())?.asJsonObject ?: return@mapNotNull null
+                val methodInner = methodItem.getAsJsonObject("inner") ?: return@mapNotNull null
+                if (!methodInner.has("function")) return@mapNotNull null
+                val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
+                val inputs = sig.getAsJsonArray("inputs")
+                val mutating = isSelfMutable(inputs)
+                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating = mutating)
+            }
+            interfaces.add(
+                KneInterface(
+                    simpleName = traitName,
+                    fqName = "$crateName.$traitName",
+                    methods = traitMethods,
+                    properties = emptyList(),
+                )
+            )
+        }
+
         // Derive package from crate name
         val pkg = crateName.replace('-', '.').replace('_', '.')
 
@@ -243,6 +301,7 @@ class RustdocJsonParser {
             libName = libName,
             packages = setOf(pkg),
             classes = classes,
+            interfaces = interfaces,
             dataClasses = knownDataClasses.values.toList(),
             enums = enums,
             functions = topLevelFunctions,
