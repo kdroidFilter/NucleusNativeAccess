@@ -1040,7 +1040,7 @@ class FfmProxyGenerator {
             appendLine("        }")
             if (prop.mutable) {
                 val setHandleName = "SET_${prop.name.uppercase()}_HANDLE"
-                val setLayouts = buildLayouts(listOf(prop.type))
+                val setLayouts = if (prop.type.isCollection()) ", JAVA_LONG" else buildLayouts(listOf(prop.type))
                 appendLine("        private val $setHandleName: MethodHandle by lazy {")
                 appendLine("            KneRuntime.handle(\"${p}_${n}_set_${prop.name}\",")
                 appendLine("                FunctionDescriptor.ofVoid(JAVA_LONG$setLayouts))")
@@ -1144,8 +1144,17 @@ class FfmProxyGenerator {
                 }
             }
         }
-        // Scan DC params for collection fields
+        // Scan DC params for collection fields + mutable collection properties
         cls.methods.forEach { m -> m.params.forEach { pp -> extractDataClass(pp.type)?.let { scanDcFieldColls(it) } } }
+        cls.properties.filter { it.mutable && it.type.isCollection() }.forEach { prop ->
+            val inner = prop.type.unwrapCollection()
+            when (inner) {
+                is KneType.LIST -> if (inner.elementType !is KneType.DATA_CLASS) dcFieldCollKeys.add(suspendCollElemKey(inner.elementType))
+                is KneType.SET -> if (inner.elementType !is KneType.DATA_CLASS) dcFieldCollKeys.add(suspendCollElemKey(inner.elementType))
+                is KneType.MAP -> dcFieldMapKeys.add(Pair(suspendCollElemKey(inner.keyType), suspendCollElemKey(inner.valueType)))
+                else -> {}
+            }
+        }
         for (key in dcFieldCollKeys) {
             val uk = key.uppercase()
             appendLine("        private val WRAP_COLL_${uk}_HANDLE: MethodHandle by lazy {")
@@ -1980,31 +1989,160 @@ class FfmProxyGenerator {
 
     private fun StringBuilder.appendPropertyProxy(prop: KneProperty, cls: KneClass) {
         val getHandleName = "GET_${prop.name.uppercase()}_HANDLE"
+        val isCollProp = prop.type.isCollection()
         if (prop.mutable) {
             appendLine("    var ${prop.name}: ${prop.type.jvmTypeName}")
         } else {
             appendLine("    val ${prop.name}: ${prop.type.jvmTypeName}")
         }
         appendLine("        get() {")
-        val needsArena = prop.type.returnsViaBuffer()
-        if (needsArena) {
-            appendLine("            Arena.ofConfined().use { arena ->")
-            appendStringReadWithRetry("                ", getHandleName, "handle")
-            if (prop.type is KneType.NULLABLE) {
-                appendLine("                return if (_len < 0) null else _buf.getString(0)")
-            } else {
-                appendLine("                return _buf.getString(0)")
+        if (isCollProp) {
+            // Collection property getter: read StableRef handle, deserialize, dispose
+            val inner = prop.type.unwrapCollection()
+            appendLine("            val _handle = $getHandleName.invoke(handle) as Long")
+            appendLine("            KneRuntime.checkError()")
+            when (inner) {
+                is KneType.LIST -> {
+                    if (inner.elementType is KneType.DATA_CLASS) {
+                        val dn = inner.elementType.simpleName.uppercase()
+                        appendLine("            val _size = LIST_${dn}_SIZE_HANDLE.invoke(_handle) as Int")
+                        appendLine("            val _list = ArrayList<${inner.elementType.simpleName}>(_size)")
+                        appendLine("            Arena.ofConfined().use { dcArena ->")
+                        val flatFields = flattenDcFields(inner.elementType, "out")
+                        flatFields.forEach { (name, type) ->
+                            when (type) {
+                                KneType.STRING, KneType.BYTE_ARRAY -> appendLine("                val $name = dcArena.allocate($STRING_BUF_SIZE.toLong())")
+                                else -> appendLine("                val $name = dcArena.allocate(${type.ffmLayout})")
+                            }
+                        }
+                        appendLine("                for (_i in 0 until _size) {")
+                        val getArgs = buildList {
+                            add("_handle"); add("_i")
+                            flatFields.forEach { (name, type) -> when (type) { KneType.STRING, KneType.BYTE_ARRAY -> { add(name); add("$STRING_BUF_SIZE") }; else -> add(name) } }
+                        }.joinToString(", ")
+                        appendLine("                    LIST_${dn}_GET_HANDLE.invoke($getArgs)")
+                        if (dcHasCollectionFields(inner.elementType)) appendDcCollectionFieldReads("                    ", inner.elementType, "out")
+                        appendLine("                    _list.add(${buildDcCtorFromOutParams(inner.elementType, "out")})")
+                        appendLine("                }")
+                        appendLine("            }")
+                        appendLine("            LIST_${dn}_DISPOSE_HANDLE.invoke(_handle)")
+                        appendLine("            return _list")
+                    } else {
+                        val key = suspendCollElemKey(inner.elementType)
+                        appendLine("            Arena.ofConfined().use { _collArena ->")
+                        if (inner.elementType == KneType.STRING) {
+                            appendLine("                val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
+                            appendLine("                val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, $STRING_BUF_SIZE) as Int")
+                            appendLine("                val _list = mutableListOf<String>()")
+                            appendLine("                var _off = 0L")
+                            appendLine("                repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                            appendLine("                return _list")
+                        } else {
+                            val layout = KneType.collectionElementLayout(inner.elementType)
+                            appendLine("                val _outBuf = _collArena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                            appendLine("                val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, $MAX_COLLECTION_SIZE) as Int")
+                            when (inner.elementType) {
+                                KneType.BOOLEAN -> appendLine("                return List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+                                is KneType.ENUM -> appendLine("                return List(_count) { ${inner.elementType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+                                is KneType.OBJECT -> appendLine("                return List(_count) { ${inner.elementType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                                else -> appendLine("                return List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${inner.elementType.jvmTypeName} }")
+                            }
+                        }
+                        appendLine("            }")
+                    }
+                }
+                is KneType.SET -> {
+                    val key = suspendCollElemKey(inner.elementType)
+                    appendLine("            Arena.ofConfined().use { _collArena ->")
+                    val layout = KneType.collectionElementLayout(inner.elementType)
+                    appendLine("                val _outBuf = _collArena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                    appendLine("                val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, $MAX_COLLECTION_SIZE) as Int")
+                    when (inner.elementType) {
+                        KneType.BOOLEAN -> appendLine("                return List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }.toSet()")
+                        is KneType.ENUM -> appendLine("                return List(_count) { ${inner.elementType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }.toSet()")
+                        else -> appendLine("                return List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${inner.elementType.jvmTypeName} }.toSet()")
+                    }
+                    appendLine("            }")
+                }
+                is KneType.MAP -> {
+                    val kk = suspendCollElemKey(inner.keyType)
+                    val vk = suspendCollElemKey(inner.valueType)
+                    appendLine("            Arena.ofConfined().use { _mapArena ->")
+                    val isKeyString = inner.keyType == KneType.STRING
+                    val isValString = inner.valueType == KneType.STRING
+                    if (isKeyString) appendLine("                val _keysBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("                val _keysBuf = _mapArena.allocate(${KneType.collectionElementLayout(inner.keyType)}, $MAX_COLLECTION_SIZE.toLong())")
+                    if (isValString) appendLine("                val _valsBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("                val _valsBuf = _mapArena.allocate(${KneType.collectionElementLayout(inner.valueType)}, $MAX_COLLECTION_SIZE.toLong())")
+                    val keySizeArg = if (isKeyString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                    val valSizeArg = if (isValString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
+                    appendLine("                val _count = SUSPEND_READMAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke(_handle, _keysBuf, $keySizeArg, _valsBuf, $valSizeArg) as Int")
+                    if (isKeyString) {
+                        appendLine("                val _keys = mutableListOf<String>(); var _kOff = 0L")
+                        appendLine("                repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                    } else {
+                        appendLine("                val _keys = List(_count) { _keysBuf.getAtIndex(${KneType.collectionElementLayout(inner.keyType)}, it.toLong()) as ${inner.keyType.jvmTypeName} }")
+                    }
+                    if (isValString) {
+                        appendLine("                val _vals = mutableListOf<String>(); var _vOff = 0L")
+                        appendLine("                repeat(_count) { _vals.add(_valsBuf.getString(_vOff)); _vOff += _vals.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                    } else {
+                        appendLine("                val _vals = List(_count) { _valsBuf.getAtIndex(${KneType.collectionElementLayout(inner.valueType)}, it.toLong()) as ${inner.valueType.jvmTypeName} }")
+                    }
+                    appendLine("                return _keys.zip(_vals).toMap()")
+                    appendLine("            }")
+                }
+                else -> appendCallAndReturn("            ", prop.type, getHandleName, "handle")
             }
-            appendLine("            }")
         } else {
-            appendCallAndReturn("            ", prop.type, getHandleName, "handle")
+            val needsArena = prop.type.returnsViaBuffer()
+            if (needsArena) {
+                appendLine("            Arena.ofConfined().use { arena ->")
+                appendStringReadWithRetry("                ", getHandleName, "handle")
+                if (prop.type is KneType.NULLABLE) {
+                    appendLine("                return if (_len < 0) null else _buf.getString(0)")
+                } else {
+                    appendLine("                return _buf.getString(0)")
+                }
+                appendLine("            }")
+            } else {
+                appendCallAndReturn("            ", prop.type, getHandleName, "handle")
+            }
         }
         appendLine("        }")
 
         if (prop.mutable) {
             val setHandleName = "SET_${prop.name.uppercase()}_HANDLE"
             appendLine("        set(value) {")
-            appendSetterInvoke("            ", setHandleName, prop.type, "handle")
+            if (isCollProp) {
+                // Collection property setter: serialize collection to StableRef, pass handle
+                val inner = prop.type.unwrapCollection()
+                appendLine("            Arena.ofConfined().use { arena ->")
+                when (inner) {
+                    is KneType.LIST, is KneType.SET -> {
+                        val elemType = when (inner) { is KneType.LIST -> inner.elementType; is KneType.SET -> inner.elementType; else -> KneType.INT }
+                        val srcExpr = if (inner is KneType.SET) "value.toList()" else "value"
+                        val key = suspendCollElemKey(elemType)
+                        appendLine("                val _src = $srcExpr")
+                        appendLine("                val _wrapHandle = run {")
+                        appendCollFieldWrapPrimitive("                    ", "_src", elemType, key)
+                        appendLine("                }")
+                        appendLine("                $setHandleName.invoke(handle, _wrapHandle)")
+                    }
+                    is KneType.MAP -> {
+                        val kk = suspendCollElemKey(inner.keyType)
+                        val vk = suspendCollElemKey(inner.valueType)
+                        appendLine("                val _wrapHandle = run {")
+                        appendCollFieldWrapMap("                    ", "value", inner, kk, vk)
+                        appendLine("                }")
+                        appendLine("                $setHandleName.invoke(handle, _wrapHandle)")
+                    }
+                    else -> {}
+                }
+                appendLine("            }")
+            } else {
+                appendSetterInvoke("            ", setHandleName, prop.type, "handle")
+            }
             appendLine("        }")
         }
         appendLine()
@@ -2256,13 +2394,16 @@ class FfmProxyGenerator {
     }
 
     private fun buildGetterDescriptor(prop: KneProperty): String {
+        val isCollProp = prop.type.isCollection()
         val paramLayouts = buildList {
             add("JAVA_LONG")
-            if (prop.type.returnsViaBuffer()) {
+            if (!isCollProp && prop.type.returnsViaBuffer()) {
                 add("ADDRESS"); add("JAVA_INT")
             }
         }
-        return buildDescriptor(prop.type, paramLayouts)
+        // Collection getters return JAVA_LONG (StableRef handle)
+        return if (isCollProp) buildDescriptor(KneType.LONG, paramLayouts)
+        else buildDescriptor(prop.type, paramLayouts)
     }
 
     private fun buildCompanionGetterDescriptor(prop: KneProperty): String {

@@ -98,17 +98,19 @@ class NativeBridgeGenerator {
         val dcTypesInSuspend = collectSuspendDcTypes(module)
         dcTypesInSuspend.forEach { dc -> appendSuspendDcBridges(dc, module.libName) }
 
-        // Generate collection reader bridges for suspend returns + DC collection fields
+        // Generate collection reader bridges for suspend returns + DC collection fields + collection properties
         val suspendCollTypes = collectSuspendCollectionTypes(module)
         val dcFieldCollTypes = collectDcFieldCollectionTypes(module)
-        val allCollReaderTypes = suspendCollTypes + dcFieldCollTypes
+        val propCollTypes = collectPropertyCollectionTypes(module)
+        val allCollReaderTypes = suspendCollTypes + dcFieldCollTypes + propCollTypes
         if (allCollReaderTypes.isNotEmpty()) {
             appendSuspendCollectionReaderBridges(module.libName, allCollReaderTypes)
         }
 
-        // Generate wrap bridges for DC collection fields used as params
-        if (dcFieldCollTypes.isNotEmpty()) {
-            appendDcFieldCollectionWrapBridges(module.libName, dcFieldCollTypes)
+        // Generate wrap bridges for DC collection fields + mutable collection properties
+        val allWrapTypes = dcFieldCollTypes + propCollTypes
+        if (allWrapTypes.isNotEmpty()) {
+            appendDcFieldCollectionWrapBridges(module.libName, allWrapTypes)
         }
 
         // Generate create/add bridges for List<DC> params
@@ -563,29 +565,71 @@ class NativeBridgeGenerator {
 
     private fun StringBuilder.appendProperty(prop: KneProperty, cls: KneClass, prefix: String) {
         val getterName = "${prefix}_${cls.simpleName}_get_${prop.name}"
-        val extraParams = if (prop.type.returnsViaBuffer()) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
-        val returnDecl = buildReturnDecl(prop.type)
+        val isCollProp = prop.type.isCollection()
 
-        appendLine("@CName(\"$getterName\")")
-        appendLine("fun `$getterName`(handle: Long$extraParams)$returnDecl {")
-        appendTryCatchStart()
-        appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
-        appendReturnStatement("obj.${prop.name}", prop.type)
-        appendTryCatchEnd(prop.type)
-        appendLine("}")
-        appendLine()
+        if (isCollProp) {
+            // Collection property getter: return StableRef handle (Long)
+            appendLine("@CName(\"$getterName\")")
+            appendLine("fun `$getterName`(handle: Long): Long {")
+            appendTryCatchStart()
+            appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+            appendLine("    return StableRef.create(obj.${prop.name} as Any).asCPointer().toLong()")
+            appendTryCatchEnd(KneType.LONG)
+            appendLine("}")
+            appendLine()
+        } else {
+            val extraParams = if (prop.type.returnsViaBuffer()) ", outBuf: CPointer<ByteVar>?, outLen: Int" else ""
+            val returnDecl = buildReturnDecl(prop.type)
+            appendLine("@CName(\"$getterName\")")
+            appendLine("fun `$getterName`(handle: Long$extraParams)$returnDecl {")
+            appendTryCatchStart()
+            appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+            appendReturnStatement("obj.${prop.name}", prop.type)
+            appendTryCatchEnd(prop.type)
+            appendLine("}")
+            appendLine()
+        }
 
         if (prop.mutable) {
             val setterName = "${prefix}_${cls.simpleName}_set_${prop.name}"
-            val valueParam = "value: ${prop.type.nativeBridgeType}"
-            appendLine("@CName(\"$setterName\")")
-            appendLine("fun `$setterName`(handle: Long, $valueParam) {")
-            appendTryCatchStart()
-            appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
-            appendSetterBody("obj.${prop.name}", prop.type)
-            appendTryCatchEnd(KneType.UNIT)
-            appendLine("}")
-            appendLine()
+            if (isCollProp) {
+                // Collection property setter: accept StableRef handle (Long), read and dispose
+                appendLine("@CName(\"$setterName\")")
+                appendLine("fun `$setterName`(handle: Long, value: Long) {")
+                appendTryCatchStart()
+                appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+                appendLine("    val _ref = value.toCPointer<COpaque>()!!.asStableRef<Any>()")
+                val inner = prop.type.unwrapCollection()
+                when (inner) {
+                    is KneType.LIST -> {
+                        appendLine("    val _coll = _ref.get() as List<*>")
+                        appendLine("    obj.${prop.name} = _coll as List<${inner.elementType.jvmTypeName}>")
+                    }
+                    is KneType.SET -> {
+                        appendLine("    val _coll = _ref.get() as Set<*>")
+                        appendLine("    obj.${prop.name} = _coll as Set<${inner.elementType.jvmTypeName}>")
+                    }
+                    is KneType.MAP -> {
+                        appendLine("    val _coll = _ref.get() as Map<*, *>")
+                        appendLine("    obj.${prop.name} = _coll as Map<${(inner as KneType.MAP).keyType.jvmTypeName}, ${inner.valueType.jvmTypeName}>")
+                    }
+                    else -> {}
+                }
+                appendLine("    _ref.dispose()")
+                appendTryCatchEnd(KneType.UNIT)
+                appendLine("}")
+                appendLine()
+            } else {
+                val valueParam = "value: ${prop.type.nativeBridgeType}"
+                appendLine("@CName(\"$setterName\")")
+                appendLine("fun `$setterName`(handle: Long, $valueParam) {")
+                appendTryCatchStart()
+                appendLine("    val obj = handle.toCPointer<COpaque>()!!.asStableRef<${cls.fqName}>().get()")
+                appendSetterBody("obj.${prop.name}", prop.type)
+                appendTryCatchEnd(KneType.UNIT)
+                appendLine("}")
+                appendLine()
+            }
         }
     }
 
@@ -1495,6 +1539,21 @@ class NativeBridgeGenerator {
             cls.companionMethods.forEach { scan(it) }
         }
         module.functions.forEach { scan(it) }
+        return result
+    }
+
+    /** Collect all collection types used as class properties. */
+    private fun collectPropertyCollectionTypes(module: KneModule): Set<KneType> {
+        val result = mutableSetOf<KneType>()
+        module.classes.forEach { cls ->
+            cls.properties.forEach { prop ->
+                val inner = when (val t = prop.type) { is KneType.NULLABLE -> t.inner; else -> t }
+                when (inner) {
+                    is KneType.LIST, is KneType.SET, is KneType.MAP -> result.add(inner)
+                    else -> {}
+                }
+            }
+        }
         return result
     }
 
