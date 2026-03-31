@@ -60,6 +60,14 @@ class Calculator(initial: Int = 0) {
     var scale: Double = 1.0
     var enabled: Boolean = true
 
+    // ── Collection properties ──────────────────────────────────────────────
+
+    val recentScores: List<Int> get() = listOf(accumulator, accumulator * 2, accumulator * 3)
+
+    var tags: List<String> = listOf("default")
+
+    val info: Map<String, Int> get() = mapOf("current" to accumulator, "scale" to scale.toInt())
+
     // ── Enum support ────────────────────────────────────────────────────────
 
     var lastOperation: Operation = Operation.ADD
