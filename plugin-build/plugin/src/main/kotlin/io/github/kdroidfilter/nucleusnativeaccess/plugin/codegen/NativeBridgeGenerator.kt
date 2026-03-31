@@ -98,11 +98,12 @@ class NativeBridgeGenerator {
         val dcTypesInSuspend = collectSuspendDcTypes(module)
         dcTypesInSuspend.forEach { dc -> appendSuspendDcBridges(dc, module.libName) }
 
-        // Generate collection reader bridges for suspend returns + DC collection fields + collection properties
+        // Generate collection reader bridges for suspend returns + DC collection fields + collection properties + Flow<Collection>
         val suspendCollTypes = collectSuspendCollectionTypes(module)
         val dcFieldCollTypes = collectDcFieldCollectionTypes(module)
         val propCollTypes = collectPropertyCollectionTypes(module)
-        val allCollReaderTypes = suspendCollTypes + dcFieldCollTypes + propCollTypes
+        val flowCollTypes = collectFlowCollectionTypes(module)
+        val allCollReaderTypes = suspendCollTypes + dcFieldCollTypes + propCollTypes + flowCollTypes
         if (allCollReaderTypes.isNotEmpty()) {
             appendSuspendCollectionReaderBridges(module.libName, allCollReaderTypes)
         }
@@ -1551,6 +1552,25 @@ class NativeBridgeGenerator {
         return result
     }
 
+    /** Collect all collection types used as Flow element types. */
+    private fun collectFlowCollectionTypes(module: KneModule): Set<KneType> {
+        val result = mutableSetOf<KneType>()
+        fun scan(type: KneType) {
+            if (type is KneType.FLOW) {
+                when (type.elementType) {
+                    is KneType.LIST, is KneType.SET, is KneType.MAP -> result.add(type.elementType)
+                    else -> {}
+                }
+            }
+        }
+        module.classes.forEach { cls ->
+            cls.methods.forEach { fn -> scan(fn.returnType) }
+            cls.companionMethods.forEach { fn -> scan(fn.returnType) }
+        }
+        module.functions.forEach { fn -> scan(fn.returnType) }
+        return result
+    }
+
     /** Collect all collection types used as class properties. */
     private fun collectPropertyCollectionTypes(module: KneModule): Set<KneType> {
         val result = mutableSetOf<KneType>()
@@ -2100,6 +2120,10 @@ class NativeBridgeGenerator {
             is KneType.ENUM -> appendLine("                _nextFn.invoke($valueExpr.ordinal.toLong())")
             is KneType.DATA_CLASS -> {
                 appendLine("                val _ref = StableRef.create($valueExpr)")
+                appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
+            }
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                appendLine("                val _ref = StableRef.create($valueExpr as Any)")
                 appendLine("                _nextFn.invoke(_ref.asCPointer().toLong())")
             }
             else -> appendLine("                _nextFn.invoke($valueExpr.toLong())")

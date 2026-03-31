@@ -522,6 +522,20 @@ class Calculator(initial: Int = 0) {
         emit(true); emit(false); emit(accumulator > 0)
     }
 
+    // ── Flow<Collection> support ────────────────────────────────────────────────
+
+    fun scoresFlow(count: Int): kotlinx.coroutines.flow.Flow<List<Int>> = kotlinx.coroutines.flow.flow {
+        repeat(count) { i -> kotlinx.coroutines.delay(3); emit(listOf(i, i * 2, i * 3)) }
+    }
+
+    fun labelsFlow(): kotlinx.coroutines.flow.Flow<List<String>> = kotlinx.coroutines.flow.flow {
+        emit(listOf("a", "b")); emit(listOf("c", "d", "e"))
+    }
+
+    fun metadataFlow(count: Int): kotlinx.coroutines.flow.Flow<Map<String, Int>> = kotlinx.coroutines.flow.flow {
+        repeat(count) { i -> kotlinx.coroutines.delay(3); emit(mapOf("step" to i, "value" to accumulator + i)) }
+    }
+
     // ── Flow<DataClass> support ────────────────────────────────────────────────
 
     fun pointFlow(count: Int): kotlinx.coroutines.flow.Flow<Point> = kotlinx.coroutines.flow.flow {
