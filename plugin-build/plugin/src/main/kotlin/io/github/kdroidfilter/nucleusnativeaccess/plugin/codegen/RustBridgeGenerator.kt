@@ -347,9 +347,14 @@ class RustBridgeGenerator {
 
     private fun StringBuilder.appendPropertyBridges(prop: KneProperty, cls: KneClass, prefix: String) {
         if (!isSupportedReturnType(prop.type)) return
-        if (prop.type is KneType.MAP) return // MAP properties not yet supported
         val className = cls.simpleName
         val sym = "${prefix}_${className}"
+
+        if (prop.type is KneType.MAP) {
+            appendMapPropertyGetter(prop, cls, sym)
+            return
+        }
+
         val needsBuf = needsOutputBuffer(prop.type)
 
         // Getter bridge
@@ -390,6 +395,27 @@ class RustBridgeGenerator {
         }
     }
 
+    private fun StringBuilder.appendMapPropertyGetter(prop: KneProperty, cls: KneClass, sym: String) {
+        val mapType = prop.type as KneType.MAP
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_get_${prop.name}(handle: i64")
+        append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+        if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+        append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+        if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+        appendLine(", out_max_len: i32) -> i32 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
+        appendMapReturnFromBinding("obj.get_${prop.name}()", mapType, "        ")
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0 }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
     /** Extract a DATA_CLASS from a return type (handles both direct and nullable). */
     private fun extractReturnDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
         is KneType.DATA_CLASS -> type
@@ -425,9 +451,10 @@ class RustBridgeGenerator {
 
     private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
         KneType.STRING, KneType.BYTE_ARRAY -> true
-        is KneType.LIST -> true
+        is KneType.LIST, is KneType.SET -> true
         is KneType.NULLABLE -> type.inner == KneType.STRING
         is KneType.DATA_CLASS -> false // Data class returns use per-field out-params, not a single buffer
+        is KneType.MAP -> false // MAP uses dual buffers, handled separately
         else -> false
     }
 
@@ -851,6 +878,12 @@ class RustBridgeGenerator {
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
         for (f in variant.fields) {
+            // Handle MAP fields specially with dual buffers
+            if (f.type is KneType.MAP) {
+                appendSealedMapVariantFieldGetter(sym, rustName, variant, f)
+                continue
+            }
+
             val fnName = "${sym}_${variant.name}_get_${f.name}"
             val needsBuf = needsOutputBuffer(f.type)
 
@@ -899,6 +932,53 @@ class RustBridgeGenerator {
             appendLine("}")
             appendLine()
         }
+    }
+
+    private fun StringBuilder.appendSealedMapVariantFieldGetter(
+        sym: String, rustName: String, variant: KneSealedVariant, f: KneParam
+    ) {
+        val fnName = "${sym}_${variant.name}_get_${f.name}"
+        val mapType = f.type as KneType.MAP
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $fnName(handle: i64")
+        append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+        if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+        append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+        if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+        appendLine(", out_max_len: i32) -> i32 {")
+        appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+
+        // Build match pattern and value expression based on tuple vs struct
+        val fieldIndex = variant.fields.indexOf(f)
+        val (fieldPattern, valExpr) = if (variant.isTuple) {
+            // Tuple variant: match positionally
+            if (variant.fields.size == 1) {
+                "$rustName::${variant.name}(ref _v)" to "_v"
+            } else {
+                val wildcards = variant.fields.indices.joinToString(", ") { i ->
+                    if (i == fieldIndex) "ref _v$i" else "_"
+                }
+                "$rustName::${variant.name}($wildcards)" to "_v$fieldIndex"
+            }
+        } else {
+            // Struct variant: match by field name
+            "$rustName::${variant.name} { ref ${f.name}, .. }" to f.name
+        }
+
+        appendLine("    match obj {")
+        appendLine("        $fieldPattern => {")
+        appendMapReturnFromBinding(
+            sealedGetterBindingExpr(f, valExpr),
+            mapType,
+            "            ",
+            f.rustType
+        )
+        appendLine("        }")
+        appendLine("        _ => 0")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
     }
 
     private fun defaultCReturnValue(type: KneType): String {

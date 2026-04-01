@@ -1027,6 +1027,7 @@ class RustdocJsonParser {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
         KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> true
         is KneType.ENUM -> true
+        is KneType.MAP -> true
         else -> false
     }
 

@@ -429,7 +429,7 @@ class RustBridgeGeneratorTest {
     }
 
     @Test
-    fun `skips MAP property getters`() {
+    fun `generates MAP property getter with dual buffers`() {
         val moduleWithMapProp = simpleModule.copy(
             classes = listOf(simpleModule.classes.first().copy(
                 properties = listOf(KneProperty(
@@ -440,7 +440,10 @@ class RustBridgeGeneratorTest {
             ))
         )
         val mapCode = RustBridgeGenerator().generate(moduleWithMapProp)
-        assertFalse("Should not generate getter for MAP property", mapCode.contains("get_scores"))
+        assertTrue("Should generate getter for MAP property", mapCode.contains("get_scores"))
+        assertTrue("Should have out_keys param", mapCode.contains("out_keys: *mut u8"))
+        assertTrue("Should have out_values param", mapCode.contains("out_values: *mut i32"))
+        assertTrue("Should have out_max_len param", mapCode.contains("out_max_len: i32"))
     }
 
     // --- SET return ---
@@ -1000,6 +1003,56 @@ class RustBridgeGeneratorTest {
     private fun moduleWithSealed() = simpleModule.copy(
         sealedEnums = listOf(appResultSealed())
     )
+
+    @Test
+    fun `generates sealed variant LIST field getter with buffer`() {
+        val sealed = KneSealedEnum(
+            simpleName = "Result",
+            fqName = "test.Result",
+            variants = listOf(
+                KneSealedVariant("Success", listOf(KneParam("values", KneType.LIST(KneType.INT))), isTuple = true),
+            )
+        )
+        val mod = simpleModule.copy(sealedEnums = listOf(sealed))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Result_Success_get_values"))
+        assertTrue(c.contains("out_buf: *mut u8, out_buf_len: i32") || c.contains("out_buf: *mut i32, out_buf_len: i32"))
+        assertTrue(c.contains("-> i32"))
+    }
+
+    @Test
+    fun `generates sealed variant SET field getter with buffer`() {
+        val sealed = KneSealedEnum(
+            simpleName = "Result",
+            fqName = "test.Result",
+            variants = listOf(
+                KneSealedVariant("Success", listOf(KneParam("tags", KneType.SET(KneType.STRING))), isTuple = true),
+            )
+        )
+        val mod = simpleModule.copy(sealedEnums = listOf(sealed))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Result_Success_get_tags"))
+        assertTrue(c.contains("out_buf: *mut u8, out_buf_len: i32"))
+        assertTrue(c.contains("-> i32"))
+    }
+
+    @Test
+    fun `generates sealed variant MAP field getter with dual buffers`() {
+        val sealed = KneSealedEnum(
+            simpleName = "Result",
+            fqName = "test.Result",
+            variants = listOf(
+                KneSealedVariant("Data", listOf(KneParam("mapping", KneType.MAP(KneType.STRING, KneType.INT))), isTuple = true),
+            )
+        )
+        val mod = simpleModule.copy(sealedEnums = listOf(sealed))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Result_Data_get_mapping"))
+        assertTrue(c.contains("out_keys: *mut u8, out_keys_len: i32"))
+        assertTrue(c.contains("out_values: *mut i32"))
+        assertTrue(c.contains("out_max_len: i32"))
+        assertTrue(c.contains("-> i32"))
+    }
 
     private fun assertContains(substring: String) {
         assertTrue(
