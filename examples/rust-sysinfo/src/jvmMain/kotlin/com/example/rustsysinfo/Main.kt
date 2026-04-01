@@ -70,6 +70,10 @@ data class DiskInfo(
     val totalSpace: Long,
     val availableSpace: Long,
     val isRemovable: Boolean,
+    val kind: String,
+    val isReadOnly: Boolean,
+    val readBytes: Long,
+    val writtenBytes: Long,
 )
 
 data class NetworkInfo(
@@ -94,6 +98,22 @@ data class ProcessInfo(
     val status: String,
     val startTime: Long,
     val runTime: Long,
+    val exe: String?,
+    val cwd: String?,
+    val diskReadBytes: Long,
+    val diskWrittenBytes: Long,
+)
+
+data class SensorInfo(
+    val label: String,
+    val temperature: Float?,
+    val max: Float?,
+    val critical: Float?,
+)
+
+data class UserInfo(
+    val name: String,
+    val groups: List<String>,
 )
 
 data class DynamicState(
@@ -104,6 +124,8 @@ data class DynamicState(
     val loadAvg: LoadAvg,
     val networks: List<NetworkInfo>,
     val processes: List<ProcessInfo>,
+    val sensors: List<SensorInfo>,
+    val users: List<UserInfo>,
 )
 
 // ── Flows ────────────────────────────────────────────────────────────────
@@ -149,6 +171,7 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
 
             val diskList = Disks.new_with_refreshed_list()
             val disks = diskList.list().map { disk ->
+                val usage = disk.usage()
                 DiskInfo(
                     name = disk.name(),
                     mountPoint = disk.mount_point(),
@@ -156,6 +179,10 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                     totalSpace = disk.total_space(),
                     availableSpace = disk.available_space(),
                     isRemovable = disk.is_removable(),
+                    kind = disk.kind().tag.name,
+                    isReadOnly = disk.is_read_only(),
+                    readBytes = usage.total_read_bytes,
+                    writtenBytes = usage.total_written_bytes,
                 )
             }
             diskList.close()
@@ -183,6 +210,7 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                 .sortedByDescending { it.cpu_usage() }
                 .take(30)
                 .map { proc ->
+                    val du = proc.disk_usage()
                     ProcessInfo(
                         pid = proc.pid().as_u32().toLong(),
                         name = proc.name(),
@@ -192,8 +220,34 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                         status = proc.status().tag.name,
                         startTime = proc.start_time(),
                         runTime = proc.run_time(),
+                        exe = proc.exe(),
+                        cwd = proc.cwd(),
+                        diskReadBytes = du.total_read_bytes,
+                        diskWrittenBytes = du.total_written_bytes,
                     )
                 }
+
+            // Sensors / Components
+            val compList = Components.new_with_refreshed_list()
+            val sensors = compList.list().map { comp ->
+                SensorInfo(
+                    label = comp.label(),
+                    temperature = comp.temperature(),
+                    max = comp.max(),
+                    critical = comp.critical(),
+                )
+            }
+            compList.close()
+
+            // Users
+            val userList = Users.new_with_refreshed_list()
+            val users = userList.list().map { user ->
+                UserInfo(
+                    name = user.name(),
+                    groups = user.groups().map { it.name() },
+                )
+            }
+            userList.close()
 
             emit(
                 DynamicState(
@@ -204,6 +258,8 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                     loadAvg = System.load_average(),
                     networks = networks,
                     processes = processes,
+                    sensors = sensors,
+                    users = users,
                 )
             )
 
@@ -220,7 +276,7 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
 @androidx.compose.ui.tooling.preview.Preview
 fun App() {
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("System", "CPU", "Memory", "Disks", "Network", "Processes")
+    val tabs = listOf("System", "CPU", "Memory", "Disks", "Network", "Processes", "Sensors", "Users")
 
     val systemFlow = remember { systemInfoFlow() }
     val dynamicFlow = remember { dynamicStateFlow() }
@@ -250,6 +306,8 @@ fun App() {
                 3 -> DisksTab(state?.disks ?: emptyList())
                 4 -> NetworkTab(state?.networks ?: emptyList())
                 5 -> ProcessesTab(state?.processes ?: emptyList())
+                6 -> SensorsTab(state?.sensors ?: emptyList())
+                7 -> UsersTab(state?.users ?: emptyList())
             }
         }
     }
@@ -374,13 +432,35 @@ fun DisksTab(disks: List<DiskInfo>) {
                 elevation = 2.dp,
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(disk.name.ifEmpty { disk.mountPoint }, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(disk.name.ifEmpty { disk.mountPoint }, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(
+                            disk.kind,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = when (disk.kind) {
+                                "SSD" -> Color(0xFF4CAF50)
+                                "HDD" -> Color(0xFFFFA726)
+                                else -> MaterialTheme.colors.onSurface.copy(alpha = 0.5f)
+                            },
+                        )
+                    }
                     InfoRow("Mount", disk.mountPoint)
                     InfoRow("Filesystem", disk.fileSystem)
                     InfoRow("Removable", if (disk.isRemovable) "Yes" else "No")
+                    if (disk.isReadOnly) {
+                        InfoRow("Read-only", "Yes")
+                    }
                     val usedSpace = disk.totalSpace - disk.availableSpace
                     val usedPct = if (disk.totalSpace > 0) usedSpace.toFloat() / disk.totalSpace else 0f
                     UsageBar("Space", usedPct, "${formatBytes(usedSpace)} / ${formatBytes(disk.totalSpace)}")
+                    if (disk.readBytes > 0 || disk.writtenBytes > 0) {
+                        Spacer(Modifier.height(2.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Read: ${formatBytes(disk.readBytes)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f))
+                            Text("Written: ${formatBytes(disk.writtenBytes)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f))
+                        }
+                    }
                 }
             }
         }
@@ -439,9 +519,90 @@ fun ProcessesTab(processes: List<ProcessInfo>) {
                         Text("Mem: ${formatBytes(proc.memory)}", fontSize = 12.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f))
                         Text("VMem: ${formatBytes(proc.virtualMemory)}", fontSize = 12.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f))
                     }
+                    if (proc.diskReadBytes > 0 || proc.diskWrittenBytes > 0) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Disk R: ${formatBytes(proc.diskReadBytes)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f))
+                            Text("Disk W: ${formatBytes(proc.diskWrittenBytes)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f))
+                        }
+                    }
+                    if (proc.exe != null) {
+                        Text("Exe: ${proc.exe}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f), maxLines = 1)
+                    }
+                    if (proc.cwd != null) {
+                        Text("Cwd: ${proc.cwd}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f), maxLines = 1)
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Status: ${proc.status}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
                         Text("Running: ${formatDuration(proc.runTime)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Sensors Tab ──────────────────────────────────────────────────────────
+
+@Composable
+fun SensorsTab(sensors: List<SensorInfo>) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { SectionTitle("Hardware Sensors (${sensors.size})") }
+        if (sensors.isEmpty()) {
+            item { Text("No sensors detected", color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f)) }
+        }
+        items(sensors) { sensor ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = MaterialTheme.colors.surface,
+                elevation = 2.dp,
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(sensor.label, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    if (sensor.temperature != null) {
+                        val critical = sensor.critical
+                        val max = sensor.max
+                        val fraction = when {
+                            critical != null && critical > 0 -> (sensor.temperature / critical).coerceIn(0f, 1f)
+                            max != null && max > 0 -> (sensor.temperature / max).coerceIn(0f, 1f)
+                            else -> 0f
+                        }
+                        UsageBar(
+                            "Temp",
+                            fraction,
+                            buildString {
+                                append("%.1f\u00B0C".format(sensor.temperature))
+                                if (max != null) append(" / max %.0f\u00B0C".format(max))
+                                if (critical != null) append(" / crit %.0f\u00B0C".format(critical))
+                            }
+                        )
+                    } else {
+                        Text("N/A", color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Users Tab ────────────────────────────────────────────────────────────
+
+@Composable
+fun UsersTab(users: List<UserInfo>) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { SectionTitle("System Users (${users.size})") }
+        if (users.isEmpty()) {
+            item { Text("No users found", color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f)) }
+        }
+        items(users) { user ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = MaterialTheme.colors.surface,
+                elevation = 2.dp,
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(user.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    if (user.groups.isNotEmpty()) {
+                        InfoRow("Groups", user.groups.joinToString(", "))
                     }
                 }
             }
