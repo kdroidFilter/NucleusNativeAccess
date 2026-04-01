@@ -519,6 +519,488 @@ class RustBridgeGeneratorTest {
         assertTrue("Should have out_value param", code.contains("out_value: *mut i32"))
     }
 
+    // ── Object / Interface / SealedEnum returns ────────────────────────────
+
+    @Test
+    fun `generates method returning Object reference`() {
+        val m = moduleWith(KneFunction("get_child", emptyList(), KneType.OBJECT("calculator.Calculator", "Calculator")))
+        assertIn(m, "fn calculator_Calculator_get_child")
+        assertIn(m, "-> i64")
+        assertIn(m, "Box::into_raw")
+    }
+
+    @Test
+    fun `generates method returning borrowed Object`() {
+        val m = moduleWith(KneFunction("peek_child", emptyList(), KneType.OBJECT("calculator.Calculator", "Calculator"), returnsBorrowed = true))
+        assertIn(m, "as *const _ as i64")
+    }
+
+    @Test
+    fun `generates method with Object param`() {
+        val m = moduleWith(KneFunction("set_child", listOf(KneParam("child", KneType.OBJECT("calculator.Calculator", "Calculator"))), KneType.UNIT))
+        assertIn(m, "child: i64")
+    }
+
+    @Test
+    fun `generates method returning Interface`() {
+        val mod = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction("get_measurable", emptyList(), KneType.INTERFACE("calculator.Measurable", "Measurable"))
+            ))
+        )
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("-> i64"))
+        assertTrue(c.contains("Box::into_raw"))
+    }
+
+    // ── Sealed enum bridges ─────────────────────────────────────────────────
+
+    @Test
+    fun `generates sealed enum dispose bridge`() {
+        val mod = moduleWithSealed()
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_AppResult_dispose"))
+        assertTrue(c.contains("Box::from_raw(handle as *mut AppResult)"))
+    }
+
+    @Test
+    fun `generates sealed enum tag bridge`() {
+        val c = RustBridgeGenerator().generate(moduleWithSealed())
+        assertTrue(c.contains("fn calculator_AppResult_tag"))
+        assertTrue(c.contains("-> i32"))
+        assertTrue(c.contains("AppResult::Ok"))
+        assertTrue(c.contains("AppResult::Error"))
+    }
+
+    @Test
+    fun `generates sealed enum variant field getter`() {
+        val c = RustBridgeGenerator().generate(moduleWithSealed())
+        // Ok variant has a value:i32 field
+        assertTrue(c.contains("fn calculator_AppResult_Ok_get_value"))
+    }
+
+    @Test
+    fun `generates sealed enum string variant field getter with buffer`() {
+        val c = RustBridgeGenerator().generate(moduleWithSealed())
+        // Error variant has a message:String field
+        assertTrue(c.contains("fn calculator_AppResult_Error_get_message"))
+        assertTrue(c.contains("out_buf: *mut u8"))
+    }
+
+    @Test
+    fun `generates method returning sealed enum`() {
+        val mod = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction("try_op", emptyList(), KneType.SEALED_ENUM("calculator.AppResult", "AppResult"))
+            )),
+            sealedEnums = listOf(appResultSealed())
+        )
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_try_op"))
+        assertTrue(c.contains("-> i64"))
+    }
+
+    // ── Properties ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `generates property getter bridge`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            properties = listOf(KneProperty("scale", KneType.DOUBLE, mutable = false))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_get_scale"))
+        assertTrue(c.contains("handle: i64"))
+        assertTrue(c.contains("-> f64"))
+    }
+
+    @Test
+    fun `generates property setter bridge for mutable property`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            properties = listOf(KneProperty("scale", KneType.DOUBLE, mutable = true))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_get_scale"))
+        assertTrue(c.contains("fn calculator_Calculator_set_scale"))
+        assertTrue(c.contains("value: f64"))
+    }
+
+    @Test
+    fun `generates String property getter with buffer`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            properties = listOf(KneProperty("label", KneType.STRING, mutable = false))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_get_label"))
+        assertTrue(c.contains("out_buf: *mut u8"))
+        assertTrue(c.contains("out_buf_len: i32"))
+    }
+
+    @Test
+    fun `generates Boolean property getter`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            properties = listOf(KneProperty("enabled", KneType.BOOLEAN, mutable = true))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_get_enabled"))
+        assertTrue(c.contains("-> i32"))
+        assertTrue(c.contains("fn calculator_Calculator_set_enabled"))
+    }
+
+    // ── Companion methods ───────────────────────────────────────────────────
+
+    @Test
+    fun `generates companion method with params`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            companionMethods = listOf(KneFunction("from_value", listOf(KneParam("v", KneType.INT)), KneType.OBJECT("calculator.Calculator", "Calculator")))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_companion_from_value"))
+        assertTrue(c.contains("v: i32"))
+        assertTrue(c.contains("-> i64"))
+        assertTrue(c.contains("Calculator::from_value"))
+    }
+
+    @Test
+    fun `generates companion method returning String`() {
+        val mod = simpleModule.copy(classes = listOf(simpleModule.classes.first().copy(
+            companionMethods = listOf(KneFunction("version", emptyList(), KneType.STRING))
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Calculator_companion_version"))
+        assertTrue(c.contains("out_buf: *mut u8"))
+    }
+
+    // ── canFail / Result returns ────────────────────────────────────────────
+
+    @Test
+    fun `generates canFail method with match Ok Err pattern`() {
+        val m = moduleWith(KneFunction("divide", listOf(KneParam("b", KneType.INT)), KneType.INT, canFail = true))
+        assertIn(m, "match")
+        assertIn(m, "Ok(result)")
+        assertIn(m, "Err(e)")
+        assertIn(m, "kne_set_error")
+    }
+
+    @Test
+    fun `generates canFail method returning Object`() {
+        val m = moduleWith(KneFunction("try_create", emptyList(), KneType.OBJECT("calculator.Calculator", "Calculator"), canFail = true))
+        assertIn(m, "Ok(result)")
+        assertIn(m, "Box::into_raw")
+        assertIn(m, "Err(e)")
+    }
+
+    // ── unsafe methods ──────────────────────────────────────────────────────
+
+    @Test
+    fun `generates unsafe wrapper for unsafe methods`() {
+        val m = moduleWith(KneFunction("raw_op", emptyList(), KneType.INT, isUnsafe = true))
+        assertIn(m, "unsafe {")
+    }
+
+    // ── OWNED vs BORROWED receiver ──────────────────────────────────────────
+
+    @Test
+    fun `generates ptr_read for OWNED receiver`() {
+        val m = moduleWith(KneFunction("consume", emptyList(), KneType.INT, receiverKind = KneReceiverKind.OWNED))
+        assertIn(m, "std::ptr::read(handle as *const Calculator)")
+    }
+
+    @Test
+    fun `generates shared ref for BORROWED_SHARED receiver`() {
+        val m = moduleWith(KneFunction("peek", emptyList(), KneType.INT, receiverKind = KneReceiverKind.BORROWED_SHARED))
+        assertIn(m, "&*(handle as *const Calculator)")
+    }
+
+    @Test
+    fun `generates mut ref for BORROWED_MUT receiver`() {
+        val m = moduleWith(KneFunction("mutate", emptyList(), KneType.UNIT, receiverKind = KneReceiverKind.BORROWED_MUT))
+        assertIn(m, "&mut *(handle as *mut Calculator)")
+    }
+
+    // ── BYTE_ARRAY return ───────────────────────────────────────────────────
+
+    @Test
+    fun `generates BYTE_ARRAY return with buffer pattern`() {
+        val m = moduleWith(KneFunction("to_bytes", emptyList(), KneType.BYTE_ARRAY))
+        assertIn(m, "out_buf: *mut u8")
+        assertIn(m, "out_buf_len: i32")
+        assertIn(m, "-> i32")
+        assertIn(m, "copy_nonoverlapping")
+    }
+
+    // ── LIST returns for various element types ──────────────────────────────
+
+    @Test
+    fun `generates LIST Long return`() {
+        val m = moduleWith(KneFunction("get_ids", emptyList(), KneType.LIST(KneType.LONG)))
+        assertIn(m, "out_buf: *mut u8")
+        assertIn(m, "*(out_buf as *mut i64)")
+    }
+
+    @Test
+    fun `generates LIST Double return`() {
+        val m = moduleWith(KneFunction("get_values", emptyList(), KneType.LIST(KneType.DOUBLE)))
+        assertIn(m, "*(out_buf as *mut f64)")
+    }
+
+    @Test
+    fun `generates LIST String return with null-terminated serialization`() {
+        val m = moduleWith(KneFunction("get_names", emptyList(), KneType.LIST(KneType.STRING)))
+        assertIn(m, "out_buf: *mut u8")
+        assertIn(m, "as_bytes()")
+        assertIn(m, "= 0;")
+    }
+
+    @Test
+    fun `generates LIST Object return with i64 handles`() {
+        val m = moduleWith(KneFunction("get_children", emptyList(), KneType.LIST(KneType.OBJECT("calculator.Calculator", "Calculator"))))
+        assertIn(m, "*(out_buf as *mut i64)")
+        assertIn(m, "as *const _ as i64")
+    }
+
+    @Test
+    fun `generates LIST Boolean return`() {
+        val m = moduleWith(KneFunction("get_flags", emptyList(), KneType.LIST(KneType.BOOLEAN)))
+        assertIn(m, "*(out_buf as *mut i32)")
+        assertIn(m, "if *v { 1 } else { 0 }")
+    }
+
+    @Test
+    fun `generates LIST Enum return`() {
+        val m = moduleWith(KneFunction("get_ops", emptyList(), KneType.LIST(KneType.ENUM("calculator.Operation", "Operation"))))
+        assertIn(m, "*(out_buf as *mut i32)")
+        assertIn(m, "v.clone() as i32")
+    }
+
+    @Test
+    fun `generates SET Long return mapped to list`() {
+        val m = moduleWith(KneFunction("get_unique_ids", emptyList(), KneType.SET(KneType.LONG)))
+        assertIn(m, "*(out_buf as *mut i64)")
+    }
+
+    // ── MAP key/value type diversity ────────────────────────────────────────
+
+    @Test
+    fun `generates MAP Long to Double return`() {
+        val m = moduleWith(KneFunction("get_measurements", emptyList(), KneType.MAP(KneType.LONG, KneType.DOUBLE)))
+        assertIn(m, "out_keys: *mut i64")
+        assertIn(m, "out_values: *mut f64")
+    }
+
+    @Test
+    fun `generates MAP String to String return`() {
+        val m = moduleWith(KneFunction("get_env", emptyList(), KneType.MAP(KneType.STRING, KneType.STRING)))
+        assertIn(m, "out_keys: *mut u8")
+        assertIn(m, "out_keys_len: i32")
+        assertIn(m, "out_values: *mut u8")
+        assertIn(m, "out_values_len: i32")
+    }
+
+    @Test
+    fun `generates MAP Int to Object return`() {
+        val m = moduleWith(KneFunction("get_index", emptyList(), KneType.MAP(KneType.INT, KneType.OBJECT("calculator.Calculator", "Calculator"))))
+        assertIn(m, "out_keys: *mut i32")
+        assertIn(m, "out_values: *mut i64")
+    }
+
+    // ── Nullable returns for all types ───────────────────────────────────────
+
+    @Test
+    fun `generates nullable Long return with i64 MIN sentinel`() {
+        val m = moduleWith(KneFunction("get_count", emptyList(), KneType.NULLABLE(KneType.LONG)))
+        assertIn(m, "-> i64")
+        assertIn(m, "i64::MIN")
+    }
+
+    @Test
+    fun `generates nullable Double return with bits encoding`() {
+        val m = moduleWith(KneFunction("get_ratio", emptyList(), KneType.NULLABLE(KneType.DOUBLE)))
+        assertIn(m, "to_ne_bytes")
+    }
+
+    @Test
+    fun `generates nullable Float return`() {
+        val m = moduleWith(KneFunction("get_scale", emptyList(), KneType.NULLABLE(KneType.FLOAT)))
+        assertIn(m, "to_bits")
+    }
+
+    @Test
+    fun `generates nullable Boolean return with minus one sentinel`() {
+        val m = moduleWith(KneFunction("is_ready", emptyList(), KneType.NULLABLE(KneType.BOOLEAN)))
+        assertIn(m, "Some(true) => 1")
+        assertIn(m, "Some(false) => 0")
+        assertIn(m, "None => -1")
+    }
+
+    @Test
+    fun `generates nullable Enum return`() {
+        val m = moduleWith(KneFunction("get_op", emptyList(), KneType.NULLABLE(KneType.ENUM("calculator.Operation", "Operation"))))
+        assertIn(m, "Some(v) => v as i32")
+        assertIn(m, "None => -1")
+    }
+
+    @Test
+    fun `generates nullable Object return with zero sentinel`() {
+        val m = moduleWith(KneFunction("find_child", emptyList(), KneType.NULLABLE(KneType.OBJECT("calculator.Calculator", "Calculator"))))
+        assertIn(m, "Some(v) => Box::into_raw")
+        assertIn(m, "None => 0i64")
+    }
+
+    @Test
+    fun `generates nullable String return with minus one sentinel`() {
+        val m = moduleWith(KneFunction("get_label", emptyList(), KneType.NULLABLE(KneType.STRING)))
+        assertIn(m, "Some(ref s)")
+        assertIn(m, "None => -1")
+    }
+
+    @Test
+    fun `generates nullable Byte return`() {
+        val m = moduleWith(KneFunction("get_flag", emptyList(), KneType.NULLABLE(KneType.BYTE)))
+        assertIn(m, "i32::MIN")
+    }
+
+    @Test
+    fun `generates nullable Short return`() {
+        val m = moduleWith(KneFunction("get_tag", emptyList(), KneType.NULLABLE(KneType.SHORT)))
+        assertIn(m, "i32::MIN")
+    }
+
+    // ── Data class return field types ────────────────────────────────────────
+
+    @Test
+    fun `generates DataClass return with Long and Boolean fields`() {
+        val dc = KneType.DATA_CLASS("calculator.Stats", "Stats", listOf(
+            KneParam("count", KneType.LONG),
+            KneParam("active", KneType.BOOLEAN),
+        ))
+        val m = moduleWith(KneFunction("get_stats", emptyList(), dc))
+        assertIn(m, "out_count: *mut i64")
+        assertIn(m, "out_active: *mut i32")
+        assertIn(m, "-> ()")
+    }
+
+    @Test
+    fun `generates DataClass return with Enum field`() {
+        val dc = KneType.DATA_CLASS("calculator.Entry", "Entry", listOf(
+            KneParam("op", KneType.ENUM("calculator.Operation", "Operation")),
+            KneParam("value", KneType.INT),
+        ))
+        val m = moduleWith(KneFunction("last_entry", emptyList(), dc))
+        assertIn(m, "out_op: *mut i32")
+        assertIn(m, "out_value: *mut i32")
+    }
+
+    @Test
+    fun `generates DataClass return with Float field`() {
+        val dc = KneType.DATA_CLASS("calculator.Coord", "Coord", listOf(
+            KneParam("lat", KneType.FLOAT),
+            KneParam("lng", KneType.FLOAT),
+        ))
+        val m = moduleWith(KneFunction("get_coord", emptyList(), dc))
+        assertIn(m, "out_lat: *mut f32")
+        assertIn(m, "out_lng: *mut f32")
+    }
+
+    // ── Struct literal constructor ───────────────────────────────────────────
+
+    @Test
+    fun `generates struct literal constructor`() {
+        val mod = simpleModule.copy(classes = listOf(KneClass(
+            simpleName = "Point",
+            fqName = "calculator.Point",
+            constructor = KneConstructor(
+                params = listOf(KneParam("x", KneType.DOUBLE), KneParam("y", KneType.DOUBLE)),
+                kind = KneConstructorKind.STRUCT_LITERAL,
+            ),
+            methods = emptyList(),
+            properties = emptyList(),
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Point_new"))
+        assertTrue(c.contains("Point { x:"))
+    }
+
+    @Test
+    fun `generates function constructor`() {
+        assertContains("Calculator::new(")
+    }
+
+    @Test
+    fun `does not generate constructor for NONE kind`() {
+        val mod = simpleModule.copy(classes = listOf(KneClass(
+            simpleName = "Singleton",
+            fqName = "calculator.Singleton",
+            constructor = KneConstructor(params = emptyList(), kind = KneConstructorKind.NONE),
+            methods = listOf(KneFunction("value", emptyList(), KneType.INT)),
+            properties = emptyList(),
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertFalse(c.contains("fn calculator_Singleton_new"))
+        assertTrue(c.contains("fn calculator_Singleton_value"))
+    }
+
+    // ── canFail constructor ─────────────────────────────────────────────────
+
+    @Test
+    fun `generates canFail constructor with Result pattern`() {
+        val mod = simpleModule.copy(classes = listOf(KneClass(
+            simpleName = "Parser",
+            fqName = "calculator.Parser",
+            constructor = KneConstructor(
+                params = listOf(KneParam("input", KneType.STRING)),
+                kind = KneConstructorKind.FUNCTION,
+                canFail = true,
+            ),
+            methods = emptyList(),
+            properties = emptyList(),
+        )))
+        val c = RustBridgeGenerator().generate(mod)
+        assertTrue(c.contains("fn calculator_Parser_new"))
+        assertTrue(c.contains("Ok(result)"))
+        assertTrue(c.contains("Err(e)"))
+        assertTrue(c.contains("kne_set_error"))
+    }
+
+    // ── no_mangle count matches across all additions ────────────────────────
+
+    @Test
+    fun `no_mangle and extern C counts match for module with sealed enum`() {
+        val c = RustBridgeGenerator().generate(moduleWithSealed())
+        val noMangle = c.split("#[no_mangle]").size - 1
+        val externC = c.split("pub extern \"C\"").size - 1
+        assertEquals("Each extern C fn should have #[no_mangle]", noMangle, externC)
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /** Create a module with one extra method added to the Calculator class. */
+    private fun moduleWith(fn: KneFunction): String {
+        val mod = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + fn
+            ))
+        )
+        return RustBridgeGenerator().generate(mod)
+    }
+
+    private fun assertIn(code: String, substring: String) {
+        assertTrue("Generated code should contain '$substring'", code.contains(substring))
+    }
+
+    private fun appResultSealed() = KneSealedEnum(
+        simpleName = "AppResult",
+        fqName = "calculator.AppResult",
+        variants = listOf(
+            KneSealedVariant("Ok", listOf(KneParam("value", KneType.INT)), isTuple = true),
+            KneSealedVariant("Error", listOf(KneParam("message", KneType.STRING)), isTuple = true),
+            KneSealedVariant("Nothing", emptyList()),
+        )
+    )
+
+    private fun moduleWithSealed() = simpleModule.copy(
+        sealedEnums = listOf(appResultSealed())
+    )
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",
