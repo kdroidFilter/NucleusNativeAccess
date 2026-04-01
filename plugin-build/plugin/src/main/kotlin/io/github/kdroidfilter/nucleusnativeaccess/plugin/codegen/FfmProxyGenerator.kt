@@ -1501,9 +1501,10 @@ class FfmProxyGenerator {
         if (isRoot) {
             appendLine("    internal fun _consumeHandle(): Long {")
             appendLine("        if (_disposed) error(\"$n handle already disposed\")")
-            appendLine("        if (!_ownsHandle) error(\"$n handle is borrowed\")")
-            appendLine("        _disposed = true")
-            appendLine("        _ownsHandle = false")
+            appendLine("        if (_ownsHandle) {")
+            appendLine("            _disposed = true")
+            appendLine("            _ownsHandle = false")
+            appendLine("        }")
             appendLine("        return handle")
             appendLine("    }")
             appendLine()
@@ -2912,18 +2913,41 @@ class FfmProxyGenerator {
         val invokeArgs = buildTopLevelInvokeArgs(fn)
         val keyLayout = KneType.collectionElementLayout(mapType.keyType)
         val valLayout = KneType.collectionElementLayout(mapType.valueType)
-        appendLine("${indent}val _keyBuf = arena.allocate($keyLayout, $MAX_COLLECTION_SIZE.toLong())")
-        appendLine("${indent}val _valBuf = arena.allocate($valLayout, $MAX_COLLECTION_SIZE.toLong())")
-        val extra = if (invokeArgs.isEmpty()) "_keyBuf, _valBuf, $MAX_COLLECTION_SIZE" else "$invokeArgs, _keyBuf, _valBuf, $MAX_COLLECTION_SIZE"
+        val isKeyString = mapType.keyType == KneType.STRING
+        val isValString = mapType.valueType == KneType.STRING
+        if (isKeyString) appendLine("${indent}val _keyBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
+        else appendLine("${indent}val _keyBuf = arena.allocate($keyLayout, $MAX_COLLECTION_SIZE.toLong())")
+        if (isValString) appendLine("${indent}val _valBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
+        else appendLine("${indent}val _valBuf = arena.allocate($valLayout, $MAX_COLLECTION_SIZE.toLong())")
+        val extra = buildList {
+            if (invokeArgs.isNotEmpty()) add(invokeArgs)
+            add("_keyBuf")
+            if (isKeyString) add("$STRING_BUF_SIZE")
+            add("_valBuf")
+            if (isValString) add("$STRING_BUF_SIZE")
+            add("$MAX_COLLECTION_SIZE")
+        }.joinToString(", ")
         appendLine("${indent}val _count = $handleName.invoke($extra) as Int")
         appendLine("${indent}KneRuntime.checkError()")
         if (nullable) appendLine("${indent}if (_count < 0) return null")
         appendLine("${indent}val _map = mutableMapOf<${mapType.keyType.jvmTypeName}, ${mapType.valueType.jvmTypeName}>()")
-        appendLine("${indent}for (_i in 0 until _count) {")
-        appendLine("${indent}    val _k = _keyBuf.getAtIndex($keyLayout, _i.toLong())")
-        appendLine("${indent}    val _v = _valBuf.getAtIndex($valLayout, _i.toLong())")
-        appendLine("${indent}    _map[_k] = _v")
-        appendLine("${indent}}")
+        // Read keys
+        if (isKeyString) {
+            appendLine("${indent}val _keys = mutableListOf<String>()")
+            appendLine("${indent}var _kOff = 0L")
+            appendLine("${indent}repeat(_count) { _keys.add(_keyBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            appendMapElementRead(indent, "_keys", mapType.keyType, "_count", "_keyBuf")
+        }
+        // Read values
+        if (isValString) {
+            appendLine("${indent}val _values = mutableListOf<String>()")
+            appendLine("${indent}var _vOff = 0L")
+            appendLine("${indent}repeat(_count) { _values.add(_valBuf.getString(_vOff)); _vOff += _values.last().toByteArray(Charsets.UTF_8).size + 1 }")
+        } else {
+            appendMapElementRead(indent, "_values", mapType.valueType, "_count", "_valBuf")
+        }
+        appendLine("${indent}repeat(_count) { _map[_keys[it]] = _values[it] }")
         appendLine("${indent}return _map")
     }
 
@@ -2993,9 +3017,10 @@ class FfmProxyGenerator {
         // close / dispose
         appendLine("    internal fun _consumeHandle(): Long {")
         appendLine("        if (_disposed) error(\"${sealed.simpleName} handle already disposed\")")
-        appendLine("        if (!_ownsHandle) error(\"${sealed.simpleName} handle is borrowed\")")
-        appendLine("        _disposed = true")
-        appendLine("        _ownsHandle = false")
+        appendLine("        if (_ownsHandle) {")
+        appendLine("            _disposed = true")
+        appendLine("            _ownsHandle = false")
+        appendLine("        }")
         appendLine("        return handle")
         appendLine("    }")
         appendLine()
@@ -3437,12 +3462,30 @@ class FfmProxyGenerator {
                             add("ADDRESS"); add("JAVA_INT")
                         }
                     }
-                    is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
+                    is KneType.MAP -> {
+                        add("ADDRESS") // outKeys
+                        if (collInner.keyType == KneType.STRING) add("JAVA_INT")
+                        add("ADDRESS") // outValues
+                        if (collInner.valueType == KneType.STRING) add("JAVA_INT")
+                        add("JAVA_INT") // outLen
+                    }
                     else -> {}
                 }
             }
         }
-        return buildDescriptor(fn.returnType, paramLayouts)
+        // Compute effective return type: collections return element count, DC returns void
+        val isDcColl = fn.returnType.isCollection() && run {
+            val ci = fn.returnType.unwrapCollection()
+            val ce = when (ci) { is KneType.LIST -> ci.elementType; is KneType.SET -> ci.elementType; else -> null }
+            ce is KneType.DATA_CLASS
+        }
+        val effectiveReturn = when {
+            returnDc != null -> KneType.UNIT
+            isDcColl -> KneType.LONG // opaque handle
+            fn.returnType.isCollection() -> KneType.INT // element count
+            else -> fn.returnType
+        }
+        return buildDescriptor(effectiveReturn, paramLayouts)
     }
 
     private fun buildDescriptor(returnType: KneType, paramLayouts: List<String>): String {
@@ -4137,6 +4180,9 @@ class FfmProxyGenerator {
         when (elemType) {
             KneType.BOOLEAN -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
             is KneType.ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.entries[$bufExpr.getAtIndex(JAVA_INT, it.toLong())] }")
+            is KneType.OBJECT -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
+            is KneType.INTERFACE -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
+            is KneType.SEALED_ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
             else -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
         }
     }

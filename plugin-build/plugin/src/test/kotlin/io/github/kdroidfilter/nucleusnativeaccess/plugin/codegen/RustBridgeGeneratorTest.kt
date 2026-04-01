@@ -384,6 +384,65 @@ class RustBridgeGeneratorTest {
         assertTrue(flowCode.contains("fn calculator_kne_readStringRef"))
     }
 
+    // --- MAP return ---
+
+    @Test
+    fun `generates MAP return with String keys and Int values for instance method`() {
+        val moduleWithMap = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "get_scores",
+                    params = emptyList(),
+                    returnType = KneType.MAP(KneType.STRING, KneType.INT),
+                )
+            ))
+        )
+        val mapCode = RustBridgeGenerator().generate(moduleWithMap)
+        // Signature includes dual buffers and max count
+        assertTrue("Should have out_keys param", mapCode.contains("out_keys: *mut u8"))
+        assertTrue("Should have out_keys_len param", mapCode.contains("out_keys_len: i32"))
+        assertTrue("Should have out_values param", mapCode.contains("out_values: *mut i32"))
+        assertTrue("Should have out_max_len param", mapCode.contains("out_max_len: i32"))
+        assertTrue("Should return i32 count", mapCode.contains(") -> i32"))
+        // Body serializes keys as null-terminated and values as i32
+        assertTrue("Should iterate keys", mapCode.contains(".keys()"))
+        assertTrue("Should iterate values", mapCode.contains(".values()"))
+        assertTrue("Should write null terminator", mapCode.contains("= 0;"))
+    }
+
+    @Test
+    fun `generates MAP return with Int keys and Long values for companion method`() {
+        val moduleWithMap = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                companionMethods = listOf(KneFunction(
+                    name = "lookup_table",
+                    params = emptyList(),
+                    returnType = KneType.MAP(KneType.INT, KneType.LONG),
+                ))
+            ))
+        )
+        val mapCode = RustBridgeGenerator().generate(moduleWithMap)
+        assertTrue("Should have companion fn", mapCode.contains("companion_lookup_table"))
+        assertTrue("Should have out_keys param", mapCode.contains("out_keys: *mut i32"))
+        assertTrue("Should have out_values param", mapCode.contains("out_values: *mut i64"))
+        assertTrue("Should have out_max_len param", mapCode.contains("out_max_len: i32"))
+    }
+
+    @Test
+    fun `skips MAP property getters`() {
+        val moduleWithMapProp = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                properties = listOf(KneProperty(
+                    name = "scores",
+                    type = KneType.MAP(KneType.STRING, KneType.INT),
+                    mutable = false,
+                ))
+            ))
+        )
+        val mapCode = RustBridgeGenerator().generate(moduleWithMapProp)
+        assertFalse("Should not generate getter for MAP property", mapCode.contains("get_scores"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

@@ -72,12 +72,38 @@ data class DiskInfo(
     val isRemovable: Boolean,
 )
 
+data class NetworkInfo(
+    val name: String,
+    val received: Long,
+    val totalReceived: Long,
+    val transmitted: Long,
+    val totalTransmitted: Long,
+    val packetsReceived: Long,
+    val packetsTransmitted: Long,
+    val errorsReceived: Long,
+    val errorsTransmitted: Long,
+    val mtu: Long,
+)
+
+data class ProcessInfo(
+    val pid: Long,
+    val name: String,
+    val cpuUsage: Float,
+    val memory: Long,
+    val virtualMemory: Long,
+    val status: String,
+    val startTime: Long,
+    val runTime: Long,
+)
+
 data class DynamicState(
     val memory: MemoryInfo,
     val globalCpuUsage: Float,
     val cpus: List<CpuInfo>,
     val disks: List<DiskInfo>,
     val loadAvg: LoadAvg,
+    val networks: List<NetworkInfo>,
+    val processes: List<ProcessInfo>,
 )
 
 // ── Flows ────────────────────────────────────────────────────────────────
@@ -134,6 +160,41 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
             }
             diskList.close()
 
+            // Networks (MAP: String -> NetworkData)
+            val netList = Networks.new_with_refreshed_list()
+            val networks = netList.list().map { (name, data) ->
+                NetworkInfo(
+                    name = name,
+                    received = data.received(),
+                    totalReceived = data.total_received(),
+                    transmitted = data.transmitted(),
+                    totalTransmitted = data.total_transmitted(),
+                    packetsReceived = data.packets_received(),
+                    packetsTransmitted = data.packets_transmitted(),
+                    errorsReceived = data.errors_on_received(),
+                    errorsTransmitted = data.errors_on_transmitted(),
+                    mtu = data.mtu(),
+                )
+            }
+            netList.close()
+
+            // Processes (MAP: Pid -> Process)
+            val processes = sys.processes().values
+                .sortedByDescending { it.cpu_usage() }
+                .take(30)
+                .map { proc ->
+                    ProcessInfo(
+                        pid = proc.pid().as_u32().toLong(),
+                        name = proc.name(),
+                        cpuUsage = proc.cpu_usage(),
+                        memory = proc.memory(),
+                        virtualMemory = proc.virtual_memory(),
+                        status = proc.status().tag.name,
+                        startTime = proc.start_time(),
+                        runTime = proc.run_time(),
+                    )
+                }
+
             emit(
                 DynamicState(
                     memory = memory,
@@ -141,6 +202,8 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                     cpus = cpus,
                     disks = disks,
                     loadAvg = System.load_average(),
+                    networks = networks,
+                    processes = processes,
                 )
             )
 
@@ -154,10 +217,10 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
 // ── App ──────────────────────────────────────────────────────────────────
 
 @Composable
-@Preview
+@androidx.compose.ui.tooling.preview.Preview
 fun App() {
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("System", "CPU", "Memory", "Disks")
+    val tabs = listOf("System", "CPU", "Memory", "Disks", "Network", "Processes")
 
     val systemFlow = remember { systemInfoFlow() }
     val dynamicFlow = remember { dynamicStateFlow() }
@@ -185,6 +248,8 @@ fun App() {
                 1 -> CpuTab(state?.cpus ?: emptyList(), state?.globalCpuUsage ?: 0f)
                 2 -> MemoryTab(state?.memory)
                 3 -> DisksTab(state?.disks ?: emptyList())
+                4 -> NetworkTab(state?.networks ?: emptyList())
+                5 -> ProcessesTab(state?.processes ?: emptyList())
             }
         }
     }
@@ -316,6 +381,68 @@ fun DisksTab(disks: List<DiskInfo>) {
                     val usedSpace = disk.totalSpace - disk.availableSpace
                     val usedPct = if (disk.totalSpace > 0) usedSpace.toFloat() / disk.totalSpace else 0f
                     UsageBar("Space", usedPct, "${formatBytes(usedSpace)} / ${formatBytes(disk.totalSpace)}")
+                }
+            }
+        }
+    }
+}
+
+// ── Network Tab ─────────────────────────────────────────────────────────
+
+@Composable
+fun NetworkTab(networks: List<NetworkInfo>) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { SectionTitle("Network Interfaces (${networks.size})") }
+        items(networks) { net ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = MaterialTheme.colors.surface,
+                elevation = 2.dp,
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(net.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    InfoRow("Received", formatBytes(net.totalReceived))
+                    InfoRow("Transmitted", formatBytes(net.totalTransmitted))
+                    InfoRow("Rx rate", "${formatBytes(net.received)}/s")
+                    InfoRow("Tx rate", "${formatBytes(net.transmitted)}/s")
+                    InfoRow("Packets Rx", "${net.packetsReceived}")
+                    InfoRow("Packets Tx", "${net.packetsTransmitted}")
+                    if (net.errorsReceived > 0 || net.errorsTransmitted > 0) {
+                        InfoRow("Errors Rx/Tx", "${net.errorsReceived} / ${net.errorsTransmitted}")
+                    }
+                    InfoRow("MTU", "${net.mtu}")
+                }
+            }
+        }
+    }
+}
+
+// ── Processes Tab ────────────────────────────────────────────────────────
+
+@Composable
+fun ProcessesTab(processes: List<ProcessInfo>) {
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        item { SectionTitle("Top Processes by CPU (${processes.size})") }
+        items(processes) { proc ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                backgroundColor = MaterialTheme.colors.surface,
+                elevation = 1.dp,
+            ) {
+                Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(proc.name, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("PID ${proc.pid}", fontSize = 12.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
+                    UsageBar("CPU", proc.cpuUsage / 100f, "%.1f%%".format(proc.cpuUsage))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Mem: ${formatBytes(proc.memory)}", fontSize = 12.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f))
+                        Text("VMem: ${formatBytes(proc.virtualMemory)}", fontSize = 12.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f))
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Status: ${proc.status}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                        Text("Running: ${formatDuration(proc.runTime)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
                 }
             }
         }

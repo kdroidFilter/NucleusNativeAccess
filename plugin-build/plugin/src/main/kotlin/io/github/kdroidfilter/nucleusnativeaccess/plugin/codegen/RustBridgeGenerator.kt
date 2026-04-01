@@ -232,6 +232,15 @@ class RustBridgeGenerator {
                 }
             }
         }
+        // MAP return: dual key/value buffers + max count
+        if (fn.returnType is KneType.MAP) {
+            val mapType = fn.returnType as KneType.MAP
+            append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+            append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+            append(", out_max_len: i32")
+        }
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
@@ -295,6 +304,15 @@ class RustBridgeGenerator {
                 }
             }
         }
+        // MAP return: dual key/value buffers + max count
+        if (fn.returnType is KneType.MAP) {
+            val mapType = fn.returnType as KneType.MAP
+            allParams.add("out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) allParams.add("out_keys_len: i32")
+            allParams.add("out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) allParams.add("out_values_len: i32")
+            allParams.add("out_max_len: i32")
+        }
         append(allParams.joinToString(", "))
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
@@ -323,6 +341,7 @@ class RustBridgeGenerator {
 
     private fun StringBuilder.appendPropertyBridges(prop: KneProperty, cls: KneClass, prefix: String) {
         if (!isSupportedReturnType(prop.type)) return
+        if (prop.type is KneType.MAP) return // MAP properties not yet supported
         val className = cls.simpleName
         val sym = "${prefix}_${className}"
         val needsBuf = needsOutputBuffer(prop.type)
@@ -367,13 +386,27 @@ class RustBridgeGenerator {
 
     /** Check if the return type is fully supported by the Rust bridge generator. */
     private fun isSupportedReturnType(type: KneType): Boolean = when (type) {
-        is KneType.MAP -> false
+        is KneType.MAP -> true
         is KneType.SET -> false
         is KneType.NULLABLE -> when (type.inner) {
             is KneType.DATA_CLASS, is KneType.LIST, is KneType.SET, is KneType.MAP -> false
             else -> true
         }
         else -> true
+    }
+
+    /** Returns the Rust pointer type for a MAP out-parameter buffer. */
+    private fun mapOutPointerType(elemType: KneType): String = when (elemType) {
+        KneType.STRING -> "*mut u8"
+        KneType.INT, KneType.BOOLEAN -> "*mut i32"
+        KneType.LONG -> "*mut i64"
+        KneType.DOUBLE -> "*mut f64"
+        KneType.FLOAT -> "*mut f32"
+        KneType.SHORT -> "*mut i16"
+        KneType.BYTE -> "*mut i8"
+        is KneType.ENUM -> "*mut i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*mut i64"
+        else -> "*mut i64"
     }
 
     private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
@@ -484,8 +517,10 @@ class RustBridgeGenerator {
             is KneType.SET -> {
                 appendListReturnFromBinding(binding, KneType.LIST(returnType.elementType), indent, returnRustType)
             }
-            else -> {
-                appendLine("${indent}${rustReturnExpr(binding, returnType, returnRustType, returnsBorrowed)}")
+            is KneType.MAP -> {
+                appendMapReturnFromBinding(binding, returnType, indent, returnRustType)
+            }
+            else -> { appendLine("${indent}${rustReturnExpr(binding, returnType, returnRustType, returnsBorrowed)}")
             }
         }
     }
@@ -581,6 +616,88 @@ class RustBridgeGenerator {
                 appendLine("${indent}    }")
                 appendLine("${indent}}")
                 appendLine("${indent}len")
+            }
+        }
+    }
+
+    // ── MAP return bridge ────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendMapReturnFromBinding(
+        binding: String, mapType: KneType.MAP, indent: String, returnRustType: String? = null
+    ) {
+        val keyType = mapType.keyType
+        val valueType = mapType.valueType
+        appendLine("${indent}let len = $binding.len() as i32;")
+        appendLine("${indent}if len <= out_max_len {")
+        // Write keys
+        appendMapElementWrite("$binding.keys()", keyType, "out_keys", indent + "    ", returnRustType)
+        // Write values
+        appendMapElementWrite("$binding.values()", valueType, "out_values", indent + "    ", returnRustType)
+        appendLine("${indent}}")
+        appendLine("${indent}len")
+    }
+
+    private fun StringBuilder.appendMapElementWrite(
+        iterExpr: String, elemType: KneType, bufName: String,
+        indent: String, returnRustType: String? = null,
+    ) {
+        when (elemType) {
+            KneType.STRING -> {
+                val needsLossy = isPathLikeRustType(returnRustType)
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $iterExpr {")
+                if (needsLossy) {
+                    appendLine("${indent}    let _lossy = s.to_string_lossy();")
+                    appendLine("${indent}    let bytes = _lossy.as_bytes();")
+                } else {
+                    appendLine("${indent}    let bytes = s.as_bytes();")
+                }
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), $bufName.add(offset), bytes.len());")
+                appendLine("${indent}        *$bufName.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
+                appendLine("${indent}}")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.INT -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}}")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}}")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}}")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}}")
+            }
+            else -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
             }
         }
     }
@@ -1065,7 +1182,10 @@ class RustBridgeGenerator {
                 appendLine("        let obj = unsafe { &mut *(handle as *mut $rustTypeName) };")
             }
             KneReceiverKind.OWNED -> {
-                appendLine("        let obj = unsafe { *Box::from_raw(handle as *mut $rustTypeName) };")
+                // Use ptr::read instead of Box::from_raw to avoid UB on borrowed handles
+                // (e.g. objects returned from MAP). Safe for Copy types; for non-Copy types
+                // the caller must ensure the handle is owned.
+                appendLine("        let obj = unsafe { std::ptr::read(handle as *const $rustTypeName) };")
             }
             KneReceiverKind.NONE -> {
                 if (fn.isMutating) {
@@ -1634,6 +1754,7 @@ class RustBridgeGenerator {
         KneType.BYTE_ARRAY -> "i32"
         KneType.UNIT -> "()"
         is KneType.LIST -> "i32"
+        is KneType.MAP -> "i32" // element count
         is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
@@ -1661,6 +1782,7 @@ class RustBridgeGenerator {
         KneType.BOOLEAN -> "0"
         KneType.STRING -> "0" // byte count = 0
         KneType.UNIT -> "()"
+        is KneType.MAP -> "0" // element count = 0
         is KneType.DATA_CLASS -> "()" // out-params pattern, void return
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
         is KneType.ENUM -> "0"
