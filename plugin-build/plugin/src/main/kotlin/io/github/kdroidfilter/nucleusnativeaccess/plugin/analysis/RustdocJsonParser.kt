@@ -29,6 +29,7 @@ class RustdocJsonParser {
 
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
+        if (!this.isJsonPrimitive) return null
         return this.asString
     }
 

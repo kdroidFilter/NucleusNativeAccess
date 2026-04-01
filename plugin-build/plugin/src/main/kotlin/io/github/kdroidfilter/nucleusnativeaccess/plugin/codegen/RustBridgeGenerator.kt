@@ -203,8 +203,11 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn $sym(handle: i64")
         for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
             } else if (p.type is KneType.DATA_CLASS) {
                 // Expand data class fields as individual C params
                 val dc = p.type as KneType.DATA_CLASS
@@ -276,9 +279,12 @@ class RustBridgeGenerator {
         append("pub extern \"C\" fn $sym(")
         val allParams = mutableListOf<String>()
         for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
                 allParams.add("${p.name}_len: i32")
+            } else if (ndc != null) {
+                allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
             } else if (p.type is KneType.DATA_CLASS) {
                 val dc = p.type as KneType.DATA_CLASS
                 for (field in dc.fields) {
@@ -915,9 +921,12 @@ class RustBridgeGenerator {
         append("pub extern \"C\" fn $sym(")
         val allParams = mutableListOf<String>()
         for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
                 allParams.add("${p.name}_len: i32")
+            } else if (ndc != null) {
+                allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
             } else if (p.type is KneType.DATA_CLASS) {
                 val dc = p.type as KneType.DATA_CLASS
                 for (field in dc.fields) {
@@ -1015,8 +1024,11 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn $sym(handle: i64")
         for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
             } else if (p.type is KneType.DATA_CLASS) {
                 val dc = p.type as KneType.DATA_CLASS
                 for (field in dc.fields) {
@@ -1097,8 +1109,11 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn $sym(handle: i64")
         for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
             } else if (p.type is KneType.DATA_CLASS) {
                 val dc = p.type as KneType.DATA_CLASS
                 for (field in dc.fields) {
@@ -1402,6 +1417,42 @@ class RustBridgeGenerator {
                     } else {
                         appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { *Box::from_raw(${p.name} as *mut $rustTypeName) }) };")
                     }
+                }
+            }
+            is KneType.DATA_CLASS -> {
+                val dc = inner
+                val borrowed = isBorrowedRustType(optionInnerRustType)
+                // Reconstruct the data class from expanded fields
+                for (field in dc.fields) {
+                    if (field.type == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
+                    }
+                }
+                val fieldAssignments = dc.fields.joinToString(", ") { field ->
+                    val sourceName = "${p.name}_${field.name}"
+                    when (field.type) {
+                        KneType.STRING -> when {
+                            requiresStaticStr(field.rustType) -> "${field.name}: Box::leak(${sourceName}_conv.to_string().into_boxed_str())"
+                            isPathLikeRustType(field.rustType) -> "${field.name}: std::path::PathBuf::from(${sourceName}_conv)"
+                            field.isBorrowed -> "${field.name}: ${sourceName}_conv"
+                            else -> "${field.name}: ${sourceName}_conv.to_string()"
+                        }
+                        KneType.BOOLEAN -> "${field.name}: ${sourceName} != 0"
+                        is KneType.ENUM -> "${field.name}: unsafe { std::mem::transmute(${sourceName} as u8) }"
+                        else -> {
+                            primitiveCastType(field.type, field.rustType)?.let { castType ->
+                                "${field.name}: ${sourceName} as $castType"
+                            } ?: "${field.name}: $sourceName"
+                        }
+                    }
+                }
+                val dcVal = "${dc.simpleName} { $fieldAssignments }"
+                if (borrowed) {
+                    // Declare the value outside the Option so the borrow lives long enough
+                    appendLine("${indent}let ${p.name}_dc_val = $dcVal;")
+                    appendLine("${indent}let ${p.name}_opt = if ${p.name}_has != 0 { None } else { Some(&${p.name}_dc_val) };")
+                } else {
+                    appendLine("${indent}let ${p.name}_opt = if ${p.name}_has != 0 { None } else { Some($dcVal) };")
                 }
             }
             else -> {
@@ -1747,6 +1798,27 @@ class RustBridgeGenerator {
             else -> "*const i64"
         }
         else -> "*const u8"
+    }
+
+    /** Extract DATA_CLASS from a nullable param type, if applicable. */
+    private fun nullableDataClass(type: KneType): KneType.DATA_CLASS? =
+        (type as? KneType.NULLABLE)?.inner as? KneType.DATA_CLASS
+
+    /** Append C ABI params for a nullable DATA_CLASS: a sentinel flag + expanded fields. */
+    private fun StringBuilder.appendNullableDataClassSignatureParams(paramName: String, dc: KneType.DATA_CLASS, separator: String = ", ") {
+        append("${separator}${paramName}_has: i32")
+        for (field in dc.fields) {
+            append(", ${paramName}_${field.name}: ${rustCType(field.type)}")
+        }
+    }
+
+    /** Same as [appendNullableDataClassSignatureParams] but returns list entries. */
+    private fun nullableDataClassSignatureParamList(paramName: String, dc: KneType.DATA_CLASS): List<String> {
+        val params = mutableListOf("${paramName}_has: i32")
+        for (field in dc.fields) {
+            params.add("${paramName}_${field.name}: ${rustCType(field.type)}")
+        }
+        return params
     }
 
     /** C ABI type for a parameter. */

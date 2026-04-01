@@ -2,6 +2,7 @@ package io.github.kdroidfilter.nucleusnativeaccess.plugin.analysis
 
 import com.google.gson.JsonParser
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.CrateDependency
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.findCargo
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.FfmProxyGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.RustBridgeGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
@@ -308,20 +309,6 @@ object RustWorkAction {
             return File(manifestPath)
         }
         return null
-    }
-
-    private fun findCargo(): String {
-        // Check CARGO_HOME
-        val cargoHome = System.getenv("CARGO_HOME")
-        if (cargoHome != null) {
-            val cargo = File(cargoHome, "bin/cargo")
-            if (cargo.exists()) return cargo.absolutePath
-        }
-        // Check ~/.cargo/bin
-        val homeCargo = File(System.getProperty("user.home"), ".cargo/bin/cargo")
-        if (homeCargo.exists()) return homeCargo.absolutePath
-        // Fallback to PATH
-        return "cargo"
     }
 
     private fun generateGraalVmMetadata(

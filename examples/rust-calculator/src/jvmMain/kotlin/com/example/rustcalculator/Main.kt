@@ -58,13 +58,18 @@ fun CalculatorScreen() {
         if (inputBuffer.isEmpty()) return
         val value = inputBuffer.toIntOrNull() ?: return
         inputBuffer = ""
-        when (pendingOp) {
-            "+" -> calc.add(value)
-            "-" -> calc.subtract(value)
-            "x" -> calc.multiply(value)
-            null -> calc.add(value)
+        try {
+            when (pendingOp) {
+                "+" -> calc.add(value)
+                "-" -> calc.subtract(value)
+                "x" -> calc.multiply(value)
+                "/" -> calc.divide(value)
+                null -> calc.add(value)
+            }
+            refresh()
+        } catch (_: Exception) {
+            display = "Error: division by 0"
         }
-        refresh()
     }
     fun onOperator(op: String) { applyOp(); pendingOp = op }
     fun onEquals() { applyOp(); pendingOp = null }

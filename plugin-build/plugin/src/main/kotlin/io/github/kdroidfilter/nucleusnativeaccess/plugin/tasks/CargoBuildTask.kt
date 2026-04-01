@@ -10,7 +10,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.work.DisableCachingByDefault
-import java.io.File
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.findCargo
 
 @DisableCachingByDefault(because = "Cargo build has its own caching")
 abstract class CargoBuildTask : DefaultTask() {
@@ -60,17 +60,6 @@ abstract class CargoBuildTask : DefaultTask() {
             libFile.copyTo(destDir.resolve(libFile.name), overwrite = true)
             logger.lifecycle("kne-rust: Bundled ${libFile.name} → kne/native/$platform/")
         }
-    }
-
-    private fun findCargo(): String {
-        val cargoHome = System.getenv("CARGO_HOME")
-        if (cargoHome != null) {
-            val cargo = File(cargoHome, "bin/cargo")
-            if (cargo.exists()) return cargo.absolutePath
-        }
-        val homeCargo = File(System.getProperty("user.home"), ".cargo/bin/cargo")
-        if (homeCargo.exists()) return homeCargo.absolutePath
-        return "cargo"
     }
 
     private fun detectPlatform(): String {
