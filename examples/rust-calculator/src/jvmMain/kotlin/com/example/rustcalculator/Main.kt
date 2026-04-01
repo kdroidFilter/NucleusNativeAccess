@@ -48,34 +48,36 @@ fun main() = application {
 @Composable
 fun CalculatorScreen() {
     var calc by remember { mutableStateOf(Calculator(0)) }
+    var accumulator by remember { mutableStateOf(0.0) }
     var display by remember { mutableStateOf("0") }
     var pendingOp by remember { mutableStateOf<String?>(null) }
     var inputBuffer by remember { mutableStateOf("") }
 
-    fun refresh() { display = calc.current.toString() }
+    fun formatResult(v: Double): String =
+        if (v == v.toLong().toDouble()) v.toLong().toString() else v.toBigDecimal().stripTrailingZeros().toPlainString()
+
+    fun refresh() { display = formatResult(accumulator) }
     fun onDigit(d: String) { inputBuffer += d; display = inputBuffer }
     fun applyOp() {
         if (inputBuffer.isEmpty()) return
-        val value = inputBuffer.toIntOrNull() ?: return
+        val value = inputBuffer.toDoubleOrNull() ?: return
         inputBuffer = ""
-        try {
-            when (pendingOp) {
-                "+" -> calc.add(value)
-                "-" -> calc.subtract(value)
-                "x" -> calc.multiply(value)
-                "/" -> calc.divide(value)
-                null -> calc.add(value)
-            }
-            refresh()
-        } catch (_: Exception) {
-            display = "Error: division by 0"
+        when (pendingOp) {
+            "+" -> accumulator += value
+            "-" -> accumulator -= value
+            "x" -> accumulator *= value
+            "/" -> if (value == 0.0) { display = "Error: division by 0"; return } else accumulator /= value
+            null -> accumulator = value
         }
+        // Sync Rust calculator with the integer part
+        calc.close(); calc = Calculator(accumulator.toInt())
+        refresh()
     }
     fun onOperator(op: String) { applyOp(); pendingOp = op }
     fun onEquals() { applyOp(); pendingOp = null }
     fun onClear() {
         calc.close(); calc = Calculator(0)
-        display = "0"; inputBuffer = ""; pendingOp = null
+        accumulator = 0.0; display = "0"; inputBuffer = ""; pendingOp = null
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
