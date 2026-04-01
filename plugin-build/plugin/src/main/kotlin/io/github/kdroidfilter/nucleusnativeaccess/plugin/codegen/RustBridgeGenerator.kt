@@ -581,7 +581,7 @@ class RustBridgeGenerator {
         val elemType = listType.elementType
         when (elemType) {
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
-                // Box each element as i64 handle
+                // Return borrowed pointers - ownership remains with parent
                 appendLine("${indent}let len = $binding.len() as i32;")
                 appendLine("${indent}if len <= out_buf_len {")
                 appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
@@ -594,21 +594,22 @@ class RustBridgeGenerator {
                 // Serialize strings as null-terminated, concatenated in buffer
                 val needsLossy = isPathLikeRustType(returnRustType)
                 appendLine("${indent}let len = $binding.len() as i32;")
-                appendLine("${indent}if len <= out_buf_len {")
-                appendLine("${indent}    let mut offset = 0usize;")
-                appendLine("${indent}    for s in $binding.iter() {")
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $binding.iter() {")
                 if (needsLossy) {
-                    appendLine("${indent}        let _lossy = s.to_string_lossy();")
-                    appendLine("${indent}        let bytes = _lossy.as_bytes();")
+                    appendLine("${indent}    let _lossy = s.to_string_lossy();")
+                    appendLine("${indent}    let bytes = _lossy.as_bytes();")
                 } else {
-                    appendLine("${indent}        let bytes = s.as_bytes();")
+                    appendLine("${indent}    let bytes = s.as_bytes();")
                 }
-                appendLine("${indent}        unsafe {")
-                appendLine("${indent}            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.add(offset), bytes.len());")
-                appendLine("${indent}            *out_buf.add(offset + bytes.len()) = 0;")
-                appendLine("${indent}        }")
-                appendLine("${indent}        offset += bytes.len() + 1;")
+                appendLine("${indent}    if offset + bytes.len() + 1 > out_buf_len as usize {")
+                appendLine("${indent}        break;")
                 appendLine("${indent}    }")
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.add(offset), bytes.len());")
+                appendLine("${indent}        *out_buf.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
                 appendLine("${indent}}")
                 appendLine("${indent}len")
             }

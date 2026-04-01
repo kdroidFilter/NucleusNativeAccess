@@ -1451,36 +1451,40 @@ class FfmProxyGenerator {
             appendLine("            obj._ownsHandle = ownsHandle")
             if (hasCallbacks) {
                 appendLine("            val cbArena = obj._callbackArena")
+                appendLine("            if (ownsHandle) {")
                 if (classHasSuspend) {
-                    appendLine("            val inFlight = obj._suspendInFlight")
-                    appendLine("            CLEANER.register(obj) {")
-                    appendLine("                if (!obj._disposed) {")
-                    appendLine("                    val shouldDispose = obj._ownsHandle")
-                    appendLine("                    obj._disposed = true")
-                    appendLine("                    obj._ownsHandle = false")
-                    appendLine("                    repeat(1000) { if (inFlight.get() <= 0) return@repeat; Thread.sleep(1) }")
-                    appendLine("                    runCatching { cbArena.close() }")
-                    appendLine("                    if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                    appendLine("                val inFlight = obj._suspendInFlight")
+                    appendLine("                CLEANER.register(obj) {")
+                    appendLine("                    if (!obj._disposed) {")
+                    appendLine("                        val shouldDispose = obj._ownsHandle")
+                    appendLine("                        obj._disposed = true")
+                    appendLine("                        obj._ownsHandle = false")
+                    appendLine("                        repeat(1000) { if (inFlight.get() <= 0) return@repeat; Thread.sleep(1) }")
+                    appendLine("                        runCatching { cbArena.close() }")
+                    appendLine("                        if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                    appendLine("                    }")
                     appendLine("                }")
-                    appendLine("            }")
                 } else {
-                    appendLine("            CLEANER.register(obj) {")
-                    appendLine("                if (!obj._disposed) {")
-                    appendLine("                    val shouldDispose = obj._ownsHandle")
-                    appendLine("                    obj._disposed = true")
-                    appendLine("                    obj._ownsHandle = false")
-                    appendLine("                    runCatching { cbArena.close() }")
-                    appendLine("                    if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                    appendLine("                CLEANER.register(obj) {")
+                    appendLine("                    if (!obj._disposed) {")
+                    appendLine("                        val shouldDispose = obj._ownsHandle")
+                    appendLine("                        obj._disposed = true")
+                    appendLine("                        obj._ownsHandle = false")
+                    appendLine("                        runCatching { cbArena.close() }")
+                    appendLine("                        if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                    appendLine("                    }")
                     appendLine("                }")
-                    appendLine("            }")
                 }
+                appendLine("            }")
             } else {
-                appendLine("            CLEANER.register(obj) {")
-                appendLine("                if (!obj._disposed) {")
-                appendLine("                    val shouldDispose = obj._ownsHandle")
-                appendLine("                    obj._disposed = true")
-                appendLine("                    obj._ownsHandle = false")
-                appendLine("                    if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                appendLine("            if (ownsHandle) {")
+                appendLine("                CLEANER.register(obj) {")
+                appendLine("                    if (!obj._disposed) {")
+                appendLine("                        val shouldDispose = obj._ownsHandle")
+                appendLine("                        obj._disposed = true")
+                appendLine("                        obj._ownsHandle = false")
+                appendLine("                        if (shouldDispose) runCatching { DISPOSE_HANDLE.invoke(h) }")
+                appendLine("                    }")
                 appendLine("                }")
                 appendLine("            }")
             }
@@ -1907,7 +1911,7 @@ class FfmProxyGenerator {
                 when (innerElem) {
                     KneType.BOOLEAN -> appendLine("${indent}    val _list = List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
                     is KneType.ENUM -> appendLine("${indent}    val _list = List(_count) { ${innerElem.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
-                    is KneType.OBJECT -> appendLine("${indent}    val _list = List(_count) { ${innerElem.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                    is KneType.OBJECT -> appendLine("${indent}    val _list = List(_count) { ${innerElem.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                     KneType.BYTE_ARRAY -> appendLine("${indent}    val _list = List(_count) { KneRuntime.readByteArrayFromRef(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                     is KneType.LIST, is KneType.SET, is KneType.MAP -> {
                         appendLine("${indent}    val _list = List(_count) { _idx ->")
@@ -2137,7 +2141,7 @@ class FfmProxyGenerator {
                     is KneType.ENUM ->
                         appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
                     is KneType.OBJECT ->
-                        appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                        appendLine("${indent}    val _list = List(_count) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                     KneType.BYTE_ARRAY ->
                         appendLine("${indent}    val _list = List(_count) { KneRuntime.readByteArrayFromRef(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                     is KneType.LIST, is KneType.SET, is KneType.MAP -> {
@@ -2464,7 +2468,7 @@ class FfmProxyGenerator {
             when (elemType) {
                 KneType.BOOLEAN -> appendLine("${indent}        val _list = List(_count) { _outBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
                 is KneType.ENUM -> appendLine("${indent}        val _list = List(_count) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
-                is KneType.OBJECT -> appendLine("${indent}        val _list = List(_count) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                is KneType.OBJECT -> appendLine("${indent}        val _list = List(_count) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                 else -> appendLine("${indent}        val _list = List(_count) { _outBuf.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
             }
             if (isSet) appendLine("${indent}        _list.toSet()")
@@ -4147,11 +4151,19 @@ class FfmProxyGenerator {
             }
             else -> {
                 val layout = KneType.collectionElementLayout(elemType)
-                appendLine("${indent}val _outBuf = arena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
-                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $MAX_COLLECTION_SIZE"
-                appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}var _bufSize = $MAX_COLLECTION_SIZE")
+                appendLine("${indent}var _outBuf = arena.allocate($layout, _bufSize.toLong())")
+                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, _bufSize"
+                appendLine("${indent}var _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
                 if (nullable) appendLine("${indent}if (_count < 0) return null")
+                appendLine("${indent}if (_count > _bufSize) {")
+                appendLine("${indent}    _bufSize = _count")
+                appendLine("${indent}    _outBuf = arena.allocate($layout, _bufSize.toLong())")
+                val invokeArgs2 = buildClassInvokeArgsExpanded(fn) + ", _outBuf, _bufSize"
+                appendLine("${indent}    _count = $handleName.invoke($invokeArgs2) as Int")
+                appendLine("${indent}    KneRuntime.checkError()")
+                appendLine("${indent}}")
                 appendCollectionElementRead(indent, elemType, "_count", collType)
             }
         }
@@ -4166,7 +4178,7 @@ class FfmProxyGenerator {
                 appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
             }
             is KneType.OBJECT -> {
-                appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromNativeHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
             }
             KneType.BYTE_ARRAY -> {
                 // ByteArray elements: each is a StableRef handle
@@ -4210,7 +4222,7 @@ class FfmProxyGenerator {
                     when (innerElem) {
                         KneType.BOOLEAN -> appendLine("${indent}    val _inner = List(_iCount) { _iBuf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
                         is KneType.ENUM -> appendLine("${indent}    val _inner = List(_iCount) { ${innerElem.simpleName}.entries[_iBuf.getAtIndex(JAVA_INT, it.toLong())] }")
-                        is KneType.OBJECT -> appendLine("${indent}    val _inner = List(_iCount) { ${innerElem.simpleName}.fromNativeHandle(_iBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                        is KneType.OBJECT -> appendLine("${indent}    val _inner = List(_iCount) { ${innerElem.simpleName}.fromBorrowedHandle(_iBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
                         else -> appendLine("${indent}    val _inner = List(_iCount) { _iBuf.getAtIndex($layout, it.toLong()) as ${innerElem.jvmTypeName} }")
                     }
                 }
