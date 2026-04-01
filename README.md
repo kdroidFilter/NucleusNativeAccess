@@ -210,6 +210,37 @@ fun main() {
 | `HashMap<K,V>` | `Map<K,V>` | Parallel arrays |
 | Error propagation | `KotlinNativeException` | `catch_unwind` + thread-local error |
 
+### Current limitations (Rust Import)
+
+The Rust import pipeline is experimental. The following Rust constructs are **not yet supported** and will be silently skipped during code generation:
+
+| Category | Unsupported construct | Impact | Workaround |
+|----------|----------------------|--------|------------|
+| **Return types** | `HashMap<K,V>` / `BTreeMap<K,V>` return | Methods returning maps are skipped | Expose a wrapper returning `Vec<(K,V)>` |
+| **Return types** | `HashSet<T>` / `BTreeSet<T>` return | Methods returning sets are skipped | Expose a wrapper returning `Vec<T>` |
+| **Return types** | `Option<DataClass>` return | Nullable data class returns are skipped | Return the data class non-nullable, or use a wrapper |
+| **Return types** | `Option<Vec<T>>` / `Option<HashSet<T>>` return | Nullable collections are skipped | &mdash; |
+| **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
+| **Traits** | `impl Trait` return types | Not mapped | &mdash; |
+| **Traits** | Trait objects (`dyn Trait`) | Not mapped | &mdash; |
+| **Types** | Tuple types (`(A, B)`) | Not mapped | Use a struct instead |
+| **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
+| **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |
+| **Enums** | Tagged enum variants with `Vec<T>` / collection fields | Variant constructors with collection fields skipped | &mdash; |
+| **Constructors** | Generic constructors (`fn new<T: Trait>(...)`) | Skipped if generics can't be resolved | Use concrete types |
+| **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
+| **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |
+| **Lifetimes** | Explicit lifetime parameters on structs | Struct skipped if lifetimes can't be resolved | &mdash; |
+
+**Supported but with caveats:**
+
+| Construct | Behaviour | Notes |
+|-----------|-----------|-------|
+| `OsStr` / `OsString` / `Path` / `PathBuf` | Mapped to `String` | Uses `to_string_lossy()` on output, may lose non-UTF-8 data |
+| `Vec<Object>` return | Elements returned as borrowed handles | Pointers into the parent collection; valid while parent lives |
+| Borrowed returns (`&T`) | Returned as borrowed handle (no ownership) | JVM proxy won't dispose the native object |
+| `unsafe fn` methods | Generated with `unsafe { }` wrapper | Caller is responsible for safety invariants |
+
 ### 5. Run
 
 ```bash

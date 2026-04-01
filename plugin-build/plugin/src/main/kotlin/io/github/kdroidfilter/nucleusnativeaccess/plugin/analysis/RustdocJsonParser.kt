@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.nucleusnativeaccess.plugin.analysis
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -9,14 +10,22 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
  * Parses a rustdoc JSON file (produced by `cargo rustdoc --output-format json`)
  * and builds a [KneModule] suitable for FFM proxy generation.
  *
- * Only public items with no unresolved generics are extracted.
+ * The parser accepts a subset of generics when they can be lowered to stable bridgeable
+ * Kotlin types, for example `AsRef<str>`, `AsRef<Path>`, `Into<T>` and `Fn(...)`.
  */
 class RustdocJsonParser {
 
     /** Set during [parse]; used by [resolveType] to build fqNames for struct/enum references. */
     private var currentCrateName: String = ""
+
     /** Set during [parse]; enum IDs that have data variants (→ SEALED_ENUM, not ENUM). */
     private var currentSealedEnumIds: Set<Int> = emptySet()
+
+    /** Opaque external/current-crate types referenced by supported signatures. */
+    private var encounteredOpaqueClasses: LinkedHashMap<String, KneClass> = linkedMapOf()
+
+    /** Public type names exported by the parsed crate root. Used to avoid Kotlin name collisions. */
+    private var reservedTopLevelTypeNames: Set<String> = emptySet()
 
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
@@ -24,34 +33,44 @@ class RustdocJsonParser {
     }
 
     /**
-     * Result of resolving a rustdoc JSON type: the mapped [KneType] plus whether
-     * the original type was wrapped in a `borrowed_ref`.
+     * Result of resolving a rustdoc JSON type: the mapped [KneType], whether the original type was
+     * borrowed, and a best-effort Rust type hint used by Rust bridge generation for casts.
      */
-    private data class ResolvedType(val type: KneType, val isBorrowed: Boolean = false)
+    private data class ResolvedType(
+        val type: KneType,
+        val isBorrowed: Boolean = false,
+        val rustType: String? = null,
+    )
 
     fun parse(json: String, libName: String): KneModule {
+        encounteredOpaqueClasses = linkedMapOf()
+        reservedTopLevelTypeNames = emptySet()
+
         val root = JsonParser.parseString(json).asJsonObject
         val index = root.getAsJsonObject("index")
         val rootModuleId = root.get("root").asInt
 
-        // Derive crate name from the root module
         val rootModule = index.get(rootModuleId.toString())?.asJsonObject
         val crateName = rootModule?.get("name").safeString() ?: libName
         currentCrateName = crateName
+        reservedTopLevelTypeNames = rootModule
+            ?.getAsJsonObject("inner")
+            ?.getAsJsonObject("module")
+            ?.getAsJsonArray("items")
+            ?.mapNotNull { itemId ->
+                index.get(itemId.asInt.toString())?.asJsonObject?.get("name").safeString()
+            }
+            ?.toSet()
+            ?: emptySet()
 
-        // Collect known types first (for type resolution)
-        val knownStructs = mutableMapOf<Int, String>() // id → simpleName
-        val knownEnums = mutableMapOf<Int, String>()    // id → simpleName
-        val knownTraits = mutableMapOf<Int, String>()   // id → simpleName
+        val knownStructs = mutableMapOf<Int, String>()
+        val knownEnums = mutableMapOf<Int, String>()
+        val knownTraits = mutableMapOf<Int, String>()
 
         for ((id, item) in index.entrySet()) {
             val inner = item.asJsonObject.getAsJsonObject("inner") ?: continue
-            val nameElem = item.asJsonObject.get("name")
-            if (nameElem == null || nameElem.isJsonNull) continue
-            val name = nameElem.asString
-            val visElem = item.asJsonObject.get("visibility")
-            if (visElem == null || visElem.isJsonNull) continue
-            val vis = visElem.asString
+            val name = item.asJsonObject.get("name").safeString() ?: continue
+            val vis = item.asJsonObject.get("visibility").safeString() ?: continue
             if (vis != "public") continue
             when {
                 inner.has("struct") -> knownStructs[id.toInt()] = name
@@ -60,166 +79,194 @@ class RustdocJsonParser {
             }
         }
 
-        // Pre-classify enums: separate sealed (has data variants) from simple (all plain)
         val sealedEnumIds = mutableSetOf<Int>()
         for ((id, _) in knownEnums) {
             val enumItem = index.get(id.toString())?.asJsonObject ?: continue
             val innerEnum = enumItem.getAsJsonObject("inner")?.getAsJsonObject("enum") ?: continue
-            val varIds = innerEnum.getAsJsonArray("variants") ?: continue
-            for (vId in varIds) {
-                val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+            val variantIds = innerEnum.getAsJsonArray("variants") ?: continue
+            for (variantId in variantIds) {
+                val variantItem = index.get(variantId.asInt.toString())?.asJsonObject ?: continue
                 val variantInner = variantItem.getAsJsonObject("inner") ?: continue
-                if (variantInner.has("variant")) {
-                    val kind = variantInner.getAsJsonObject("variant").get("kind")
-                    if (kind != null && kind.isJsonObject) {
-                        sealedEnumIds.add(id)
-                        break
-                    }
+                if (!variantInner.has("variant")) continue
+                val kind = variantInner.getAsJsonObject("variant").get("kind")
+                if (kind != null && kind.isJsonObject) {
+                    sealedEnumIds.add(id)
+                    break
                 }
             }
         }
         currentSealedEnumIds = sealedEnumIds
 
-        // Collect inherent impl blocks and map struct id → method items
-        data class MethodEntry(val item: JsonObject, val isMutating: Boolean, val docs: String?, val isOverride: Boolean = false)
-        val implMethods = mutableMapOf<Int, MutableList<MethodEntry>>() // struct id → method entries
-        val implConstructors = mutableMapOf<Int, JsonObject?>()        // struct id → new() fn
-        val structTraitImpls = mutableMapOf<Int, MutableList<String>>() // struct id → trait names
+        data class MethodEntry(
+            val item: JsonObject,
+            val receiverKind: KneReceiverKind,
+            val docs: String?,
+            val isOverride: Boolean = false,
+        )
+
+        val implMethods = mutableMapOf<Int, MutableList<MethodEntry>>()
+        val implConstructors = mutableMapOf<Int, JsonObject?>()
+        val implCompanionMethods = mutableMapOf<Int, MutableList<JsonObject>>()
+        val structTraitImpls = mutableMapOf<Int, MutableList<String>>()
 
         for ((_, item) in index.entrySet()) {
             val inner = item.asJsonObject.getAsJsonObject("inner") ?: continue
             if (!inner.has("impl")) continue
             val implObj = inner.getAsJsonObject("impl")
-
-            // Rustdoc JSON format 56 uses "trait" (not "trait_")
-            // Inherent impls have "trait": null; trait impls have "trait": { "path": "TraitName", ... }
             val traitField = implObj.get("trait")
             val isTraitImpl = traitField != null && !traitField.isJsonNull && traitField.isJsonObject
-
-            // Get the type this impl is for
             val forType = implObj.getAsJsonObject("for") ?: continue
-            val structId = resolveTypeId(forType) ?: continue
+            val typeId = resolveTypeId(forType) ?: continue
+            if (!knownStructs.containsKey(typeId)) continue
 
             if (isTraitImpl) {
-                // Only collect methods for known user-defined traits
                 val traitName = traitField.asJsonObject.get("path")?.asString ?: continue
                 if (!knownTraits.values.contains(traitName)) continue
-                structTraitImpls.getOrPut(structId) { mutableListOf() }.add(traitName)
-                // Collect trait impl methods (note: visibility is "default" in trait impls, not "public")
+                structTraitImpls.getOrPut(typeId) { mutableListOf() }.add(traitName)
                 val items = implObj.getAsJsonArray("items") ?: continue
                 for (methodIdElem in items) {
-                    val methodId = methodIdElem.asInt
-                    val methodItem = index.get(methodId.toString())?.asJsonObject ?: continue
+                    val methodItem = index.get(methodIdElem.asInt.toString())?.asJsonObject ?: continue
                     val methodInner = methodItem.getAsJsonObject("inner") ?: continue
                     if (!methodInner.has("function")) continue
                     val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
                     val inputs = sig.getAsJsonArray("inputs")
-                    if (hasSelfParam(inputs)) {
-                        val isMutating = isSelfMutable(inputs)
-                        val docs = methodItem.get("docs").safeString()
-                        implMethods.getOrPut(structId) { mutableListOf() }.add(MethodEntry(methodItem, isMutating, docs, isOverride = true))
-                    }
+                    if (!hasSelfParam(inputs)) continue
+                    implMethods.getOrPut(typeId) { mutableListOf() }.add(
+                        MethodEntry(
+                            item = methodItem,
+                            receiverKind = classifyReceiverKind(inputs),
+                            docs = methodItem.get("docs").safeString(),
+                            isOverride = true,
+                        )
+                    )
                 }
             } else {
-                // Inherent impl: collect public methods and constructors
+                val selfType = knownStructs[typeId]?.let { name -> KneType.OBJECT("$crateName.$name", name) }
                 val items = implObj.getAsJsonArray("items") ?: continue
                 for (methodIdElem in items) {
-                    val methodId = methodIdElem.asInt
-                    val methodItem = index.get(methodId.toString())?.asJsonObject ?: continue
+                    val methodItem = index.get(methodIdElem.asInt.toString())?.asJsonObject ?: continue
                     val methodInner = methodItem.getAsJsonObject("inner") ?: continue
                     if (!methodInner.has("function")) continue
                     val methodVis = methodItem.get("visibility").safeString() ?: continue
                     if (methodVis != "public") continue
                     val methodName = methodItem.get("name").safeString() ?: continue
-                    val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
+                    val fn = methodInner.getAsJsonObject("function")
+                    val sig = fn.getAsJsonObject("sig")
                     val inputs = sig.getAsJsonArray("inputs")
-                    // Check if this is a constructor (fn new(...) -> Self, no &self)
-                    if (methodName == "new" && !hasSelfParam(inputs)) {
-                        implConstructors[structId] = methodItem
-                    } else if (hasSelfParam(inputs)) {
-                        val isMutating = isSelfMutable(inputs)
-                        val docs = methodItem.get("docs").safeString()
-                        implMethods.getOrPut(structId) { mutableListOf() }.add(MethodEntry(methodItem, isMutating, docs))
+                    val genericTypes = resolveGenericMappings(fn.getAsJsonObject("generics"), knownStructs, knownEnums, emptyMap(), selfType)
+                    if (hasUnsupportedGenerics(fn.getAsJsonObject("generics"), genericTypes)) continue
+                    val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, emptyMap(), genericTypes, selfType)
+                    val isConstructor = methodName == "new" && !hasSelfParam(inputs) && returnType?.type == selfType
+
+                    when {
+                        isConstructor -> implConstructors[typeId] = methodItem
+                        hasSelfParam(inputs) -> implMethods.getOrPut(typeId) { mutableListOf() }.add(
+                            MethodEntry(
+                                item = methodItem,
+                                receiverKind = classifyReceiverKind(inputs),
+                                docs = methodItem.get("docs").safeString(),
+                            )
+                        )
+                        else -> implCompanionMethods.getOrPut(typeId) { mutableListOf() }.add(methodItem)
                     }
                 }
             }
         }
 
-        // Detect data class candidates: all public fields, no public methods (beyond new())
         val knownDataClasses = mutableMapOf<Int, KneDataClass>()
         for ((id, name) in knownStructs) {
-            val hasMethods = (implMethods[id]?.isNotEmpty() == true)
-            if (hasMethods) continue // Structs with methods are regular classes
+            val hasMethods = implMethods[id]?.isNotEmpty() == true || implCompanionMethods[id]?.isNotEmpty() == true
+            if (hasMethods) continue
 
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
             val fields = extractStructFields(structItem, index, knownStructs, knownEnums)
-            if (fields == null || fields.isEmpty()) continue // No public fields or not a plain struct
+            if (fields == null || fields.isEmpty()) continue
+            if (!fields.all { isDataClassFieldSupported(it.type) }) continue
 
-            val fqName = "$crateName.$name"
             knownDataClasses[id] = KneDataClass(
                 simpleName = name,
-                fqName = fqName,
+                fqName = "$crateName.$name",
                 fields = fields,
             )
         }
 
-        // Build KneClasses (excluding data class structs)
         val classes = mutableListOf<KneClass>()
         for ((id, name) in knownStructs) {
             if (knownDataClasses.containsKey(id)) continue
-
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
+            val selfType = KneType.OBJECT("$crateName.$name", name)
+            val constructor = buildConstructor(
+                newFn = implConstructors[id],
+                structItem = structItem,
+                index = index,
+                knownStructs = knownStructs,
+                knownEnums = knownEnums,
+                knownDataClasses = knownDataClasses,
+                selfType = selfType,
+            )
 
-            // Build constructor from "new" function or from struct fields
-            val constructor = buildConstructor(implConstructors[id], structItem, index, knownStructs, knownEnums)
-
-            // Build methods (passing isMutating from the self param)
             val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { entry ->
-                buildMethod(entry.item, knownStructs, knownEnums, knownDataClasses, entry.isMutating, entry.docs)?.let {
-                    if (entry.isOverride) it.copy(isOverride = true) else it
-                }
+                buildMethod(
+                    methodItem = entry.item,
+                    knownStructs = knownStructs,
+                    knownEnums = knownEnums,
+                    knownDataClasses = knownDataClasses,
+                    receiverKind = entry.receiverKind,
+                    docs = entry.docs,
+                    ownerType = selfType,
+                )?.let { if (entry.isOverride) it.copy(isOverride = true) else it }
             }
 
-            // Extract properties from get_/set_ patterns
-            val (methods, properties) = extractProperties(allMethods)
+            val companionMethods = (implCompanionMethods[id] ?: emptyList()).mapNotNull { methodItem ->
+                buildMethod(
+                    methodItem = methodItem,
+                    knownStructs = knownStructs,
+                    knownEnums = knownEnums,
+                    knownDataClasses = knownDataClasses,
+                    receiverKind = KneReceiverKind.NONE,
+                    docs = methodItem.get("docs").safeString(),
+                    ownerType = selfType,
+                )
+            }
 
-            val fqName = "$crateName.$name"
+            val (methods, properties) = extractProperties(allMethods)
             val traitNames = structTraitImpls[id]?.map { "$crateName.$it" } ?: emptyList()
             classes.add(
                 KneClass(
                     simpleName = name,
-                    fqName = fqName,
+                    fqName = "$crateName.$name",
                     constructor = constructor,
                     methods = methods,
                     properties = properties,
+                    companionMethods = companionMethods,
                     interfaces = traitNames,
                 )
             )
         }
 
-        // Build KneEnums and KneSealedEnums
         val enums = mutableListOf<KneEnum>()
         val sealedEnums = mutableListOf<KneSealedEnum>()
         for ((id, name) in knownEnums) {
             val enumItem = index.get(id.toString())?.asJsonObject ?: continue
-            val inner = enumItem.getAsJsonObject("inner").getAsJsonObject("enum")
+            val inner = enumItem.getAsJsonObject("inner")?.getAsJsonObject("enum") ?: continue
             val variantIds = inner.getAsJsonArray("variants") ?: continue
 
             if (id in sealedEnumIds) {
-                // Build as sealed enum
                 val variants = mutableListOf<KneSealedVariant>()
-                for (vId in variantIds) {
-                    val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+                for (variantId in variantIds) {
+                    val variantItem = index.get(variantId.asInt.toString())?.asJsonObject ?: continue
                     val variantName = variantItem.get("name").safeString() ?: continue
                     val variantInner = variantItem.getAsJsonObject("inner") ?: continue
                     if (!variantInner.has("variant")) continue
                     val variantData = variantInner.getAsJsonObject("variant")
-                    val kind = variantData.get("kind")
-                    val parsed = parseVariantFields(kind, index, knownStructs, knownEnums)
-                    if (parsed != null) {
-                        val (fields, isTuple) = parsed
-                        variants.add(KneSealedVariant(variantName, fields, isTuple))
-                    }
+                    val parsed = parseVariantFields(
+                        kind = variantData.get("kind"),
+                        index = index,
+                        knownStructs = knownStructs,
+                        knownEnums = knownEnums,
+                        knownDataClasses = knownDataClasses,
+                    ) ?: continue
+                    variants.add(KneSealedVariant(variantName, parsed.first, parsed.second))
                 }
                 sealedEnums.add(
                     KneSealedEnum(
@@ -229,94 +276,61 @@ class RustdocJsonParser {
                     )
                 )
             } else {
-                // Build as simple enum (all variants are fieldless)
                 val entries = mutableListOf<String>()
-                for (vId in variantIds) {
-                    val variantItem = index.get(vId.asInt.toString())?.asJsonObject ?: continue
+                for (variantId in variantIds) {
+                    val variantItem = index.get(variantId.asInt.toString())?.asJsonObject ?: continue
                     val variantName = variantItem.get("name").safeString() ?: continue
                     entries.add(variantName)
                 }
-                enums.add(
-                    KneEnum(
-                        simpleName = name,
-                        fqName = "$crateName.$name",
-                        entries = entries,
-                    )
-                )
+                enums.add(KneEnum(simpleName = name, fqName = "$crateName.$name", entries = entries))
             }
         }
 
-        // Build top-level functions (functions in the root module, not inside impl blocks)
         val rootItems = rootModule?.getAsJsonObject("inner")
             ?.getAsJsonObject("module")
-            ?.getAsJsonArray("items") ?: com.google.gson.JsonArray()
+            ?.getAsJsonArray("items") ?: JsonArray()
         val topLevelFunctions = mutableListOf<KneFunction>()
         for (itemId in rootItems) {
             val item = index.get(itemId.asInt.toString())?.asJsonObject ?: continue
             val inner = item.getAsJsonObject("inner") ?: continue
             if (!inner.has("function")) continue
+            if (isGeneratedBridgeFunction(item)) continue
             val vis = item.get("visibility").safeString() ?: continue
             if (vis != "public") continue
             val name = item.get("name").safeString() ?: continue
-            // Skip generated bridge functions (from previous runs included via build.rs)
             if (name.startsWith("${libName}_") || name.startsWith("kne_")) continue
             val sig = inner.getAsJsonObject("function").getAsJsonObject("sig")
-            val inputs = sig.getAsJsonArray("inputs")
-            // Skip if it has a self param (should be in an impl block)
-            if (hasSelfParam(inputs)) continue
-            // Skip if it has unresolved generics
-            val generics = inner.getAsJsonObject("function").getAsJsonObject("generics")
-            if (hasUnresolvedGenerics(generics)) continue
-
-            val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses)
-            val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
-            val fnDocs = item.get("docs").safeString()
-            val isSuspend = fnDocs?.contains("@kne:suspend") == true
-
-            // Detect @kne:flow(Type) annotation
-            val fnFlowMatch = fnDocs?.let { Regex("@kne:flow\\((\\w+)\\)").find(it) }
-            val actualReturnType = if (fnFlowMatch != null) {
-                val elemTypeName = fnFlowMatch.groupValues[1]
-                val elemType = when (elemTypeName) {
-                    "Int" -> KneType.INT
-                    "Long" -> KneType.LONG
-                    "Double" -> KneType.DOUBLE
-                    "Float" -> KneType.FLOAT
-                    "Boolean" -> KneType.BOOLEAN
-                    "String" -> KneType.STRING
-                    "Byte" -> KneType.BYTE
-                    "Short" -> KneType.SHORT
-                    else -> KneType.INT
-                }
-                KneType.FLOW(elemType)
-            } else {
-                returnType
-            }
-
-            topLevelFunctions.add(
-                KneFunction(
-                    name = name,
-                    params = params,
-                    returnType = actualReturnType,
-                    isSuspend = isSuspend,
-                )
-            )
+            if (hasSelfParam(sig.getAsJsonArray("inputs"))) continue
+            buildMethod(
+                methodItem = item,
+                knownStructs = knownStructs,
+                knownEnums = knownEnums,
+                knownDataClasses = knownDataClasses,
+                receiverKind = KneReceiverKind.NONE,
+                docs = item.get("docs").safeString(),
+                ownerType = null,
+            )?.let(topLevelFunctions::add)
         }
 
-        // Build KneInterfaces from known traits
         val interfaces = mutableListOf<KneInterface>()
         for ((id, traitName) in knownTraits) {
             val traitItem = index.get(id.toString())?.asJsonObject ?: continue
             val traitInner = traitItem.getAsJsonObject("inner")?.getAsJsonObject("trait") ?: continue
-            val traitItemIds = traitInner.getAsJsonArray("items") ?: continue
-            val traitMethods = traitItemIds.mapNotNull { mid ->
-                val methodItem = index.get(mid.asInt.toString())?.asJsonObject ?: return@mapNotNull null
+            val traitItems = traitInner.getAsJsonArray("items") ?: continue
+            val selfType = KneType.INTERFACE("$crateName.$traitName", traitName)
+            val traitMethods = traitItems.mapNotNull { methodId ->
+                val methodItem = index.get(methodId.asInt.toString())?.asJsonObject ?: return@mapNotNull null
                 val methodInner = methodItem.getAsJsonObject("inner") ?: return@mapNotNull null
                 if (!methodInner.has("function")) return@mapNotNull null
                 val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
-                val inputs = sig.getAsJsonArray("inputs")
-                val mutating = isSelfMutable(inputs)
-                buildMethod(methodItem, knownStructs, knownEnums, knownDataClasses, isMutating = mutating)
+                buildMethod(
+                    methodItem = methodItem,
+                    knownStructs = knownStructs,
+                    knownEnums = knownEnums,
+                    knownDataClasses = knownDataClasses,
+                    receiverKind = if (hasSelfParam(sig.getAsJsonArray("inputs"))) classifyReceiverKind(sig.getAsJsonArray("inputs")) else KneReceiverKind.NONE,
+                    ownerType = selfType,
+                )
             }
             interfaces.add(
                 KneInterface(
@@ -328,33 +342,104 @@ class RustdocJsonParser {
             )
         }
 
-        // Derive package from crate name
-        val pkg = crateName.replace('-', '.').replace('_', '.')
+        val occupiedTopLevelNames = (
+            classes.map { it.simpleName } +
+                knownDataClasses.values.map { it.simpleName } +
+                enums.map { it.simpleName } +
+                sealedEnums.map { it.simpleName } +
+                interfaces.map { it.simpleName }
+            ).toMutableSet()
+        val opaqueRenames = mutableMapOf<String, String>()
+        val renamedOpaqueClasses = encounteredOpaqueClasses.values.map { opaque ->
+            val uniqueName = if (opaque.simpleName in occupiedTopLevelNames) {
+                uniqueOpaqueSimpleName(opaque.simpleName, opaque.fqName, occupiedTopLevelNames)
+            } else {
+                opaque.simpleName
+            }
+            occupiedTopLevelNames += uniqueName
+            opaqueRenames[opaque.fqName] = uniqueName
+            opaque.copy(simpleName = uniqueName)
+        }
 
+        fun renameType(type: KneType): KneType = when (type) {
+            is KneType.OBJECT -> opaqueRenames[type.fqName]?.let { type.copy(simpleName = it) } ?: type
+            is KneType.INTERFACE -> opaqueRenames[type.fqName]?.let { type.copy(simpleName = it) } ?: type
+            is KneType.SEALED_ENUM -> opaqueRenames[type.fqName]?.let { type.copy(simpleName = it) } ?: type
+            is KneType.NULLABLE -> type.copy(inner = renameType(type.inner))
+            is KneType.FUNCTION -> type.copy(
+                paramTypes = type.paramTypes.map(::renameType),
+                returnType = renameType(type.returnType),
+            )
+            is KneType.DATA_CLASS -> type.copy(fields = type.fields.map { it.copy(type = renameType(it.type)) })
+            is KneType.LIST -> type.copy(elementType = renameType(type.elementType))
+            is KneType.SET -> type.copy(elementType = renameType(type.elementType))
+            is KneType.MAP -> type.copy(keyType = renameType(type.keyType), valueType = renameType(type.valueType))
+            is KneType.FLOW -> type.copy(elementType = renameType(type.elementType))
+            else -> type
+        }
+
+        fun renameParam(param: KneParam): KneParam = param.copy(type = renameType(param.type))
+        fun renameProperty(property: KneProperty): KneProperty = property.copy(type = renameType(property.type))
+        fun renameFunction(function: KneFunction): KneFunction = function.copy(
+            params = function.params.map(::renameParam),
+            returnType = renameType(function.returnType),
+            receiverType = function.receiverType?.let(::renameType),
+        )
+        fun renameClass(cls: KneClass): KneClass = cls.copy(
+            constructor = cls.constructor.copy(params = cls.constructor.params.map(::renameParam)),
+            methods = cls.methods.map(::renameFunction),
+            properties = cls.properties.map(::renameProperty),
+            companionMethods = cls.companionMethods.map(::renameFunction),
+            companionProperties = cls.companionProperties.map(::renameProperty),
+        )
+        fun renameInterface(iface: KneInterface): KneInterface = iface.copy(
+            methods = iface.methods.map(::renameFunction),
+            properties = iface.properties.map(::renameProperty),
+        )
+        fun renameSealedEnum(sealed: KneSealedEnum): KneSealedEnum = sealed.copy(
+            variants = sealed.variants.map { variant ->
+                variant.copy(fields = variant.fields.map(::renameParam))
+            }
+        )
+
+        val renamedClasses = classes.map(::renameClass).toMutableList()
+        val renamedInterfaces = interfaces.map(::renameInterface)
+        val renamedTopLevelFunctions = topLevelFunctions.map(::renameFunction)
+        val renamedSealedEnums = sealedEnums.map(::renameSealedEnum)
+
+        val existingFqNames = renamedClasses.map { it.fqName }.toMutableSet()
+        for (opaque in renamedOpaqueClasses) {
+            if (opaque.fqName !in existingFqNames) {
+                existingFqNames.add(opaque.fqName)
+                renamedClasses.add(opaque)
+            }
+        }
+
+        val pkg = crateName.replace('-', '.').replace('_', '.')
         return KneModule(
             libName = libName,
             packages = setOf(pkg),
-            classes = classes,
-            interfaces = interfaces,
+            classes = renamedClasses,
+            interfaces = renamedInterfaces,
             dataClasses = knownDataClasses.values.toList(),
             enums = enums,
-            sealedEnums = sealedEnums,
-            functions = topLevelFunctions,
+            sealedEnums = renamedSealedEnums,
+            functions = renamedTopLevelFunctions,
         )
     }
 
-    /**
-     * Parses variant fields from a rustdoc JSON variant `kind` value.
-     * Returns (fields, isTuple) or null if unparseable.
-     * - "plain" → (empty, false) (unit variant)
-     * - { "tuple": [fieldId, ...] } → (positional fields, true)
-     * - { "struct": { "fields": [fieldId, ...] } } → (named fields, false)
-     */
+    private fun isGeneratedBridgeFunction(item: JsonObject): Boolean {
+        val span = item.getAsJsonObject("span") ?: return false
+        val filename = span.get("filename").safeString() ?: return false
+        return filename.endsWith("/kne_bridges.rs") || filename.endsWith("\\kne_bridges.rs") || filename == "kne_bridges.rs"
+    }
+
     private fun parseVariantFields(
         kind: JsonElement?,
         index: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): Pair<List<KneParam>, Boolean>? {
         if (kind == null || kind.isJsonNull) return emptyList<KneParam>() to false
         if (kind.isJsonPrimitive && kind.asString == "plain") return emptyList<KneParam>() to false
@@ -364,13 +449,12 @@ class RustdocJsonParser {
         if (kindObj.has("tuple")) {
             val fieldIds = kindObj.getAsJsonArray("tuple") ?: return null
             val fields = mutableListOf<KneParam>()
-            for ((i, fid) in fieldIds.withIndex()) {
-                val fieldItem = index.get(fid.asInt.toString())?.asJsonObject ?: return null
+            for ((i, fieldId) in fieldIds.withIndex()) {
+                val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: return null
                 val fieldTypeJson = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
-                val fieldType = resolveType(fieldTypeJson, knownStructs, knownEnums) ?: return null
-                // Single-field tuple: name it "value"; multi-field: "value0", "value1", ...
+                val resolved = resolveTypeWithBorrow(fieldTypeJson, knownStructs, knownEnums, knownDataClasses) ?: return null
                 val fieldName = if (fieldIds.size() == 1) "value" else "value$i"
-                fields.add(KneParam(fieldName, fieldType))
+                fields.add(KneParam(fieldName, resolved.type, isBorrowed = resolved.isBorrowed, rustType = resolved.rustType))
             }
             return fields to true
         }
@@ -379,12 +463,12 @@ class RustdocJsonParser {
             val structObj = kindObj.getAsJsonObject("struct")
             val fieldIds = structObj.getAsJsonArray("fields") ?: return null
             val fields = mutableListOf<KneParam>()
-            for (fid in fieldIds) {
-                val fieldItem = index.get(fid.asInt.toString())?.asJsonObject ?: return null
+            for (fieldId in fieldIds) {
+                val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: return null
                 val fieldName = fieldItem.get("name").safeString() ?: return null
                 val fieldTypeJson = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
-                val fieldType = resolveType(fieldTypeJson, knownStructs, knownEnums) ?: return null
-                fields.add(KneParam(fieldName, fieldType))
+                val resolved = resolveTypeWithBorrow(fieldTypeJson, knownStructs, knownEnums, knownDataClasses) ?: return null
+                fields.add(KneParam(fieldName, resolved.type, isBorrowed = resolved.isBorrowed, rustType = resolved.rustType))
             }
             return fields to false
         }
@@ -401,60 +485,141 @@ class RustdocJsonParser {
         return null
     }
 
-    private fun hasSelfParam(inputs: com.google.gson.JsonArray): Boolean {
+    private fun hasSelfParam(inputs: JsonArray): Boolean {
         if (inputs.size() == 0) return false
         val firstParam = inputs[0].asJsonArray
-        val paramName = firstParam[0].asString
-        return paramName == "self"
+        return firstParam[0].asString == "self"
     }
 
-    /**
-     * Checks if the self param is `&mut self` by inspecting `borrowed_ref.is_mutable`.
-     */
-    private fun isSelfMutable(inputs: com.google.gson.JsonArray): Boolean {
-        if (inputs.size() == 0) return false
-        val firstParam = inputs[0].asJsonArray
-        if (firstParam[0].asString != "self") return false
-        val typeObj = firstParam[1].asJsonObject
-        if (!typeObj.has("borrowed_ref")) return false
-        val ref = typeObj.getAsJsonObject("borrowed_ref")
-        val isMutable = ref.get("is_mutable")
-        return isMutable != null && !isMutable.isJsonNull && isMutable.asBoolean
+    private fun classifyReceiverKind(inputs: JsonArray): KneReceiverKind {
+        if (!hasSelfParam(inputs)) return KneReceiverKind.NONE
+        val typeObj = inputs[0].asJsonArray[1].asJsonObject
+        if (!typeObj.has("borrowed_ref")) return KneReceiverKind.OWNED
+        val borrowed = typeObj.getAsJsonObject("borrowed_ref")
+        val isMutable = borrowed.get("is_mutable")?.takeIf { !it.isJsonNull }?.asBoolean == true
+        return if (isMutable) KneReceiverKind.BORROWED_MUT else KneReceiverKind.BORROWED_SHARED
     }
 
-    private fun hasUnresolvedGenerics(generics: JsonObject): Boolean {
+    private fun resolveGenericMappings(
+        generics: JsonObject?,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        selfType: KneType? = null,
+    ): Map<String, ResolvedType> {
+        if (generics == null) return emptyMap()
+        val resolved = mutableMapOf<String, ResolvedType>()
+
+        val params = generics.getAsJsonArray("params") ?: JsonArray()
+        for (param in params) {
+            val paramObj = param.asJsonObject
+            val name = paramObj.get("name").safeString() ?: continue
+            val kind = paramObj.getAsJsonObject("kind") ?: continue
+            if (kind.has("lifetime")) continue
+            val typeKind = kind.getAsJsonObject("type") ?: continue
+            resolveGenericMappingFromBounds(typeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)?.let {
+                resolved[name] = it
+            }
+        }
+
+        val wherePredicates = generics.getAsJsonArray("where_predicates") ?: JsonArray()
+        for (predicate in wherePredicates) {
+            val boundPredicate = predicate.asJsonObject.getAsJsonObject("bound_predicate") ?: continue
+            val target = boundPredicate.getAsJsonObject("type") ?: continue
+            if (!target.has("generic")) continue
+            val name = target.get("generic").asString
+            if (name in resolved) continue
+            val pseudoTypeKind = JsonObject().apply { add("bounds", boundPredicate.getAsJsonArray("bounds") ?: JsonArray()) }
+            resolveGenericMappingFromBounds(pseudoTypeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)?.let {
+                resolved[name] = it
+            }
+        }
+
+        return resolved
+    }
+
+    private fun resolveGenericMappingFromBounds(
+        typeKind: JsonObject,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass>,
+        genericTypes: Map<String, ResolvedType>,
+        selfType: KneType?,
+    ): ResolvedType? {
+        val bounds = typeKind.getAsJsonArray("bounds") ?: return null
+        for (bound in bounds) {
+            val boundObj = bound.asJsonObject
+            val traitBound = boundObj.getAsJsonObject("trait_bound") ?: continue
+            val trait = traitBound.getAsJsonObject("trait") ?: continue
+            val traitPath = lastPathSegment(trait.get("path")?.asString ?: continue)
+            val traitArgs = trait.get("args")
+
+            when (traitPath) {
+                "Fn", "FnMut", "FnOnce" -> {
+                    val parenthesized = traitArgs?.asJsonObject?.getAsJsonObject("parenthesized") ?: continue
+                    val inputs = parenthesized.getAsJsonArray("inputs") ?: continue
+                    val paramTypes = inputs.mapNotNull {
+                        resolveTypeWithBorrow(it, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)?.type
+                    }
+                    if (paramTypes.size != inputs.size()) return null
+                    val outputResolved = resolveTypeWithBorrow(parenthesized.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                    return ResolvedType(
+                        type = KneType.FUNCTION(paramTypes, outputResolved?.type ?: KneType.UNIT),
+                        rustType = traitPath,
+                    )
+                }
+
+                "AsRef", "Into", "From" -> {
+                    val target = extractFirstGenericArg(traitArgs, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: continue
+                    val targetSegment = lastPathSegment(target.rustType ?: renderRustType(target.type))
+                    if (traitPath == "AsRef" && (targetSegment == "str" || targetSegment == "Path" || targetSegment == "PathBuf")) {
+                        val rustTarget = if (targetSegment == "Path" || targetSegment == "PathBuf") "Path" else "str"
+                        return ResolvedType(type = KneType.STRING, rustType = "AsRef<$rustTarget>")
+                    }
+                    return target.copy(rustType = "$traitPath<${target.rustType ?: renderRustType(target.type)}>")
+                }
+            }
+        }
+        return null
+    }
+
+    private fun hasUnsupportedGenerics(generics: JsonObject?, resolvedGenerics: Map<String, ResolvedType>): Boolean {
+        if (generics == null) return false
         val params = generics.getAsJsonArray("params") ?: return false
-        return params.size() > 0
+        for (param in params) {
+            val paramObj = param.asJsonObject
+            val name = paramObj.get("name").safeString() ?: continue
+            val kind = paramObj.getAsJsonObject("kind") ?: continue
+            when {
+                kind.has("lifetime") -> continue
+                kind.has("type") -> if (name !in resolvedGenerics) return true
+                else -> return true
+            }
+        }
+        return false
     }
 
-    /**
-     * Extracts public fields from a plain struct. Returns null if not all fields are public
-     * or the struct is not a plain struct.
-     */
     private fun extractStructFields(
         structItem: JsonObject,
         index: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
     ): List<KneParam>? {
-        val structData = structItem.getAsJsonObject("inner").getAsJsonObject("struct")
-        val kind = structData.getAsJsonObject("kind") ?: return null
+        val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return null
+        val kindElem = structData.get("kind") ?: return null
+        if (!kindElem.isJsonObject) return null
+        val kind = kindElem.asJsonObject
         if (!kind.has("plain")) return null
         val fieldIds = kind.getAsJsonObject("plain").getAsJsonArray("fields") ?: return null
         val params = mutableListOf<KneParam>()
         for (fieldId in fieldIds) {
             val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: return null
             val fieldVis = fieldItem.get("visibility").safeString() ?: return null
-            if (fieldVis != "public") return null // All fields must be public
+            if (fieldVis != "public") return null
             val fieldName = fieldItem.get("name").safeString() ?: return null
-            val fieldType = fieldItem.getAsJsonObject("inner")
-                ?.getAsJsonObject("struct_field")
-            val resolvedType = if (fieldType != null) {
-                resolveType(fieldType, knownStructs, knownEnums)
-            } else return null
-            if (resolvedType != null) {
-                params.add(KneParam(fieldName, resolvedType))
-            } else return null
+            val fieldType = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
+            val resolved = resolveTypeWithBorrow(fieldType, knownStructs, knownEnums) ?: return null
+            params.add(KneParam(fieldName, resolved.type, isBorrowed = resolved.isBorrowed, rustType = resolved.rustType))
         }
         return params
     }
@@ -465,38 +630,37 @@ class RustdocJsonParser {
         index: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass>,
+        selfType: KneType.OBJECT,
     ): KneConstructor {
         if (newFn != null) {
-            val sig = newFn.getAsJsonObject("inner")
-                .getAsJsonObject("function")
-                .getAsJsonObject("sig")
-            val inputs = sig.getAsJsonArray("inputs")
-            val params = buildParams(inputs, knownStructs, knownEnums)
-            return KneConstructor(params)
-        }
-        // Fallback: build constructor from struct fields
-        val structData = structItem.getAsJsonObject("inner").getAsJsonObject("struct")
-        val kind = structData.getAsJsonObject("kind")
-        if (kind != null && kind.has("plain")) {
-            val fieldIds = kind.getAsJsonObject("plain").getAsJsonArray("fields")
-            val params = mutableListOf<KneParam>()
-            for (fieldId in fieldIds) {
-                val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: continue
-                val fieldVis = fieldItem.get("visibility").safeString() ?: continue
-                if (fieldVis != "public") continue
-                val fieldName = fieldItem.get("name").safeString() ?: continue
-                val fieldType = fieldItem.getAsJsonObject("inner")
-                    ?.getAsJsonObject("struct_field")
-                val resolvedType = if (fieldType != null) {
-                    resolveType(fieldType, knownStructs, knownEnums)
-                } else null
-                if (resolvedType != null) {
-                    params.add(KneParam(fieldName, resolvedType))
-                }
+            val function = newFn.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
+            val generics = resolveGenericMappings(function.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, selfType)
+            if (!hasUnsupportedGenerics(function.getAsJsonObject("generics"), generics)) {
+                val sig = function.getAsJsonObject("sig")
+                val params = buildParams(sig.getAsJsonArray("inputs"), knownStructs, knownEnums, knownDataClasses, generics, selfType)
+                return KneConstructor(params = params, kind = KneConstructorKind.FUNCTION, canFail = isResultType(sig.get("output")))
             }
-            return KneConstructor(params)
         }
-        return KneConstructor(emptyList())
+
+        val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
+        val kindElem = structData.get("kind") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
+        if (!kindElem.isJsonObject) return KneConstructor(emptyList(), KneConstructorKind.NONE)
+        val kind = kindElem.asJsonObject
+        if (!kind.has("plain")) return KneConstructor(emptyList(), KneConstructorKind.NONE)
+
+        val fieldIds = kind.getAsJsonObject("plain").getAsJsonArray("fields") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
+        val params = mutableListOf<KneParam>()
+        for (fieldId in fieldIds) {
+            val fieldItem = index.get(fieldId.asInt.toString())?.asJsonObject ?: continue
+            val fieldVis = fieldItem.get("visibility").safeString() ?: continue
+            if (fieldVis != "public") continue
+            val fieldName = fieldItem.get("name").safeString() ?: continue
+            val fieldType = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: continue
+            val resolved = resolveTypeWithBorrow(fieldType, knownStructs, knownEnums, knownDataClasses) ?: continue
+            params.add(KneParam(fieldName, resolved.type, isBorrowed = resolved.isBorrowed, rustType = resolved.rustType))
+        }
+        return if (params.isNotEmpty()) KneConstructor(params, KneConstructorKind.STRUCT_LITERAL) else KneConstructor(emptyList(), KneConstructorKind.NONE)
     }
 
     private fun buildMethod(
@@ -504,39 +668,35 @@ class RustdocJsonParser {
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
-        isMutating: Boolean = false,
+        receiverKind: KneReceiverKind = KneReceiverKind.NONE,
         docs: String? = null,
+        ownerType: KneType? = null,
     ): KneFunction? {
         val name = methodItem.get("name").safeString() ?: return null
-        val inner = methodItem.getAsJsonObject("inner").getAsJsonObject("function")
-        // Skip if has unresolved generics
-        if (hasUnresolvedGenerics(inner.getAsJsonObject("generics"))) return null
+        val inner = methodItem.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return null
+        val genericTypes = resolveGenericMappings(inner.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, ownerType)
+        if (hasUnsupportedGenerics(inner.getAsJsonObject("generics"), genericTypes)) return null
 
         val sig = inner.getAsJsonObject("sig")
         val inputs = sig.getAsJsonArray("inputs")
-        // Skip the &self/&mut self param
-        val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses, skipSelf = true)
-        val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses)?.type ?: KneType.UNIT
+        val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses, genericTypes, ownerType, skipSelf = hasSelfParam(inputs))
+        val returnResolved = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, ownerType)
+        val returnType = returnResolved?.type ?: KneType.UNIT
 
-        // Detect @kne:suspend annotation in rustdoc comments
         val isSuspend = docs?.contains("@kne:suspend") == true
-
-        // Detect @kne:flow(Type) annotation in rustdoc comments
         val flowMatch = docs?.let { Regex("@kne:flow\\((\\w+)\\)").find(it) }
         val actualReturnType = if (flowMatch != null) {
-            val elemTypeName = flowMatch.groupValues[1]
-            val elemType = when (elemTypeName) {
-                "Int" -> KneType.INT
-                "Long" -> KneType.LONG
-                "Double" -> KneType.DOUBLE
-                "Float" -> KneType.FLOAT
-                "Boolean" -> KneType.BOOLEAN
-                "String" -> KneType.STRING
-                "Byte" -> KneType.BYTE
-                "Short" -> KneType.SHORT
-                else -> KneType.INT
+            when (flowMatch.groupValues[1]) {
+                "Int" -> KneType.FLOW(KneType.INT)
+                "Long" -> KneType.FLOW(KneType.LONG)
+                "Double" -> KneType.FLOW(KneType.DOUBLE)
+                "Float" -> KneType.FLOW(KneType.FLOAT)
+                "Boolean" -> KneType.FLOW(KneType.BOOLEAN)
+                "String" -> KneType.FLOW(KneType.STRING)
+                "Byte" -> KneType.FLOW(KneType.BYTE)
+                "Short" -> KneType.FLOW(KneType.SHORT)
+                else -> KneType.FLOW(KneType.INT)
             }
-            KneType.FLOW(elemType)
         } else {
             returnType
         }
@@ -545,16 +705,23 @@ class RustdocJsonParser {
             name = name,
             params = params,
             returnType = actualReturnType,
-            isMutating = isMutating,
             isSuspend = isSuspend,
+            isMutating = receiverKind == KneReceiverKind.BORROWED_MUT,
+            receiverKind = receiverKind,
+            canFail = isResultType(sig.get("output")),
+            returnsBorrowed = returnResolved?.isBorrowed == true,
+            returnRustType = returnResolved?.rustType,
+            isUnsafe = inner.getAsJsonObject("header")?.get("is_unsafe")?.asBoolean == true,
         )
     }
 
     private fun buildParams(
-        inputs: com.google.gson.JsonArray,
+        inputs: JsonArray,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
         skipSelf: Boolean = false,
     ): List<KneParam> {
         val params = mutableListOf<KneParam>()
@@ -562,148 +729,159 @@ class RustdocJsonParser {
             val arr = input.asJsonArray
             val paramName = arr[0].asString
             if (skipSelf && paramName == "self") continue
-            val paramTypeJson = arr[1]
-            val resolved = resolveTypeWithBorrow(paramTypeJson, knownStructs, knownEnums, knownDataClasses) ?: continue
-            params.add(KneParam(paramName, resolved.type, isBorrowed = resolved.isBorrowed))
+            val resolved = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: continue
+            params.add(
+                KneParam(
+                    name = paramName,
+                    type = resolved.type,
+                    isBorrowed = resolved.isBorrowed,
+                    rustType = resolved.rustType,
+                )
+            )
         }
         return params
     }
 
-    /**
-     * Top-level type resolution that tracks whether the original type was a `borrowed_ref`.
-     * This is the entry point; internal recursion uses [resolveType].
-     */
     private fun resolveTypeWithBorrow(
         typeJson: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
     ): ResolvedType? {
         if (typeJson == null || typeJson.isJsonNull) return null
         val obj = typeJson.asJsonObject
 
         if (obj.has("borrowed_ref")) {
             val ref = obj.getAsJsonObject("borrowed_ref")
-            val innerType = ref.getAsJsonObject("type")
-            val resolved = resolveType(innerType, knownStructs, knownEnums, knownDataClasses) ?: return null
-            return ResolvedType(resolved, isBorrowed = true)
+            val innerResolved = resolveType(ref.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+            val lifetime = ref.get("lifetime").safeString()
+            val rustType = innerResolved.rustType?.let {
+                if (lifetime != null) "&$lifetime $it" else "&$it"
+            }
+            return ResolvedType(type = innerResolved.type, isBorrowed = true, rustType = rustType)
         }
 
-        val resolved = resolveType(obj, knownStructs, knownEnums, knownDataClasses) ?: return null
-        return ResolvedType(resolved, isBorrowed = false)
+        return resolveType(obj, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
     }
 
-    /**
-     * Resolves a rustdoc JSON type to a [KneType].
-     * Returns null if the type is not mappable.
-     * Does NOT track borrow status — use [resolveTypeWithBorrow] for that.
-     */
     private fun resolveType(
         typeJson: JsonElement?,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
-    ): KneType? {
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): ResolvedType? {
         if (typeJson == null || typeJson.isJsonNull) return null
         val obj = typeJson.asJsonObject
 
-        // Primitive types
         if (obj.has("primitive")) {
-            return when (obj.get("primitive").asString) {
+            val primitive = obj.get("primitive").asString
+            val type = when (primitive) {
                 "i32", "u32" -> KneType.INT
-                "i64", "u64" -> KneType.LONG
+                "i64", "u64", "usize", "isize" -> KneType.LONG
                 "f64" -> KneType.DOUBLE
                 "f32" -> KneType.FLOAT
                 "bool" -> KneType.BOOLEAN
                 "i8", "u8" -> KneType.BYTE
                 "i16", "u16" -> KneType.SHORT
                 "str" -> KneType.STRING
-                "usize", "isize" -> KneType.LONG
                 else -> null
-            }
+            } ?: return null
+            return ResolvedType(type = type, rustType = primitive)
         }
 
-        // Borrowed reference (&T, &mut T) — when reached via internal recursion
         if (obj.has("borrowed_ref")) {
-            val ref = obj.getAsJsonObject("borrowed_ref")
-            val innerType = ref.getAsJsonObject("type")
-            if (innerType.has("primitive") && innerType.get("primitive").asString == "str") {
-                return KneType.STRING
-            }
-            return resolveType(innerType, knownStructs, knownEnums, knownDataClasses)
+            return resolveTypeWithBorrow(obj, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
         }
 
-        // Resolved path (named types: String, Vec, Option, HashMap, user structs/enums)
         if (obj.has("resolved_path")) {
             val rp = obj.getAsJsonObject("resolved_path")
             val path = rp.get("path").asString
-            val id = rp.get("id")?.asInt
+            val pathSegment = lastPathSegment(path)
+            val id = rp.get("id")?.takeIf { !it.isJsonNull }?.asInt
             val args = rp.get("args")
 
-            return when (path) {
-                "String" -> KneType.STRING
+            return when (pathSegment) {
+                "String" -> ResolvedType(KneType.STRING, rustType = pathSegment)
+                "PathBuf", "Path", "OsStr", "OsString" -> ResolvedType(KneType.STRING, rustType = path)
+
+                "Result" -> extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
 
                 "Vec" -> {
-                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
-                        ?: return null
-                    if (elemType == KneType.BYTE) KneType.BYTE_ARRAY
-                    else KneType.LIST(elemType)
+                    val elem = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+                    val rustType = "Vec<${elem.rustType ?: renderRustType(elem.type)}>"
+                    if (elem.type == KneType.BYTE) ResolvedType(KneType.BYTE_ARRAY, rustType = rustType)
+                    else ResolvedType(KneType.LIST(elem.type), rustType = rustType)
                 }
 
                 "Option" -> {
-                    val innerType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
-                        ?: return null
-                    KneType.NULLABLE(innerType)
+                    val inner = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+                    ResolvedType(KneType.NULLABLE(inner.type), rustType = "Option<${inner.rustType ?: renderRustType(inner.type)}>")
                 }
 
                 "HashSet", "BTreeSet" -> {
-                    val elemType = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses)
-                        ?: return null
-                    KneType.SET(elemType)
+                    val elem = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+                    ResolvedType(KneType.SET(elem.type), rustType = "$pathSegment<${elem.rustType ?: renderRustType(elem.type)}>")
                 }
 
                 "HashMap", "BTreeMap" -> {
-                    val (keyType, valType) = extractTwoGenericArgs(args, knownStructs, knownEnums, knownDataClasses)
+                    val (keyType, valueType) = extractTwoGenericArgs(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                         ?: return null
-                    KneType.MAP(keyType, valType)
+                    ResolvedType(
+                        KneType.MAP(keyType.type, valueType.type),
+                        rustType = "$pathSegment<${keyType.rustType ?: renderRustType(keyType.type)}, ${valueType.rustType ?: renderRustType(valueType.type)}>",
+                    )
                 }
 
                 else -> {
-                    // Check if it's a known data class, enum, or regular struct
-                    if (id != null && knownEnums.containsKey(id)) {
-                        val name = knownEnums[id]!!
-                        if (id in currentSealedEnumIds) {
-                            KneType.SEALED_ENUM("$currentCrateName.$name", name)
-                        } else {
-                            KneType.ENUM("$currentCrateName.$name", name)
+                    when {
+                        id != null && knownEnums.containsKey(id) -> {
+                            val name = knownEnums[id]!!
+                            if (id in currentSealedEnumIds) {
+                                ResolvedType(KneType.SEALED_ENUM("$currentCrateName.$name", name), rustType = name)
+                            } else {
+                                ResolvedType(KneType.ENUM("$currentCrateName.$name", name), rustType = name)
+                            }
                         }
-                    } else if (id != null && knownDataClasses.containsKey(id)) {
-                        val dc = knownDataClasses[id]!!
-                        KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields)
-                    } else if (id != null && knownStructs.containsKey(id)) {
-                        val name = knownStructs[id]!!
-                        KneType.OBJECT("$currentCrateName.$name", name)
-                    } else {
-                        null
+
+                        id != null && knownDataClasses.containsKey(id) -> {
+                            val dc = knownDataClasses[id]!!
+                            ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = dc.simpleName)
+                        }
+
+                        id != null && knownStructs.containsKey(id) -> {
+                            val name = knownStructs[id]!!
+                            ResolvedType(KneType.OBJECT("$currentCrateName.$name", name), rustType = name)
+                        }
+
+                        else -> {
+                            val simpleName = pathSegment
+                            val fqName = path.replace("::", ".")
+                            val rustType = renderResolvedPathType(path, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                            val opaque = recordOpaqueClass(simpleName, fqName, rustType)
+                            ResolvedType(KneType.OBJECT(fqName, opaque.simpleName), rustType = rustType)
+                        }
                     }
                 }
             }
         }
 
-        // Slice (&[T]) — typically reached via borrowed_ref → slice
         if (obj.has("slice")) {
-            val elemType = resolveType(obj.getAsJsonObject("slice"), knownStructs, knownEnums) ?: return null
-            return if (elemType == KneType.BYTE) KneType.BYTE_ARRAY else KneType.LIST(elemType)
+            val elem = resolveType(obj.get("slice"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+            val rustType = "[${elem.rustType ?: renderRustType(elem.type)}]"
+            return if (elem.type == KneType.BYTE) ResolvedType(KneType.BYTE_ARRAY, rustType = rustType)
+            else ResolvedType(KneType.LIST(elem.type), rustType = rustType)
         }
 
-        // Tuple (empty tuple = unit)
         if (obj.has("tuple")) {
             val elems = obj.getAsJsonArray("tuple")
-            if (elems.size() == 0) return KneType.UNIT
-            return null // Non-empty tuples not supported in v1
+            if (elems.size() == 0) return ResolvedType(KneType.UNIT, rustType = "()")
+            return null
         }
 
-        // Function pointer: fn(T) -> R
         if (obj.has("function_pointer")) {
             val fp = obj.getAsJsonObject("function_pointer")
             val sig = fp.getAsJsonObject("sig")
@@ -711,39 +889,38 @@ class RustdocJsonParser {
             val paramTypes = mutableListOf<KneType>()
             for (input in inputs) {
                 val arr = input.asJsonArray
-                val paramType = resolveType(arr[1], knownStructs, knownEnums, knownDataClasses) ?: return null
-                paramTypes.add(paramType)
+                val paramType = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+                paramTypes.add(paramType.type)
             }
-            val output = sig.get("output")
-            val returnType = if (output == null || output.isJsonNull) KneType.UNIT
-                else resolveType(output.asJsonObject, knownStructs, knownEnums, knownDataClasses) ?: return null
-            return KneType.FUNCTION(paramTypes, returnType)
+            val output = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+            return ResolvedType(KneType.FUNCTION(paramTypes, output?.type ?: KneType.UNIT), rustType = "fn")
         }
 
-        // dyn Trait (for &dyn Fn(T) -> R, reached via borrowed_ref recursion)
         if (obj.has("dyn_trait")) {
             val traits = obj.getAsJsonObject("dyn_trait").getAsJsonArray("traits") ?: return null
             for (traitEntry in traits) {
                 val traitObj = traitEntry.asJsonObject.getAsJsonObject("trait") ?: continue
-                val path = traitObj.get("path")?.asString ?: continue
+                val path = lastPathSegment(traitObj.get("path")?.asString ?: continue)
                 if (path !in listOf("Fn", "FnMut", "FnOnce")) continue
                 val args = traitObj.getAsJsonObject("args") ?: continue
-                if (!args.has("parenthesized")) continue
-                val paren = args.getAsJsonObject("parenthesized")
-                val inputs = paren.getAsJsonArray("inputs") ?: return null
-                val paramTypes = inputs.mapNotNull { resolveType(it, knownStructs, knownEnums, knownDataClasses) }
+                val parenthesized = args.getAsJsonObject("parenthesized") ?: continue
+                val inputs = parenthesized.getAsJsonArray("inputs") ?: continue
+                val paramTypes = inputs.mapNotNull {
+                    resolveTypeWithBorrow(it, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)?.type
+                }
                 if (paramTypes.size != inputs.size()) return null
-                val output = paren.get("output")
-                val returnType = if (output == null || output.isJsonNull) KneType.UNIT
-                    else resolveType(output.asJsonObject, knownStructs, knownEnums, knownDataClasses) ?: return null
-                return KneType.FUNCTION(paramTypes, returnType)
+                val output = resolveTypeWithBorrow(parenthesized.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                return ResolvedType(KneType.FUNCTION(paramTypes, output?.type ?: KneType.UNIT), rustType = path)
             }
             return null
         }
 
-        // Generic "Self" → skip (handled by caller context)
         if (obj.has("generic")) {
-            return null
+            val name = obj.get("generic").asString
+            if (name == "Self" && selfType != null) {
+                return ResolvedType(selfType, rustType = renderRustType(selfType))
+            }
+            return genericTypes[name]
         }
 
         return null
@@ -754,14 +931,17 @@ class RustdocJsonParser {
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
-    ): KneType? {
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): ResolvedType? {
         if (args == null || args.isJsonNull) return null
         val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
         val argsList = ab.getAsJsonArray("args") ?: return null
         if (argsList.size() == 0) return null
-        val firstArg = argsList[0].asJsonObject
-        if (firstArg.has("type")) {
-            return resolveType(firstArg.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses)
+        val firstArg = argsList[0]
+        if (!firstArg.isJsonObject) return null
+        if (firstArg.asJsonObject.has("type")) {
+            return resolveTypeWithBorrow(firstArg.asJsonObject.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
         }
         return null
     }
@@ -771,49 +951,47 @@ class RustdocJsonParser {
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
-    ): Pair<KneType, KneType>? {
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): Pair<ResolvedType, ResolvedType>? {
         if (args == null || args.isJsonNull) return null
         val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
         val argsList = ab.getAsJsonArray("args") ?: return null
         if (argsList.size() < 2) return null
-        val first = argsList[0].asJsonObject
-        val second = argsList[1].asJsonObject
-        val keyType = if (first.has("type")) resolveType(first.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses) else null
-        val valType = if (second.has("type")) resolveType(second.getAsJsonObject("type"), knownStructs, knownEnums, knownDataClasses) else null
-        if (keyType == null || valType == null) return null
-        return keyType to valType
+        val first = argsList[0]
+        val second = argsList[1]
+        if (!first.isJsonObject || !second.isJsonObject) return null
+        val keyType = if (first.asJsonObject.has("type")) resolveTypeWithBorrow(first.asJsonObject.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) else null
+        val valueType = if (second.asJsonObject.has("type")) resolveTypeWithBorrow(second.asJsonObject.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) else null
+        if (keyType == null || valueType == null) return null
+        return keyType to valueType
     }
 
-    /**
-     * Detects get_/set_ accessor patterns among [methods] and converts them to [KneProperty] entries.
-     *
-     * Rules:
-     * - `get_X()` with no params and a simple return type (primitives, STRING, BOOLEAN, ENUM)
-     *   becomes a read-only property `X`.
-     * - If a matching `set_X(value: T)` exists (1 param, same type), the property becomes mutable.
-     * - OBJECT and LIST return types are skipped (too complex for now).
-     * - Matched get_/set_ methods are removed from the returned methods list.
-     */
+    private fun isResultType(typeJson: JsonElement?): Boolean {
+        if (typeJson == null || typeJson.isJsonNull) return false
+        val obj = typeJson.asJsonObject
+        if (obj.has("borrowed_ref")) {
+            return isResultType(obj.getAsJsonObject("borrowed_ref").get("type"))
+        }
+        val resolvedPath = obj.getAsJsonObject("resolved_path") ?: return false
+        return lastPathSegment(resolvedPath.get("path")?.asString ?: return false) == "Result"
+    }
+
     private fun extractProperties(methods: List<KneFunction>): Pair<List<KneFunction>, List<KneProperty>> {
-        val getters = mutableMapOf<String, KneFunction>() // propName → getter fn
-        val setters = mutableMapOf<String, KneFunction>() // propName → setter fn
+        val getters = mutableMapOf<String, KneFunction>()
+        val setters = mutableMapOf<String, KneFunction>()
 
         for (fn in methods) {
             if (fn.name.startsWith("get_") && fn.params.isEmpty()) {
                 val propName = fn.name.removePrefix("get_")
-                // Only simple types become properties
-                if (isSimplePropertyType(fn.returnType)) {
-                    getters[propName] = fn
-                }
+                if (isSimplePropertyType(fn.returnType)) getters[propName] = fn
             } else if (fn.name.startsWith("set_") && fn.params.size == 1 && fn.returnType == KneType.UNIT) {
-                val propName = fn.name.removePrefix("set_")
-                setters[propName] = fn
+                setters[fn.name.removePrefix("set_")] = fn
             }
         }
 
         val properties = mutableListOf<KneProperty>()
-        val consumedMethods = mutableSetOf<String>() // fn names consumed as properties
-
+        val consumedMethods = mutableSetOf<String>()
         for ((propName, getter) in getters) {
             val setter = setters[propName]
             val mutable = setter != null && setter.params[0].type == getter.returnType
@@ -822,15 +1000,198 @@ class RustdocJsonParser {
             if (mutable) consumedMethods.add(setter!!.name)
         }
 
-        val remainingMethods = methods.filter { it.name !in consumedMethods }
-        return remainingMethods to properties
+        return methods.filter { it.name !in consumedMethods } to properties
     }
 
-    /** Returns true for types that are simple enough to expose as properties. */
     private fun isSimplePropertyType(type: KneType): Boolean = when (type) {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
         KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> true
         is KneType.ENUM -> true
         else -> false
+    }
+
+    private fun isDataClassFieldSupported(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING,
+        KneType.UNIT, KneType.BYTE_ARRAY -> true
+        is KneType.ENUM -> true
+        is KneType.NULLABLE -> isDataClassFieldSupported(type.inner)
+        is KneType.LIST -> isDataClassFieldSupported(type.elementType)
+        is KneType.SET -> isDataClassFieldSupported(type.elementType)
+        is KneType.MAP -> isDataClassFieldSupported(type.keyType) && isDataClassFieldSupported(type.valueType)
+        is KneType.DATA_CLASS -> type.fields.all { isDataClassFieldSupported(it.type) }
+        else -> false
+    }
+
+    private fun recordOpaqueClass(simpleName: String, fqName: String, rustTypeName: String): KneClass {
+        return encounteredOpaqueClasses.getOrPut(fqName) {
+            val uniqueSimpleName = uniqueOpaqueSimpleName(simpleName, fqName)
+            KneClass(
+                simpleName = uniqueSimpleName,
+                fqName = fqName,
+                rustTypeName = rustTypeName,
+                constructor = KneConstructor(emptyList(), KneConstructorKind.NONE),
+                methods = emptyList(),
+                properties = emptyList(),
+                isOpaque = true,
+            )
+        }
+    }
+
+    private fun uniqueOpaqueSimpleName(baseName: String, fqName: String): String {
+        val reserved = reservedTopLevelTypeNames + encounteredOpaqueClasses.values.map { it.simpleName }
+        return uniqueOpaqueSimpleName(baseName, fqName, reserved)
+    }
+
+    private fun uniqueOpaqueSimpleName(baseName: String, fqName: String, reserved: Set<String>): String {
+        if (baseName !in reserved) return baseName
+
+        val segments = fqName.split('.', ':').filter { it.isNotBlank() }
+        for (prefixStart in (segments.size - 2) downTo 0) {
+            val prefix = segments.subList(prefixStart, segments.size - 1)
+                .joinToString("") { it.replaceFirstChar(Char::uppercaseChar) }
+            val candidate = prefix + baseName
+            if (candidate !in reserved) return candidate
+        }
+        val opaqueCandidate = "Opaque$baseName"
+        if (opaqueCandidate !in reserved) return opaqueCandidate
+        return "Opaque" + fqName.split('.', ':')
+            .filter { it.isNotBlank() }
+            .joinToString("") { it.replaceFirstChar(Char::uppercaseChar) }
+    }
+
+    private fun renderResolvedPathType(
+        path: String,
+        args: JsonElement?,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): String {
+        if (args == null || args.isJsonNull) return path
+        val angle = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return path
+        val renderedArgs = angle.getAsJsonArray("args")?.mapNotNull { arg ->
+            if (!arg.isJsonObject) return@mapNotNull null
+            val argObj = arg.asJsonObject
+            when {
+                argObj.has("lifetime") -> argObj.get("lifetime").safeString()
+                argObj.has("type") -> resolveTypeWithBorrow(
+                    argObj.get("type"),
+                    knownStructs,
+                    knownEnums,
+                    knownDataClasses,
+                    genericTypes,
+                    selfType,
+                )?.let { it.rustType ?: renderRustType(it.type) }
+                    ?: renderRawType(argObj.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                else -> null
+            }
+        } ?: return path
+        if (renderedArgs.isEmpty()) return path
+        return "$path<${renderedArgs.joinToString(", ")}>"
+    }
+
+    private fun renderRawType(
+        typeJson: JsonElement?,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): String? {
+        if (typeJson == null || typeJson.isJsonNull) return null
+        val obj = typeJson.asJsonObject
+
+        return when {
+            obj.has("primitive") -> obj.get("primitive").asString
+
+            obj.has("borrowed_ref") -> {
+                val ref = obj.getAsJsonObject("borrowed_ref")
+                val lifetime = ref.get("lifetime").safeString()?.let { "$it " } ?: ""
+                renderRawType(ref.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                    ?.let { "&$lifetime$it" }
+            }
+
+            obj.has("resolved_path") -> {
+                val rp = obj.getAsJsonObject("resolved_path")
+                renderResolvedPathType(
+                    rp.get("path").asString,
+                    rp.get("args"),
+                    knownStructs,
+                    knownEnums,
+                    knownDataClasses,
+                    genericTypes,
+                    selfType,
+                )
+            }
+
+            obj.has("dyn_trait") -> {
+                val dynTrait = obj.getAsJsonObject("dyn_trait")
+                val traitNames = dynTrait.getAsJsonArray("traits")?.mapNotNull { traitEntry ->
+                    traitEntry.asJsonObject
+                        .getAsJsonObject("trait")
+                        ?.get("path")
+                        ?.safeString()
+                } ?: emptyList()
+                if (traitNames.isEmpty()) null else {
+                    val lifetime = dynTrait.get("lifetime").safeString()?.let { " + $it" } ?: ""
+                    "dyn ${traitNames.joinToString(" + ")}$lifetime"
+                }
+            }
+
+            obj.has("generic") -> {
+                val name = obj.get("generic").asString
+                when {
+                    name == "Self" && selfType != null -> renderRustType(selfType)
+                    name in genericTypes -> genericTypes[name]?.rustType ?: genericTypes[name]?.type?.let(::renderRustType)
+                    else -> name
+                }
+            }
+
+            obj.has("tuple") -> {
+                val elems = obj.getAsJsonArray("tuple")
+                if (elems.size() == 0) {
+                    "()"
+                } else {
+                    elems.joinToString(", ", "(", ")") {
+                        renderRawType(it, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: "_"
+                    }
+                }
+            }
+
+            obj.has("slice") -> {
+                renderRawType(obj.get("slice"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                    ?.let { "[$it]" }
+            }
+
+            else -> null
+        }
+    }
+
+    private fun lastPathSegment(path: String): String = path.substringAfterLast("::").substringAfterLast('.')
+
+    private fun renderRustType(type: KneType): String = when (type) {
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.BOOLEAN -> "bool"
+        KneType.BYTE -> "i8"
+        KneType.SHORT -> "i16"
+        KneType.STRING -> "String"
+        KneType.UNIT -> "()"
+        is KneType.OBJECT -> type.simpleName
+        is KneType.INTERFACE -> type.simpleName
+        is KneType.ENUM -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        is KneType.NULLABLE -> "Option<${renderRustType(type.inner)}>"
+        is KneType.FUNCTION -> "Fn"
+        is KneType.DATA_CLASS -> type.simpleName
+        KneType.BYTE_ARRAY -> "Vec<u8>"
+        is KneType.LIST -> "Vec<${renderRustType(type.elementType)}>"
+        is KneType.SET -> "HashSet<${renderRustType(type.elementType)}>"
+        is KneType.MAP -> "HashMap<${renderRustType(type.keyType)}, ${renderRustType(type.valueType)}>"
+        is KneType.FLOW -> "Flow"
     }
 }

@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.nucleusnativeaccess.plugin.analysis
 
+import com.google.gson.JsonParser
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.CrateDependency
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.FfmProxyGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.RustBridgeGenerator
@@ -29,13 +30,14 @@ object RustWorkAction {
     ) {
         // Step 1: Resolve Cargo project directory
         val cargoProjectDir = resolveCargoProject(crates, rustProjectDir, libName, logger)
+        val rustdocProjectDir = resolveRustdocProject(crates, cargoProjectDir, logger)
         val crateSrcDir = cargoProjectDir.resolve("src")
 
         // Step 2: Write an empty bridge file so rustdoc doesn't fail
         // The bridge is included via build.rs which points to the Gradle build dir
         rustBridgesDir.mkdirs()
         val bridgeFile = rustBridgesDir.resolve("kne_bridges.rs")
-        if (!bridgeFile.exists()) bridgeFile.writeText("// placeholder\n")
+        bridgeFile.writeText("// placeholder\n")
 
         // Generate build.rs that tells Cargo where to find the bridges
         ensureBuildRs(cargoProjectDir, rustBridgesDir, logger)
@@ -44,7 +46,7 @@ object RustWorkAction {
         ensureLibRsInclude(crateSrcDir, logger)
 
         // Step 3: Run cargo rustdoc to produce JSON
-        val rustdocJson = runCargoRustdoc(cargoProjectDir, libName, logger)
+        val rustdocJson = runCargoRustdoc(rustdocProjectDir, libName, logger)
             ?: throw org.gradle.api.GradleException("Failed to generate rustdoc JSON for '$libName'")
 
         // Step 4: Parse JSON → KneModule
@@ -57,6 +59,8 @@ object RustWorkAction {
             val bridgeCode = RustBridgeGenerator().generate(module)
             bridgeFile.writeText(bridgeCode)
             logger.lifecycle("kne-rust: Generated Rust bridges → ${bridgeFile.absolutePath}")
+        } else {
+            logger.lifecycle("kne-rust: No supported public API found; keeping placeholder bridges")
         }
 
         // Step 5: Generate JVM proxies
@@ -131,6 +135,41 @@ object RustWorkAction {
         return rustProjectDir
     }
 
+    private fun resolveRustdocProject(
+        crates: List<CrateDependency>,
+        cargoProjectDir: File,
+        logger: org.gradle.api.logging.Logger,
+    ): File {
+        val localCrate = crates.singleOrNull { it.path != null }
+        if (localCrate != null) return cargoProjectDir
+
+        val externalCrate = crates.singleOrNull() ?: return cargoProjectDir
+        val sourceDir = resolveDependencySourceDir(cargoProjectDir, externalCrate, logger) ?: return cargoProjectDir
+        logger.lifecycle("kne-rust: Using dependency crate source for rustdoc at ${sourceDir.absolutePath}")
+        return sourceDir
+    }
+
+    private fun resolveDependencySourceDir(
+        cargoProjectDir: File,
+        crate: CrateDependency,
+        logger: org.gradle.api.logging.Logger,
+    ): File? {
+        val cargo = findCargo()
+        val process = ProcessBuilder(cargo, "metadata", "--format-version", "1", "--quiet")
+            .directory(cargoProjectDir)
+            .redirectErrorStream(true)
+            .start()
+
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            logger.warn("kne-rust: cargo metadata failed while resolving '${crate.name}':\n$output")
+            return null
+        }
+
+        return findPackageManifestDir(output, crate)?.parentFile
+    }
+
     private fun ensureBuildRs(cargoDir: File, bridgesDir: File, logger: org.gradle.api.logging.Logger) {
         val buildRs = cargoDir.resolve("build.rs")
         val bridgePath = bridgesDir.resolve("kne_bridges.rs").absolutePath.replace("\\", "/")
@@ -170,7 +209,6 @@ object RustWorkAction {
 
     private fun runCargoRustdoc(cargoDir: File, libName: String, logger: org.gradle.api.logging.Logger): File? {
         val cargo = findCargo()
-        val crateName = libName.replace('-', '_')
 
         val process = ProcessBuilder(
             cargo, "doc", "--no-deps",
@@ -193,7 +231,83 @@ object RustWorkAction {
 
         // Find the JSON file in target/doc/
         val docDir = cargoDir.resolve("target/doc")
-        return docDir.listFiles()?.firstOrNull { it.extension == "json" && it.name.endsWith(".json") }
+        return selectRustdocJson(docDir, cargoDir, libName)
+    }
+
+    internal fun selectRustdocJson(docDir: File, cargoDir: File, libName: String): File? {
+        val jsonFiles = docDir.listFiles()?.filter { it.extension == "json" } ?: return null
+        if (jsonFiles.isEmpty()) return null
+
+        val expectedNames = linkedSetOf<String>()
+        resolveRustdocTargetName(cargoDir)?.let { expectedNames.add(it) }
+        expectedNames.add(libName.replace('-', '_'))
+
+        for (name in expectedNames) {
+            val expected = docDir.resolve("$name.json")
+            if (expected.exists()) return expected
+        }
+
+        return if (jsonFiles.size == 1) {
+            jsonFiles.single()
+        } else {
+            jsonFiles.maxByOrNull { it.lastModified() }
+        }
+    }
+
+    internal fun resolveRustdocTargetName(cargoDir: File): String? {
+        val cargoToml = cargoDir.resolve("Cargo.toml")
+        if (!cargoToml.exists()) return null
+
+        var inPackage = false
+        var inLib = false
+        var packageName: String? = null
+        var libTargetName: String? = null
+
+        cargoToml.forEachLine { rawLine ->
+            val line = rawLine.substringBefore('#').trim()
+            when {
+                line == "[package]" -> {
+                    inPackage = true
+                    inLib = false
+                }
+                line == "[lib]" -> {
+                    inPackage = false
+                    inLib = true
+                }
+                line.startsWith("[") && line.endsWith("]") -> {
+                    inPackage = false
+                    inLib = false
+                }
+                inPackage && line.startsWith("name") -> {
+                    packageName = extractTomlStringValue(line)
+                }
+                inLib && line.startsWith("name") -> {
+                    libTargetName = extractTomlStringValue(line)
+                }
+            }
+        }
+
+        return (libTargetName ?: packageName)?.replace('-', '_')
+    }
+
+    private fun extractTomlStringValue(line: String): String? =
+        Regex("""^\s*\w+\s*=\s*"([^"]+)"""").find(line)?.groupValues?.getOrNull(1)
+
+    internal fun findPackageManifestDir(metadataJson: String, crate: CrateDependency): File? {
+        val jsonStart = metadataJson.indexOf('{')
+        if (jsonStart < 0) return null
+        val root = JsonParser.parseString(metadataJson.substring(jsonStart)).asJsonObject
+        val packages = root.getAsJsonArray("packages") ?: return null
+        for (pkg in packages) {
+            val pkgObj = pkg.asJsonObject
+            val name = pkgObj.get("name")?.asString ?: continue
+            if (name != crate.name) continue
+            val version = pkgObj.get("version")?.asString
+            if (crate.version != null && version != crate.version) continue
+            val manifestPath = pkgObj.get("manifest_path")?.asString ?: continue
+            return File(manifestPath)
+        }
+        return null
     }
 
     private fun findCargo(): String {

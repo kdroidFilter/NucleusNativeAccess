@@ -30,8 +30,9 @@ compose.desktop {
 }
 
 rustImport {
-    libraryName = "rustsysinfo"
+    libraryName = "test"
     jvmPackage = "com.example.rustsysinfo"
     buildType = "release"
-    cratePath("rust-sysinfo", "${projectDir}/rust")
+    crate("sysinfo", "0.38.4")
+//    cratePath("rust-sysinfo", "${projectDir}/rust")
 }

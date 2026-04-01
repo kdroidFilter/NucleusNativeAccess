@@ -218,4 +218,252 @@ class RustdocJsonParserTest {
         val allMethods = module.classes.flatMap { it.methods } + module.functions
         assertTrue(allMethods.none { it.isSuspend })
     }
+
+    @Test
+    fun `ignores generated bridge functions from kne bridges file`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0,
+                  "crate_id": 0,
+                  "name": "sample",
+                  "visibility": "public",
+                  "inner": {
+                    "module": {
+                      "is_crate": true,
+                      "items": [1, 2],
+                      "is_stripped": false
+                    }
+                  }
+                },
+                "1": {
+                  "id": 1,
+                  "crate_id": 0,
+                  "name": "real_api",
+                  "visibility": "public",
+                  "span": {
+                    "filename": "src/lib.rs"
+                  },
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [],
+                        "output": null,
+                        "is_c_variadic": false
+                      },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      }
+                    }
+                  }
+                },
+                "2": {
+                  "id": 2,
+                  "crate_id": 0,
+                  "name": "sample_kne_hasError",
+                  "visibility": "public",
+                  "span": {
+                    "filename": "/tmp/out/kne_bridges.rs"
+                  },
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [],
+                        "output": {
+                          "primitive": "i32"
+                        },
+                        "is_c_variadic": false
+                      },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val parsed = RustdocJsonParser().parse(json, "ffi_name")
+
+        assertEquals(listOf("real_api"), parsed.functions.map { it.name })
+    }
+
+    @Test
+    fun `preserves dyn trait generics in rust type hints and marks unsafe methods`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0,
+                  "crate_id": 0,
+                  "name": "sample",
+                  "visibility": "public",
+                  "inner": {
+                    "module": {
+                      "is_crate": true,
+                      "items": [1, 2],
+                      "is_stripped": false
+                    }
+                  }
+                },
+                "1": {
+                  "id": 1,
+                  "crate_id": 0,
+                  "name": "Builder",
+                  "visibility": "public",
+                  "inner": {
+                    "struct": {
+                      "kind": { "unit": true },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      },
+                      "impls": [2]
+                    }
+                  }
+                },
+                "2": {
+                  "id": 2,
+                  "crate_id": 0,
+                  "name": null,
+                  "visibility": "default",
+                  "inner": {
+                    "impl": {
+                      "is_unsafe": false,
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      },
+                      "provided_trait_methods": [],
+                      "trait": null,
+                      "for": {
+                        "resolved_path": {
+                          "path": "Builder",
+                          "id": 1,
+                          "args": null
+                        }
+                      },
+                      "items": [3, 4],
+                      "is_negative": false,
+                      "is_synthetic": false,
+                      "blanket_impl": null
+                    }
+                  }
+                },
+                "3": {
+                  "id": 3,
+                  "crate_id": 0,
+                  "name": "with_menu",
+                  "visibility": "public",
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [
+                          ["self", { "generic": "Self" }],
+                          ["menu", {
+                            "resolved_path": {
+                              "path": "Box",
+                              "id": 9,
+                              "args": {
+                                "angle_bracketed": {
+                                  "args": [
+                                    {
+                                      "type": {
+                                        "dyn_trait": {
+                                          "traits": [
+                                            {
+                                              "trait": {
+                                                "path": "menu::ContextMenu",
+                                                "id": 10,
+                                                "args": null
+                                              },
+                                              "generic_params": []
+                                            }
+                                          ],
+                                          "lifetime": null
+                                        }
+                                      }
+                                    }
+                                  ],
+                                  "constraints": []
+                                }
+                              }
+                            }
+                          }]
+                        ],
+                        "output": { "generic": "Self" },
+                        "is_c_variadic": false
+                      },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      },
+                      "header": {
+                        "is_const": false,
+                        "is_unsafe": false,
+                        "is_async": false,
+                        "abi": "Rust"
+                      },
+                      "has_body": true
+                    }
+                  }
+                },
+                "4": {
+                  "id": 4,
+                  "crate_id": 0,
+                  "name": "app_indicator",
+                  "visibility": "public",
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [
+                          [
+                            "self",
+                            {
+                              "borrowed_ref": {
+                                "lifetime": null,
+                                "is_mutable": false,
+                                "type": { "generic": "Self" }
+                              }
+                            }
+                          ]
+                        ],
+                        "output": null,
+                        "is_c_variadic": false
+                      },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      },
+                      "header": {
+                        "is_const": false,
+                        "is_unsafe": true,
+                        "is_async": false,
+                        "abi": "Rust"
+                      },
+                      "has_body": true
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val parsed = RustdocJsonParser().parse(json, "sample")
+        val builder = parsed.classes.first { it.simpleName == "Builder" }
+
+        val withMenu = builder.methods.first { it.name == "with_menu" }
+        assertTrue(withMenu.params[0].type is KneType.OBJECT)
+        assertEquals("Box", (withMenu.params[0].type as KneType.OBJECT).simpleName)
+        assertEquals("Box<dyn menu::ContextMenu>", withMenu.params[0].rustType)
+
+        val appIndicator = builder.methods.first { it.name == "app_indicator" }
+        assertTrue(appIndicator.isUnsafe)
+    }
 }

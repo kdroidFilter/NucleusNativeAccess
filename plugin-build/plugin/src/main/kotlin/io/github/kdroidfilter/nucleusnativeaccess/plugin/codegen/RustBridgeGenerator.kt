@@ -116,36 +116,23 @@ class RustBridgeGenerator {
 
     private fun StringBuilder.appendClass(cls: KneClass, prefix: String) {
         val className = cls.simpleName
+        val rustTypeName = cls.rustTypeName
         val sym = "${prefix}_${className}"
 
-        // Constructor
-        appendLine("#[no_mangle]")
-        append("pub extern \"C\" fn ${sym}_new(")
-        append(cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${rustCType(p.type)}" })
-        appendLine(") -> i64 {")
-        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
-        appendLine("    match catch_unwind(|| {")
-        // Convert params
-        for (p in cls.constructor.params) {
-            appendParamConversion(p)
+        if (cls.constructor.kind != KneConstructorKind.NONE) {
+            appendConstructor(cls, prefix)
         }
-        append("        let obj = $className::new(")
-        append(cls.constructor.params.joinToString(", ") { p -> convertedCallArg(p) })
-        appendLine(");")
-        appendLine("        Box::into_raw(Box::new(obj)) as i64")
-        appendLine("    }) {")
-        appendLine("        Ok(h) => h,")
-        appendLine("        Err(e) => { kne_set_panic_error(e); 0 }")
-        appendLine("    }")
-        appendLine("}")
-        appendLine()
 
         // Dispose
         appendLine("#[no_mangle]")
         appendLine("pub extern \"C\" fn ${sym}_dispose(handle: i64) {")
-        appendLine("    if handle != 0 {")
-        appendLine("        unsafe { drop(Box::from_raw(handle as *mut $className)); }")
-        appendLine("    }")
+        if (cls.isOpaque) {
+            appendLine("    let _ = handle;")
+        } else {
+            appendLine("    if handle != 0 {")
+            appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustTypeName)); }")
+            appendLine("    }")
+        }
         appendLine("}")
         appendLine()
 
@@ -154,10 +141,50 @@ class RustBridgeGenerator {
             appendMethod(method, cls, prefix)
         }
 
+        for (method in cls.companionMethods) {
+            appendCompanionMethod(method, cls, prefix)
+        }
+
         // Properties
         for (prop in cls.properties) {
             appendPropertyBridges(prop, cls, prefix)
         }
+    }
+
+    private fun StringBuilder.appendConstructor(cls: KneClass, prefix: String) {
+        val className = cls.simpleName
+        val sym = "${prefix}_${className}"
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_new(")
+        append(cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${rustCType(p.type)}" })
+        appendLine(") -> i64 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (p in cls.constructor.params) {
+            appendParamConversion(p)
+        }
+        val ctorExpr = when (cls.constructor.kind) {
+            KneConstructorKind.FUNCTION -> {
+                val args = cls.constructor.params.joinToString(", ") { p -> convertedCallArg(p) }
+                "$className::new($args)"
+            }
+            KneConstructorKind.STRUCT_LITERAL -> {
+                val args = cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${convertedCallArg(p)}" }
+                "$className { $args }"
+            }
+            KneConstructorKind.NONE -> error("unreachable")
+        }
+        if (cls.constructor.canFail) {
+            appendFallibleReturnHandling(ctorExpr, KneType.OBJECT(cls.fqName, className))
+        } else {
+            appendValueReturnHandling(ctorExpr, KneType.OBJECT(cls.fqName, className))
+        }
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
     }
 
     private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
@@ -169,6 +196,7 @@ class RustBridgeGenerator {
             appendSuspendMethod(fn, cls, prefix)
             return
         }
+        if (!isSupportedReturnType(fn.returnType)) return
         val sym = "${prefix}_${cls.simpleName}_${fn.name}"
         val needsBufOutput = needsOutputBuffer(fn.returnType)
 
@@ -207,16 +235,80 @@ class RustBridgeGenerator {
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-        if (fn.isMutating) {
-            appendLine("        let obj = unsafe { &mut *(handle as *mut ${cls.simpleName}) };")
-        } else {
-            appendLine("        let obj = unsafe { &*(handle as *const ${cls.simpleName}) };")
-        }
+        appendReceiverBinding(fn, cls.rustTypeName)
         for (p in fn.params) {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        appendReturnHandling("obj.${fn.name}($callArgs)", fn.returnType)
+        val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
+        if (fn.canFail) {
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        } else {
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        }
+        appendLine("    })) {")
+        if (fn.returnType is KneType.DATA_CLASS) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
+        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendCompanionMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        if (!isSupportedReturnType(fn.returnType)) return
+        val sym = "${prefix}_${cls.simpleName}_companion_${fn.name}"
+        val needsBuf = needsOutputBuffer(fn.returnType)
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(")
+        val allParams = mutableListOf<String>()
+        for (p in fn.params) {
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        if (needsBuf) {
+            allParams.add("out_buf: *mut u8")
+            allParams.add("out_buf_len: i32")
+        }
+        if (fn.returnType is KneType.DATA_CLASS) {
+            val dc = fn.returnType as KneType.DATA_CLASS
+            for (field in dc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        allParams.add("out_${field.name}: *mut u8")
+                        allParams.add("out_${field.name}_len: i32")
+                    }
+                    else -> allParams.add("out_${field.name}: *mut ${rustCType(field.type)}")
+                }
+            }
+        }
+        append(allParams.joinToString(", "))
+        appendLine(") -> ${rustCReturnType(fn.returnType)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (p in fn.params) {
+            appendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        val expr = wrapCallForSafety("${cls.simpleName}::${fn.name}($callArgs)", fn.isUnsafe)
+        if (fn.canFail) {
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        } else {
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        }
         appendLine("    })) {")
         if (fn.returnType is KneType.DATA_CLASS) {
             appendLine("        Ok(_) => {},")
@@ -230,6 +322,7 @@ class RustBridgeGenerator {
     }
 
     private fun StringBuilder.appendPropertyBridges(prop: KneProperty, cls: KneClass, prefix: String) {
+        if (!isSupportedReturnType(prop.type)) return
         val className = cls.simpleName
         val sym = "${prefix}_${className}"
         val needsBuf = needsOutputBuffer(prop.type)
@@ -241,8 +334,8 @@ class RustBridgeGenerator {
         appendLine(") -> ${rustCReturnType(prop.type)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-        appendLine("        let obj = unsafe { &*(handle as *const $className) };")
-        appendReturnHandling("obj.get_${prop.name}()", prop.type)
+        appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
+        appendValueReturnHandling("obj.get_${prop.name}()", prop.type)
         appendLine("    })) {")
         appendLine("        Ok(v) => v,")
         appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(prop.type)} }")
@@ -259,7 +352,7 @@ class RustBridgeGenerator {
             appendLine(") {")
             appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
             appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-            appendLine("        let obj = unsafe { &mut *(handle as *mut $className) };")
+            appendLine("        let obj = unsafe { &mut *(handle as *mut ${cls.rustTypeName}) };")
             appendParamConversion(param)
             val callArg = convertedParamName(param)
             appendLine("        obj.set_${prop.name}($callArg);")
@@ -272,74 +365,227 @@ class RustBridgeGenerator {
         }
     }
 
+    /** Check if the return type is fully supported by the Rust bridge generator. */
+    private fun isSupportedReturnType(type: KneType): Boolean = when (type) {
+        is KneType.MAP -> false
+        is KneType.SET -> false
+        is KneType.NULLABLE -> when (type.inner) {
+            is KneType.DATA_CLASS, is KneType.LIST, is KneType.SET, is KneType.MAP -> false
+            else -> true
+        }
+        else -> true
+    }
+
     private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
         KneType.STRING, KneType.BYTE_ARRAY -> true
         is KneType.LIST -> true
-        is KneType.NULLABLE -> (type as KneType.NULLABLE).inner == KneType.STRING
+        is KneType.NULLABLE -> type.inner == KneType.STRING
         is KneType.DATA_CLASS -> false // Data class returns use per-field out-params, not a single buffer
         else -> false
     }
 
     private fun StringBuilder.appendReturnHandling(expr: String, returnType: KneType) {
+        appendValueReturnHandling(expr, returnType)
+    }
+
+    private fun StringBuilder.appendFallibleReturnHandling(
+        expr: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+    ) {
+        appendLine("        match $expr {")
+        appendLine("            Ok(result) => {")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "            ")
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_error(e.to_string());")
+        appendLine("                ${defaultReturnValue(returnType)}")
+        appendLine("            }")
+        appendLine("        }")
+    }
+
+    private fun StringBuilder.appendValueReturnHandling(
+        expr: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+    ) {
+        appendLine("        let result = $expr;")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "        ")
+    }
+
+    private fun StringBuilder.appendValueReturnFromBinding(
+        binding: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+        indent: String = "        ",
+    ) {
         when (returnType) {
             KneType.STRING -> {
-                appendLine("        let result = $expr;")
-                appendStringOutput("result")
+                appendStringOutput(binding, indent, returnRustType)
             }
             KneType.BYTE_ARRAY -> {
-                appendLine("        let result = $expr;")
-                appendLine("        let len = result.len() as i32;")
-                appendLine("        if len <= out_buf_len {")
-                appendLine("            unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), out_buf, result.len()); }")
-                appendLine("        }")
-                appendLine("        len")
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping($binding.as_ptr(), out_buf, $binding.len()); }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
             }
             KneType.UNIT -> {
-                appendLine("        $expr;")
+                appendLine("${indent}()")
             }
             is KneType.DATA_CLASS -> {
-                appendLine("        let result = $expr;")
-                val dc = returnType as KneType.DATA_CLASS
+                val dc = returnType
                 for (field in dc.fields) {
                     when (field.type) {
                         KneType.STRING -> {
-                            appendLine("        let _f_bytes = result.${field.name}.as_bytes();")
-                            appendLine("        if (_f_bytes.len() as i32) < out_${field.name}_len {")
-                            appendLine("            unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
-                            appendLine("            unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
-                            appendLine("        }")
+                            appendLine("${indent}let _f_bytes = $binding.${field.name}.as_bytes();")
+                            appendLine("${indent}if (_f_bytes.len() as i32) < out_${field.name}_len {")
+                            appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
+                            appendLine("${indent}    unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
+                            appendLine("${indent}}")
                         }
                         else -> {
-                            appendLine("        unsafe { *out_${field.name} = result.${field.name}${rustReturnConversion(field.type)}; }")
+                            appendLine("${indent}unsafe { *out_${field.name} = ${rustReturnExpr("$binding.${field.name}", field.type, field.rustType)}; }")
                         }
                     }
                 }
+                appendLine("${indent}()")
             }
-            is KneType.OBJECT, is KneType.SEALED_ENUM -> {
-                appendLine("        let result = $expr;")
-                appendLine("        Box::into_raw(Box::new(result)) as i64")
+            is KneType.OBJECT -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
+            }
+            is KneType.INTERFACE -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
+            }
+            is KneType.SEALED_ENUM -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
             }
             is KneType.NULLABLE -> {
-                appendLine("        let result = $expr;")
-                appendNullableReturn(returnType)
+                appendNullableReturn(returnType, binding, returnsBorrowed, returnRustType, indent)
             }
             is KneType.LIST -> {
-                appendLine("        let result = $expr;")
-                appendLine("        let len = result.len() as i32;")
-                appendLine("        if len <= out_buf_len {")
-                appendLine("            for (i, v) in result.iter().enumerate() {")
-                appendLine("                unsafe { *(out_buf as *mut i32).add(i) = *v as i32; }")
-                appendLine("            }")
-                appendLine("        }")
-                appendLine("        len")
+                appendListReturnFromBinding(binding, returnType, indent, returnRustType)
+            }
+            is KneType.SET -> {
+                appendListReturnFromBinding(binding, KneType.LIST(returnType.elementType), indent, returnRustType)
             }
             else -> {
-                appendLine("        $expr${rustReturnConversion(returnType)}")
+                appendLine("${indent}${rustReturnExpr(binding, returnType, returnRustType, returnsBorrowed)}")
             }
         }
     }
 
     // --- Enum bridges ---
+
+    private fun StringBuilder.appendListReturnFromBinding(binding: String, listType: KneType.LIST, indent: String, returnRustType: String? = null) {
+        val elemType = listType.elementType
+        when (elemType) {
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                // Box each element as i64 handle
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.STRING -> {
+                // Serialize strings as null-terminated, concatenated in buffer
+                val needsLossy = isPathLikeRustType(returnRustType)
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    let mut offset = 0usize;")
+                appendLine("${indent}    for s in $binding.iter() {")
+                if (needsLossy) {
+                    appendLine("${indent}        let _lossy = s.to_string_lossy();")
+                    appendLine("${indent}        let bytes = _lossy.as_bytes();")
+                } else {
+                    appendLine("${indent}        let bytes = s.as_bytes();")
+                }
+                appendLine("${indent}        unsafe {")
+                appendLine("${indent}            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.add(offset), bytes.len());")
+                appendLine("${indent}            *out_buf.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}        }")
+                appendLine("${indent}        offset += bytes.len() + 1;")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            else -> {
+                // Default: treat as i32 primitives
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+        }
+    }
+
+    // ── Enum bridges ─────────────────────────────────────────────────────────
 
     private fun StringBuilder.appendEnum(enum: KneEnum, prefix: String) {
         val sym = "${prefix}_${enum.simpleName}"
@@ -382,7 +628,9 @@ class RustBridgeGenerator {
         // dispose(handle)
         appendLine("#[no_mangle]")
         appendLine("pub extern \"C\" fn ${sym}_dispose(handle: i64) {")
-        appendLine("    unsafe { drop(Box::from_raw(handle as *mut $rustName)); }")
+        appendLine("    if handle != 0 {")
+        appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustName)); }")
+        appendLine("    }")
         appendLine("}")
         appendLine()
 
@@ -399,6 +647,7 @@ class RustBridgeGenerator {
             }
             appendLine("        $pattern => $i,")
         }
+        appendLine("        _ => -1,")
         appendLine("    }")
         appendLine("}")
         appendLine()
@@ -413,34 +662,37 @@ class RustBridgeGenerator {
     private fun StringBuilder.appendSealedVariantConstructor(
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
+        // Skip variants with unsupported field types
+        if (variant.fields.any { it.type is KneType.LIST || it.type is KneType.SET || it.type is KneType.MAP }) return
         val fnName = "${sym}_new_${variant.name}"
         appendLine("#[no_mangle]")
-
-        if (variant.fields.isEmpty()) {
-            // Unit variant: no params
-            appendLine("pub extern \"C\" fn $fnName() -> i64 {")
-            appendLine("    Box::into_raw(Box::new($rustName::${variant.name})) as i64")
-        } else {
-            // Build param list
-            val params = variant.fields.joinToString(", ") { f ->
-                "${f.name}: ${rustCType(f.type)}"
-            }
-            appendLine("pub extern \"C\" fn $fnName($params) -> i64 {")
-            // Convert params
-            for (f in variant.fields) {
-                appendSealedFieldConversion(f)
-            }
-            // Build variant constructor — tuple vs struct syntax
-            if (variant.isTuple) {
-                val args = variant.fields.joinToString(", ") { sealedFieldArgExpr(it) }
-                appendLine("    Box::into_raw(Box::new($rustName::${variant.name}($args))) as i64")
-            } else {
-                val fieldArgs = variant.fields.joinToString(", ") { f ->
-                    "${f.name}: ${sealedFieldArgExpr(f)}"
-                }
-                appendLine("    Box::into_raw(Box::new($rustName::${variant.name} { $fieldArgs })) as i64")
+        val params = variant.fields.joinToString(", ") { f ->
+            when (f.type) {
+                KneType.BYTE_ARRAY, is KneType.LIST -> "${f.name}_ptr: ${slicePointerType(f.type)}, ${f.name}_len: i32"
+                else -> "${f.name}: ${rustCType(f.type)}"
             }
         }
+        appendLine("pub extern \"C\" fn $fnName($params) -> i64 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (f in variant.fields) {
+            appendParamConversion(f)
+        }
+        if (variant.fields.isEmpty()) {
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name})) as i64")
+        } else if (variant.isTuple) {
+            val args = variant.fields.joinToString(", ") { convertedCallArg(it) }
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name}($args))) as i64")
+        } else {
+            val fieldArgs = variant.fields.joinToString(", ") { f ->
+                "${f.name}: ${convertedCallArg(f)}"
+            }
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name} { $fieldArgs })) as i64")
+        }
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+        appendLine("    }")
         appendLine("}")
         appendLine()
     }
@@ -469,7 +721,7 @@ class RustBridgeGenerator {
     ) {
         for (f in variant.fields) {
             val fnName = "${sym}_${variant.name}_get_${f.name}"
-            val needsBuf = f.type == KneType.STRING
+            val needsBuf = needsOutputBuffer(f.type)
 
             appendLine("#[no_mangle]")
             if (needsBuf) {
@@ -499,22 +751,17 @@ class RustBridgeGenerator {
             appendLine("    match obj {")
             if (needsBuf) {
                 appendLine("        $fieldPattern => {")
-                appendLine("            let bytes = $valExpr.as_bytes();")
-                appendLine("            let len = bytes.len() as i32;")
-                appendLine("            if len < out_buf_len {")
-                appendLine("                unsafe {")
-                appendLine("                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
-                appendLine("                    *out_buf.add(bytes.len()) = 0;")
-                appendLine("                }")
-                appendLine("            }")
-                appendLine("            len + 1")
+                appendValueReturnFromBinding(
+                    sealedGetterBindingExpr(f, valExpr),
+                    f.type,
+                    f.rustType,
+                    returnsBorrowed = sealedGetterReturnsBorrowed(f.type),
+                    indent = "            ",
+                )
                 appendLine("        }")
             } else {
-                val returnConvert = when (f.type) {
-                    KneType.BOOLEAN -> "if *$valExpr { 1 } else { 0 }"
-                    else -> "*$valExpr"
-                }
-                appendLine("        $fieldPattern => $returnConvert,")
+                val bindingExpr = sealedGetterBindingExpr(f, valExpr)
+                appendLine("        $fieldPattern => ${rustReturnExpr(bindingExpr, f.type, f.rustType, sealedGetterReturnsBorrowed(f.type))},")
             }
             appendLine("        _ => ${defaultCReturnValue(f.type)}")
             appendLine("    }")
@@ -582,7 +829,12 @@ class RustBridgeGenerator {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        appendReturnHandling("${fn.name}($callArgs)", fn.returnType)
+        val expr = wrapCallForSafety("${fn.name}($callArgs)", fn.isUnsafe)
+        if (fn.canFail) {
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        } else {
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        }
         appendLine("    })) {")
         if (fn.returnType is KneType.DATA_CLASS) {
             appendLine("        Ok(_) => {},")
@@ -799,100 +1051,232 @@ class RustBridgeGenerator {
 
     /** Param conversion for suspend methods (indented one extra level for the thread closure). */
     private fun StringBuilder.appendSuspendParamConversion(p: KneParam) {
-        when (p.type) {
-            KneType.STRING -> {
-                appendLine("            let ${p.name}_conv = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
-                appendLine("            let ${p.name}_str: String = ${p.name}_conv.to_string();")
-            }
-            KneType.BOOLEAN -> {
-                appendLine("            let ${p.name}_conv = ${p.name} != 0;")
-            }
-            is KneType.ENUM -> {
-                val enumName = (p.type as KneType.ENUM).simpleName
-                appendLine("            let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
-            }
-            is KneType.OBJECT -> {
-                val typeName = (p.type as KneType.OBJECT).simpleName
-                appendLine("            let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
-            }
-            is KneType.FUNCTION -> {
-                appendFunctionParamConversion(p, "            ")
-            }
-            KneType.BYTE_ARRAY -> {
-                appendLine("            let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
-            }
-            is KneType.LIST -> {
-                appendLine("            let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
-            }
-            else -> {} // Primitives need no conversion
-        }
+        appendParamConversion(p, "            ")
     }
 
     // --- Helpers ---
 
-    private fun StringBuilder.appendParamConversion(p: KneParam) {
+    private fun StringBuilder.appendReceiverBinding(fn: KneFunction, rustTypeName: String) {
+        when (fn.receiverKind) {
+            KneReceiverKind.BORROWED_SHARED -> {
+                appendLine("        let obj = unsafe { &*(handle as *const $rustTypeName) };")
+            }
+            KneReceiverKind.BORROWED_MUT -> {
+                appendLine("        let obj = unsafe { &mut *(handle as *mut $rustTypeName) };")
+            }
+            KneReceiverKind.OWNED -> {
+                appendLine("        let obj = unsafe { *Box::from_raw(handle as *mut $rustTypeName) };")
+            }
+            KneReceiverKind.NONE -> {
+                if (fn.isMutating) {
+                    appendLine("        let obj = unsafe { &mut *(handle as *mut $rustTypeName) };")
+                } else {
+                    appendLine("        let obj = unsafe { &*(handle as *const $rustTypeName) };")
+                }
+            }
+        }
+    }
+
+    private fun StringBuilder.appendParamConversion(p: KneParam, indent: String = "        ") {
         when (p.type) {
             KneType.STRING -> {
-                appendLine("        let ${p.name}_conv = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
-                appendLine("        let ${p.name}_str: String = ${p.name}_conv.to_string();")
+                appendLine("${indent}let ${p.name}_conv = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
+                when {
+                    requiresStaticStr(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_static_str: &'static str = Box::leak(${p.name}_conv.to_string().into_boxed_str());")
+                    }
+                    isOsStrLikeRustType(p.rustType) && (p.isBorrowed || isBorrowedRustType(p.rustType)) -> {
+                        appendLine("${indent}let ${p.name}_path = std::ffi::OsStr::new(${p.name}_conv);")
+                    }
+                    isOsStrLikeRustType(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_path = std::ffi::OsString::from(${p.name}_conv.to_string());")
+                    }
+                    isPathLikeRustType(p.rustType) && (p.isBorrowed || isBorrowedRustType(p.rustType)) -> {
+                        appendLine("${indent}let ${p.name}_path = std::path::Path::new(${p.name}_conv);")
+                    }
+                    isPathLikeRustType(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_path = std::path::PathBuf::from(${p.name}_conv);")
+                    }
+                    !p.isBorrowed -> {
+                        appendLine("${indent}let ${p.name}_str: String = ${p.name}_conv.to_string();")
+                    }
+                }
             }
             KneType.BOOLEAN -> {
-                appendLine("        let ${p.name}_conv = ${p.name} != 0;")
+                appendLine("${indent}let ${p.name}_conv = ${p.name} != 0;")
             }
             is KneType.ENUM -> {
                 val enumName = (p.type as KneType.ENUM).simpleName
-                appendLine("        let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
+                appendLine("${indent}let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
             }
             is KneType.OBJECT -> {
-                val typeName = (p.type as KneType.OBJECT).simpleName
-                appendLine("        let ${p.name}_conv = unsafe { &*(${p.name} as *const $typeName) };")
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
+            }
+            is KneType.INTERFACE -> {
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
+            }
+            is KneType.SEALED_ENUM -> {
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
             }
             is KneType.DATA_CLASS -> {
-                val dc = p.type as KneType.DATA_CLASS
-                // Convert individual string fields from C strings
-                for (field in dc.fields) {
-                    if (field.type == KneType.STRING) {
-                        appendLine("        let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
-                    }
-                }
-                // Reconstruct the struct from expanded fields
-                val fieldAssignments = dc.fields.joinToString(", ") { field ->
-                    when (field.type) {
-                        KneType.STRING -> "${field.name}: ${p.name}_${field.name}_conv.to_string()"
-                        KneType.BOOLEAN -> "${field.name}: ${p.name}_${field.name} != 0"
-                        else -> "${field.name}: ${p.name}_${field.name}"
-                    }
-                }
-                appendLine("        let ${p.name}_dc = ${dc.simpleName} { $fieldAssignments };")
+                appendDataClassParamConversion(p, p.type as KneType.DATA_CLASS, indent)
             }
             is KneType.NULLABLE -> {
-                val inner = (p.type as KneType.NULLABLE).inner
-                when (inner) {
-                    KneType.INT -> appendLine("        let ${p.name}_opt: Option<i32> = if ${p.name} == i64::MIN { None } else { Some(${p.name} as i32) };")
-                    KneType.LONG -> appendLine("        let ${p.name}_opt: Option<i64> = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
-                    KneType.STRING -> {
-                        appendLine("        let ${p.name}_opt: Option<String> = if ${p.name}.is_null() { None } else {")
-                        appendLine("            Some(unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\").to_string())")
-                        appendLine("        };")
-                    }
-                    KneType.BOOLEAN -> appendLine("        let ${p.name}_opt: Option<bool> = if ${p.name} < 0 { None } else { Some(${p.name} != 0) };")
-                    KneType.DOUBLE -> appendLine("        let ${p.name}_opt: Option<f64> = if ${p.name} == i64::MIN { None } else { Some(f64::from_ne_bytes(${p.name}.to_ne_bytes())) };")
-                    KneType.FLOAT -> appendLine("        let ${p.name}_opt: Option<f32> = if ${p.name} == i64::MIN { None } else { Some(f32::from_ne_bytes((${p.name} as i32).to_ne_bytes())) };")
-                    is KneType.OBJECT -> appendLine("        let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const ${inner.simpleName}) }) };")
-                    is KneType.DATA_CLASS -> appendLine("        let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const ${inner.simpleName}) }) };")
-                    else -> appendLine("        let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
-                }
+                appendNullableParamConversion(p, indent)
             }
             is KneType.FUNCTION -> {
-                appendFunctionParamConversion(p, "        ")
+                appendFunctionParamConversion(p, indent)
             }
             KneType.BYTE_ARRAY -> {
-                appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
+                    appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                }
             }
             is KneType.LIST -> {
-                appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
+                    appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                }
             }
-            else -> {} // Primitives need no conversion
+            else -> {
+                primitiveCastType(p.type, p.rustType)?.let { castType ->
+                    appendLine("${indent}let ${p.name}_conv = ${p.name} as $castType;")
+                }
+            }
+        }
+    }
+
+    private fun StringBuilder.appendObjectHandleConversion(
+        name: String,
+        rustTypeName: String,
+        borrowed: Boolean,
+        indent: String,
+    ) {
+        val useInferredCast = requiresInferredObjectCast(rustTypeName)
+        if (borrowed) {
+            if (useInferredCast) {
+                appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const _) };")
+            } else {
+                appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const $rustTypeName) };")
+            }
+        } else {
+            if (useInferredCast) {
+                appendLine("${indent}let ${name}_owned = unsafe { *Box::from_raw(${name} as *mut _) };")
+            } else {
+                appendLine("${indent}let ${name}_owned = unsafe { *Box::from_raw(${name} as *mut $rustTypeName) };")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendDataClassParamConversion(
+        p: KneParam,
+        dc: KneType.DATA_CLASS,
+        indent: String,
+    ) {
+        for (field in dc.fields) {
+            if (field.type == KneType.STRING) {
+                appendLine("${indent}let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
+            }
+        }
+        val fieldAssignments = dc.fields.joinToString(", ") { field ->
+            val sourceName = "${p.name}_${field.name}"
+            when (field.type) {
+                KneType.STRING -> when {
+                    requiresStaticStr(field.rustType) -> "${field.name}: Box::leak(${sourceName}_conv.to_string().into_boxed_str())"
+                    isPathLikeRustType(field.rustType) -> "${field.name}: std::path::PathBuf::from(${sourceName}_conv)"
+                    field.isBorrowed -> "${field.name}: ${sourceName}_conv"
+                    else -> "${field.name}: ${sourceName}_conv.to_string()"
+                }
+                KneType.BOOLEAN -> "${field.name}: ${sourceName} != 0"
+                is KneType.ENUM -> "${field.name}: unsafe { std::mem::transmute(${sourceName} as u8) }"
+                else -> {
+                    primitiveCastType(field.type, field.rustType)?.let { castType ->
+                        "${field.name}: ${sourceName} as $castType"
+                    } ?: "${field.name}: $sourceName"
+                }
+            }
+        }
+        appendLine("${indent}let ${p.name}_dc = ${dc.simpleName} { $fieldAssignments };")
+    }
+
+    private fun StringBuilder.appendNullableParamConversion(p: KneParam, indent: String) {
+        val inner = (p.type as KneType.NULLABLE).inner
+        val optionInnerRustType = optionInnerRustType(p.rustType)
+        when (inner) {
+            KneType.INT -> {
+                val cast = primitiveCastType(inner, optionInnerRustType)
+                val someExpr = cast?.let { "${p.name} as $it" } ?: "${p.name} as i32"
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+            }
+            KneType.LONG -> {
+                val cast = primitiveCastType(inner, optionInnerRustType)
+                val someExpr = cast?.let { "${p.name} as $it" } ?: p.name
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name}.is_null() { None } else {")
+                appendLine("${indent}    let ${p.name}_value = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
+                when {
+                    requiresStaticStr(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(Box::leak(${p.name}_value.to_string().into_boxed_str()) as &'static str)")
+                    }
+                    isPathLikeRustType(optionInnerRustType) && isBorrowedRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(std::path::Path::new(${p.name}_value))")
+                    }
+                    isPathLikeRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(std::path::PathBuf::from(${p.name}_value))")
+                    }
+                    isBorrowedRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(${p.name}_value)")
+                    }
+                    else -> {
+                        appendLine("${indent}    Some(${p.name}_value.to_string())")
+                    }
+                }
+                appendLine("${indent}};")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} < 0 { None } else { Some(${p.name} != 0) };")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(f64::from_ne_bytes(${p.name}.to_ne_bytes())) };")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(f32::from_bits(${p.name} as u32)) };")
+            }
+            KneType.BYTE -> {
+                val cast = primitiveCastType(inner, optionInnerRustType) ?: "i8"
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i32::MIN { None } else { Some(${p.name} as $cast) };")
+            }
+            KneType.SHORT -> {
+                val cast = primitiveCastType(inner, optionInnerRustType) ?: "i16"
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i32::MIN { None } else { Some(${p.name} as $cast) };")
+            }
+            is KneType.ENUM -> {
+                val enumName = inner.simpleName
+                appendLine("${indent}let ${p.name}_opt: Option<$enumName> = if ${p.name} < 0 { None } else { Some(unsafe { std::mem::transmute(${p.name} as u8) }) };")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                val rustTypeName = rustHandleTypeName(inner, optionInnerRustType)
+                val borrowed = isBorrowedRustType(optionInnerRustType)
+                if (borrowed) {
+                    if (requiresInferredObjectCast(rustTypeName)) {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const _) }) };")
+                    } else {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const $rustTypeName) }) };")
+                    }
+                } else {
+                    if (requiresInferredObjectCast(rustTypeName)) {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { *Box::from_raw(${p.name} as *mut _) }) };")
+                    } else {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { *Box::from_raw(${p.name} as *mut $rustTypeName) }) };")
+                    }
+                }
+            }
+            else -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
+            }
         }
     }
 
@@ -962,81 +1346,241 @@ class RustBridgeGenerator {
 
     /** Param name for method calls — uses isBorrowed to decide &str vs String, &T vs T. */
     private fun convertedParamName(p: KneParam): String = when (p.type) {
-        KneType.STRING -> if (p.isBorrowed) "${p.name}_conv" else "${p.name}_str.clone()"
+        KneType.STRING -> when {
+            requiresStaticStr(p.rustType) -> "${p.name}_static_str"
+            isPathLikeRustType(p.rustType) -> "${p.name}_path"
+            p.isBorrowed || isBorrowedRustType(p.rustType) -> "${p.name}_conv"
+            else -> "${p.name}_str"
+        }
         KneType.BOOLEAN -> "${p.name}_conv"
         is KneType.FUNCTION -> "${p.name}_fn"
-        is KneType.ENUM -> "&${p.name}_conv"
-        is KneType.OBJECT -> if (p.isBorrowed) {
-            // Borrowed object: pass as &T
-            "${p.name}_conv"
-        } else {
-            // Owned object — for now still pass as borrow
-            "${p.name}_conv"
-        }
+        is KneType.ENUM -> if (p.isBorrowed) "&${p.name}_conv" else "${p.name}_conv"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
+            if (p.isBorrowed) "${p.name}_borrowed" else "${p.name}_owned"
         is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
         is KneType.NULLABLE -> "${p.name}_opt"
-        KneType.BYTE_ARRAY -> "${p.name}_slice"
-        is KneType.LIST -> "${p.name}_slice"
-        else -> p.name
+        KneType.BYTE_ARRAY -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
+        is KneType.LIST -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
+        else -> if (primitiveCastType(p.type, p.rustType) != null) "${p.name}_conv" else p.name
     }
 
     /** Param name for constructor calls — String passes owned String. */
-    private fun convertedCallArg(p: KneParam): String = when (p.type) {
-        KneType.STRING -> "${p.name}_str"
-        else -> convertedParamName(p)
-    }
+    private fun convertedCallArg(p: KneParam): String = convertedParamName(p)
 
-    private fun StringBuilder.appendNullableReturn(nullableType: KneType.NULLABLE) {
+    private fun StringBuilder.appendNullableReturn(
+        nullableType: KneType.NULLABLE,
+        binding: String,
+        returnsBorrowed: Boolean = false,
+        rustType: String? = null,
+        indent: String = "        ",
+    ) {
         when (nullableType.inner) {
             KneType.INT -> {
-                appendLine("        match result { Some(v) => v as i64, None => i64::MIN }")
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
             }
             KneType.LONG -> {
-                appendLine("        match result { Some(v) => v, None => i64::MIN }")
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
             }
             KneType.DOUBLE -> {
-                appendLine("        match result { Some(v) => i64::from_ne_bytes(v.to_ne_bytes()), None => i64::MIN }")
+                appendLine("${indent}match $binding { Some(v) => i64::from_ne_bytes(v.to_ne_bytes()), None => i64::MIN }")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}match $binding { Some(v) => v.to_bits() as i64, None => i64::MIN }")
             }
             KneType.BOOLEAN -> {
-                // Return i32: -1 = null, 0 = false, 1 = true
-                appendLine("        match result { Some(true) => 1, Some(false) => 0, None => -1 }")
+                appendLine("${indent}match $binding { Some(true) => 1, Some(false) => 0, None => -1 }")
+            }
+            KneType.BYTE -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => i32::MIN }")
+            }
+            KneType.SHORT -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => i32::MIN }")
             }
             KneType.STRING -> {
-                // Returns i32 via buffer pattern; -1 means null
-                appendLine("        match result {")
-                appendLine("            Some(ref s) => {")
-                appendLine("                let bytes = s.as_bytes();")
-                appendLine("                let len = bytes.len() as i32;")
-                appendLine("                if len < out_buf_len {")
-                appendLine("                    unsafe {")
-                appendLine("                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
-                appendLine("                        *out_buf.add(bytes.len()) = 0;")
-                appendLine("                    }")
-                appendLine("                }")
-                appendLine("                len + 1")
-                appendLine("            }")
-                appendLine("            None => -1")
-                appendLine("        }")
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(ref s) => {")
+                appendStringOutput("s", "$indent        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
             }
-            is KneType.OBJECT -> {
-                appendLine("        match result { Some(v) => Box::into_raw(Box::new(v)) as i64, None => 0i64 }")
+            is KneType.ENUM -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => -1 }")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}match $binding {")
+                if (returnsBorrowed) {
+                    appendLine("${indent}    Some(v) => v as *const _ as i64,")
+                } else {
+                    appendLine("${indent}    Some(v) => Box::into_raw(Box::new(v)) as i64,")
+                }
+                appendLine("${indent}    None => 0i64")
+                appendLine("${indent}}")
             }
             else -> {
-                appendLine("        match result { Some(v) => v as i64, None => i64::MIN }")
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
             }
         }
     }
 
-    private fun StringBuilder.appendStringOutput(expr: String) {
-        appendLine("        let bytes = $expr.as_bytes();")
-        appendLine("        let len = bytes.len() as i32;")
-        appendLine("        if len < out_buf_len {")
-        appendLine("            unsafe {")
-        appendLine("                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
-        appendLine("                *out_buf.add(bytes.len()) = 0;")
-        appendLine("            }")
-        appendLine("        }")
-        appendLine("        len + 1")
+    private fun rustReturnExpr(
+        binding: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+    ): String = when (returnType) {
+        KneType.INT -> "$binding as i32"
+        KneType.LONG -> "$binding as i64"
+        KneType.DOUBLE -> "$binding as f64"
+        KneType.FLOAT -> "$binding as f32"
+        KneType.BYTE -> "$binding as i8"
+        KneType.SHORT -> "$binding as i16"
+        KneType.BOOLEAN -> "if $binding { 1 } else { 0 }"
+        is KneType.ENUM -> "$binding as i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
+            if (returnsBorrowed) "$binding as *const _ as i64" else "Box::into_raw(Box::new($binding)) as i64"
+        else -> binding
+    }
+
+    private fun StringBuilder.appendStringOutput(expr: String, indent: String = "        ", rustType: String? = null) {
+        if (isPathLikeRustType(rustType)) {
+            appendLine("${indent}let _s = $expr.to_string_lossy();")
+            appendLine("${indent}let bytes = _s.as_bytes();")
+        } else {
+            appendLine("${indent}let bytes = $expr.as_bytes();")
+        }
+        appendLine("${indent}let len = bytes.len() as i32;")
+        appendLine("${indent}if len < out_buf_len {")
+        appendLine("${indent}    unsafe {")
+        appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("${indent}        *out_buf.add(bytes.len()) = 0;")
+        appendLine("${indent}    }")
+        appendLine("${indent}}")
+        appendLine("${indent}len + 1")
+    }
+
+    private fun expectsOwnedVecLike(rustType: String?, isBorrowed: Boolean): Boolean {
+        if (isBorrowed) return false
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.startsWith("Vec<") || normalized.startsWith("Into<Vec<") || normalized.startsWith("From<Vec<")
+    }
+
+    private fun wrapCallForSafety(expr: String, isUnsafe: Boolean): String =
+        if (isUnsafe) "unsafe { $expr }" else expr
+
+    private fun primitiveCastType(type: KneType, rustType: String?): String? {
+        val normalized = normalizeRustType(rustType) ?: return null
+        val defaultRustType = when (type) {
+            KneType.INT -> "i32"
+            KneType.LONG -> "i64"
+            KneType.DOUBLE -> "f64"
+            KneType.FLOAT -> "f32"
+            KneType.BYTE -> "i8"
+            KneType.SHORT -> "i16"
+            else -> null
+        } ?: return null
+        return when (normalized) {
+            defaultRustType -> null
+            "u32", "u64", "usize", "isize", "u16", "u8" -> normalized
+            else -> null
+        }
+    }
+
+    private fun rustHandleTypeName(type: KneType, rustType: String?): String {
+        val normalized = unwrapRustWrapperType(rustType)
+        return when (type) {
+            is KneType.OBJECT -> normalized ?: type.simpleName
+            is KneType.INTERFACE -> normalized ?: type.simpleName
+            is KneType.SEALED_ENUM -> normalized ?: type.simpleName
+            else -> normalized ?: error("Expected handle-backed type, got $type")
+        }
+    }
+
+    private fun requiresInferredObjectCast(rustTypeName: String): Boolean =
+        rustTypeName.contains("::") &&
+            !rustTypeName.startsWith("dpi::") &&
+            !rustTypeName.startsWith("std::")
+
+    private fun unwrapRustWrapperType(rustType: String?): String? {
+        var current = rustType?.trim() ?: return null
+        var changed = true
+        while (changed) {
+            changed = false
+            normalizeRustType(current)?.let { normalized ->
+                if (normalized != current) {
+                    current = normalized
+                    changed = true
+                }
+            }
+            for (wrapper in listOf("Option", "Into", "From")) {
+                extractGenericInner(current, wrapper)?.let { inner ->
+                    current = inner
+                    changed = true
+                }
+            }
+        }
+        return current.ifBlank { null }
+    }
+
+    private fun extractGenericInner(rustType: String, wrapper: String): String? {
+        val prefix = "$wrapper<"
+        if (!rustType.startsWith(prefix) || !rustType.endsWith(">")) return null
+        return rustType.substring(prefix.length, rustType.length - 1).trim()
+    }
+
+    private fun optionInnerRustType(rustType: String?): String? =
+        rustType?.trim()?.let { extractGenericInner(it, "Option") }
+
+    private fun normalizeRustType(rustType: String?): String? {
+        var result = rustType?.trim() ?: return null
+        var changed = true
+        while (changed) {
+            changed = false
+            if (result.startsWith("&")) {
+                result = result.removePrefix("&").trim()
+                changed = true
+            }
+            if (result.startsWith("mut ")) {
+                result = result.removePrefix("mut ").trim()
+                changed = true
+            }
+            if (result.startsWith("'")) {
+                val afterLifetime = result.substringAfter(' ', result).trim()
+                if (afterLifetime != result) {
+                    result = afterLifetime
+                    changed = true
+                }
+            }
+        }
+        return result.ifBlank { null }
+    }
+
+    private fun isBorrowedRustType(rustType: String?): Boolean = rustType?.trim()?.startsWith("&") == true
+
+    private fun isPathLikeRustType(rustType: String?): Boolean {
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.contains("Path") || normalized.contains("OsStr") || normalized.contains("OsString")
+    }
+
+    private fun isOsStrLikeRustType(rustType: String?): Boolean {
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.contains("OsStr") || normalized.contains("OsString")
+    }
+
+    private fun requiresStaticStr(rustType: String?): Boolean =
+        rustType?.contains("'static str") == true
+
+    private fun sealedGetterReturnsBorrowed(type: KneType): Boolean = when (type) {
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> true
+        is KneType.NULLABLE -> sealedGetterReturnsBorrowed(type.inner)
+        else -> false
+    }
+
+    private fun sealedGetterBindingExpr(field: KneParam, valueExpr: String): String = when (field.type) {
+        KneType.STRING, KneType.BYTE_ARRAY,
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM,
+        is KneType.NULLABLE, is KneType.LIST, is KneType.SET, is KneType.MAP -> valueExpr
+        else -> "*$valueExpr"
     }
 
     /** C ABI pointer type for a slice parameter. */
@@ -1070,6 +1614,9 @@ class RustBridgeGenerator {
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.STRING -> "*const c_char" // null pointer = None
             KneType.BOOLEAN -> "i32" // -1 = null
+            KneType.BYTE, KneType.SHORT -> "i32"
+            is KneType.ENUM -> "i32"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
             else -> "i64" // widened or sentinel
         }
         is KneType.LIST -> "i64" // pointer handle
@@ -1089,10 +1636,10 @@ class RustBridgeGenerator {
         is KneType.LIST -> "i32"
         is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
         is KneType.NULLABLE -> when ((type).inner) {
-            KneType.INT, KneType.LONG, KneType.DOUBLE -> "i64"
-            KneType.BOOLEAN -> "i32"
-            KneType.STRING -> "i32"
-            is KneType.OBJECT -> "i64"
+            KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "i32"
+            is KneType.ENUM -> "i32"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
             else -> "i64"
         }
         else -> rustCType(type)
@@ -1118,7 +1665,8 @@ class RustBridgeGenerator {
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when ((type).inner) {
-            KneType.BOOLEAN, KneType.STRING -> "0i32"
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "0i32"
+            is KneType.ENUM -> "0i32"
             else -> "0i64"
         }
         else -> "0"

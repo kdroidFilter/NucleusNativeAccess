@@ -44,6 +44,8 @@ data class KneClass(
     val interfaces: List<String> = emptyList(),
     val sealedSubclasses: List<String> = emptyList(),
     val isCommon: Boolean = false,
+    val isOpaque: Boolean = false,
+    val rustTypeName: String = simpleName,
 ) : Serializable
 
 data class KneEnum(
@@ -68,9 +70,24 @@ data class KneSealedVariant(
     val isTuple: Boolean = false, // true for tuple variants like Value(i32)
 ) : Serializable
 
+enum class KneConstructorKind : Serializable {
+    FUNCTION,
+    STRUCT_LITERAL,
+    NONE,
+}
+
 data class KneConstructor(
     val params: List<KneParam>,
+    val kind: KneConstructorKind = KneConstructorKind.FUNCTION,
+    val canFail: Boolean = false,
 ) : Serializable
+
+enum class KneReceiverKind : Serializable {
+    NONE,
+    BORROWED_SHARED,
+    BORROWED_MUT,
+    OWNED,
+}
 
 data class KneFunction(
     val name: String,
@@ -82,6 +99,11 @@ data class KneFunction(
     val isOverride: Boolean = false,
     /** True if the method takes `&mut self` (Rust). Used by Rust bridge generator. */
     val isMutating: Boolean = false,
+    val receiverKind: KneReceiverKind = KneReceiverKind.NONE,
+    val canFail: Boolean = false,
+    val returnsBorrowed: Boolean = false,
+    val returnRustType: String? = null,
+    val isUnsafe: Boolean = false,
 ) : Serializable
 
 data class KneProperty(
@@ -97,6 +119,8 @@ data class KneParam(
     val hasDefault: Boolean = false,
     /** True if this param is borrowed (`&str`, `&T`) in Rust. Affects bridge codegen. */
     val isBorrowed: Boolean = false,
+    /** Best-effort original Rust type hint used by bridge generation for casts and ownership. */
+    val rustType: String? = null,
 ) : Serializable
 
 sealed class KneType : Serializable {
