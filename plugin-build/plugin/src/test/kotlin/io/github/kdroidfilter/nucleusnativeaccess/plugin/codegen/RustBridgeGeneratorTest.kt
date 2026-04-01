@@ -1054,6 +1054,44 @@ class RustBridgeGeneratorTest {
         assertTrue(c.contains("-> i32"))
     }
 
+    // ── Nullable collection returns ─────────────────────────────────────────
+
+    @Test
+    fun `generates method returning nullable LIST`() {
+        val c = moduleWith(KneFunction("get_items", emptyList(), KneType.NULLABLE(KneType.LIST(KneType.INT))))
+        assertTrue("Should generate function", c.contains("fn calculator_Calculator_get_items"))
+        assertTrue("Should have out_buf param", c.contains("out_buf: *mut u8"))
+        assertTrue("Should return i32", c.contains("-> i32"))
+        assertTrue("Should handle None", c.contains("None => -1"))
+    }
+
+    @Test
+    fun `generates method returning nullable SET`() {
+        val c = moduleWith(KneFunction("get_tags", emptyList(), KneType.NULLABLE(KneType.SET(KneType.STRING))))
+        assertTrue("Should generate function", c.contains("fn calculator_Calculator_get_tags"))
+        assertTrue("Should have out_buf param", c.contains("out_buf: *mut u8"))
+        assertTrue("Should return i32", c.contains("-> i32"))
+        assertTrue("Should handle None", c.contains("None => -1"))
+    }
+
+    @Test
+    fun `generates method returning nullable MAP`() {
+        val c = moduleWith(KneFunction("get_mapping", emptyList(), KneType.NULLABLE(KneType.MAP(KneType.STRING, KneType.INT))))
+        assertTrue("Should generate function", c.contains("fn calculator_Calculator_get_mapping"))
+        assertTrue("Should have out_keys param", c.contains("out_keys: *mut u8"))
+        assertTrue("Should have out_values param", c.contains("out_values: *mut i32"))
+        assertTrue("Should have out_max_len param", c.contains("out_max_len: i32"))
+        assertTrue("Should return i32", c.contains("-> i32"))
+        assertTrue("Should handle None", c.contains("None => -1"))
+    }
+
+    @Test
+    fun `nullable LIST Some branch writes to buffer`() {
+        val c = moduleWith(KneFunction("get_items", emptyList(), KneType.NULLABLE(KneType.LIST(KneType.INT))))
+        assertTrue("Should have Some branch", c.contains("Some(v)"))
+        assertTrue("Should write len", c.contains("v.len() as i32"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

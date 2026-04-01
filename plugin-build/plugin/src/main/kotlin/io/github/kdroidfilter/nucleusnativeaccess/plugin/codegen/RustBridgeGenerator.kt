@@ -236,8 +236,7 @@ class RustBridgeGenerator {
             }
         }
         // MAP return: dual key/value buffers + max count
-        if (fn.returnType is KneType.MAP) {
-            val mapType = fn.returnType as KneType.MAP
+        extractMapReturnType(fn.returnType)?.let { mapType ->
             append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
             if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
             append(", out_values: ${mapOutPointerType(mapType.valueType)}")
@@ -311,8 +310,7 @@ class RustBridgeGenerator {
             }
         }
         // MAP return: dual key/value buffers + max count
-        if (fn.returnType is KneType.MAP) {
-            val mapType = fn.returnType as KneType.MAP
+        extractMapReturnType(fn.returnType)?.let { mapType ->
             allParams.add("out_keys: ${mapOutPointerType(mapType.keyType)}")
             if (mapType.keyType == KneType.STRING) allParams.add("out_keys_len: i32")
             allParams.add("out_values: ${mapOutPointerType(mapType.valueType)}")
@@ -429,10 +427,17 @@ class RustBridgeGenerator {
         is KneType.SET -> true
         is KneType.NULLABLE -> when (type.inner) {
             is KneType.DATA_CLASS -> true
-            is KneType.LIST, is KneType.SET, is KneType.MAP -> false
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> true
             else -> true
         }
         else -> true
+    }
+
+    /** Extract MAP type from a direct MAP or Nullable<MAP> return. */
+    private fun extractMapReturnType(type: KneType): KneType.MAP? = when (type) {
+        is KneType.MAP -> type
+        is KneType.NULLABLE -> type.inner as? KneType.MAP
+        else -> null
     }
 
     /** Returns the Rust pointer type for a MAP out-parameter buffer. */
@@ -452,7 +457,11 @@ class RustBridgeGenerator {
     private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
         KneType.STRING, KneType.BYTE_ARRAY -> true
         is KneType.LIST, is KneType.SET -> true
-        is KneType.NULLABLE -> type.inner == KneType.STRING
+        is KneType.NULLABLE -> when (type.inner) {
+            KneType.STRING -> true
+            is KneType.LIST, is KneType.SET -> true
+            else -> false
+        }
         is KneType.DATA_CLASS -> false // Data class returns use per-field out-params, not a single buffer
         is KneType.MAP -> false // MAP uses dual buffers, handled separately
         else -> false
@@ -1034,6 +1043,14 @@ class RustBridgeGenerator {
                     }
                 }
             }
+        }
+        // MAP return: dual key/value buffers + max count
+        extractMapReturnType(fn.returnType)?.let { mapType ->
+            allParams.add("out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) allParams.add("out_keys_len: i32")
+            allParams.add("out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) allParams.add("out_values_len: i32")
+            allParams.add("out_max_len: i32")
         }
         append(allParams.joinToString(", "))
         appendLine(") -> ${rustCReturnType(fn.returnType)} {")
@@ -1691,6 +1708,30 @@ class RustBridgeGenerator {
                 appendLine("${indent}    None => 0i32")
                 appendLine("${indent}}")
             }
+            is KneType.LIST -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendListReturnFromBinding("v", nullableType.inner as KneType.LIST, "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.SET -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendListReturnFromBinding("v", KneType.LIST((nullableType.inner as KneType.SET).elementType), "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.MAP -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendMapReturnFromBinding("v", nullableType.inner as KneType.MAP, "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
                 appendLine("${indent}match $binding {")
                 if (returnsBorrowed) {
@@ -1946,6 +1987,7 @@ class RustBridgeGenerator {
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "i32"
             is KneType.ENUM -> "i32"
             is KneType.DATA_CLASS -> "i32" // 0=None, 1=Some (fields in out-params)
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> "i32" // count or -1 for None
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
             else -> "i64"
         }
@@ -1976,6 +2018,7 @@ class RustBridgeGenerator {
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "0i32"
             is KneType.ENUM -> "0i32"
             is KneType.DATA_CLASS -> "0i32" // 0 = None
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> "0" // count = 0 on error
             else -> "0i64"
         }
         else -> "0"
