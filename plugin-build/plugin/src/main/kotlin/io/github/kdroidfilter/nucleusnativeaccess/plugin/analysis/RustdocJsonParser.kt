@@ -68,15 +68,34 @@ class RustdocJsonParser {
         val knownEnums = mutableMapOf<Int, String>()
         val knownTraits = mutableMapOf<Int, String>()
 
+        // Build the set of type IDs that are directly accessible as bare names after
+        // `pub use crate_name::*`. We traverse the root module's exported items:
+        // - direct struct/enum/trait definitions in the root → their own ID
+        // - explicit `pub use X` re-exports (non-glob) → the target ID
+        // - glob `pub use mod::*` re-exports → all public struct/enum/trait IDs in that module
+        // This correctly excludes types like `sysinfo::windows::sid::Sid` that are `pub` within
+        // their module but only `pub(crate)` re-exported, and therefore not in scope after
+        // `pub use sysinfo::*`.
+        val rootModuleItems = rootModule
+            ?.getAsJsonObject("inner")
+            ?.getAsJsonObject("module")
+            ?.getAsJsonArray("items")
+        val rootExportedIds: Set<Int> = if (rootModuleItems != null)
+            buildRootExportedIds(rootModuleItems, index)
+        else
+            emptySet()
+
         for ((id, item) in index.entrySet()) {
+            val intId = id.toIntOrNull() ?: continue
+            if (rootExportedIds.isNotEmpty() && intId !in rootExportedIds) continue
             val inner = item.asJsonObject.getAsJsonObject("inner") ?: continue
             val name = item.asJsonObject.get("name").safeString() ?: continue
             val vis = item.asJsonObject.get("visibility").safeString() ?: continue
             if (vis != "public") continue
             when {
-                inner.has("struct") -> knownStructs[id.toInt()] = name
-                inner.has("enum") -> knownEnums[id.toInt()] = name
-                inner.has("trait") -> knownTraits[id.toInt()] = name
+                inner.has("struct") -> knownStructs[intId] = name
+                inner.has("enum") -> knownEnums[intId] = name
+                inner.has("trait") -> knownTraits[intId] = name
             }
         }
 
@@ -1167,6 +1186,67 @@ class RustdocJsonParser {
             }
 
             else -> null
+        }
+    }
+
+    /**
+     * Collects the IDs of types (struct/enum/trait) directly accessible as bare names from the
+     * crate root, i.e. the set of IDs that would be in scope after `pub use crate_name::*`.
+     *
+     * Rules:
+     *  - A public struct/enum/trait defined directly in the root module → its own ID.
+     *  - A public non-glob `use` re-export with a resolved target ID → that target ID.
+     *  - A public glob `use module::*` → all public struct/enum/trait IDs from that module
+     *    (one level only; nested globs are not expanded).
+     */
+    private fun buildRootExportedIds(rootItems: JsonArray, index: JsonObject): Set<Int> {
+        val result = mutableSetOf<Int>()
+        for (itemIdElem in rootItems) {
+            val itemId = itemIdElem.asInt
+            val item = index.get(itemId.toString())?.asJsonObject ?: continue
+            if (item.get("visibility").safeString() != "public") continue
+            val inner = item.getAsJsonObject("inner") ?: continue
+            when {
+                inner.has("struct") || inner.has("enum") || inner.has("trait") -> result.add(itemId)
+                inner.has("use") -> {
+                    val useData = inner.getAsJsonObject("use")
+                    val isGlob = useData.get("is_glob")?.asBoolean ?: false
+                    val targetId = useData.get("id")
+                        ?.takeIf { !it.isJsonNull }
+                        ?.asInt
+                    if (!isGlob && targetId != null) {
+                        result.add(targetId)
+                    } else if (isGlob && targetId != null) {
+                        expandGlobModule(targetId, index, result)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun expandGlobModule(moduleId: Int, index: JsonObject, result: MutableSet<Int>) {
+        val moduleItem = index.get(moduleId.toString())?.asJsonObject ?: return
+        val moduleItems = moduleItem.getAsJsonObject("inner")
+            ?.getAsJsonObject("module")
+            ?.getAsJsonArray("items") ?: return
+        for (itemIdElem in moduleItems) {
+            val itemId = itemIdElem.asInt
+            val item = index.get(itemId.toString())?.asJsonObject ?: continue
+            if (item.get("visibility").safeString() != "public") continue
+            val inner = item.getAsJsonObject("inner") ?: continue
+            when {
+                inner.has("struct") || inner.has("enum") || inner.has("trait") -> result.add(itemId)
+                inner.has("use") -> {
+                    val useData = inner.getAsJsonObject("use")
+                    if (useData.get("is_glob")?.asBoolean != true) {
+                        val targetId = useData.get("id")
+                            ?.takeIf { !it.isJsonNull }
+                            ?.asInt ?: continue
+                        result.add(targetId)
+                    }
+                }
+            }
         }
     }
 
