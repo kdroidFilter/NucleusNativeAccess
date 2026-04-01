@@ -216,8 +216,6 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 
 | Category | Unsupported construct | Impact | Workaround |
 |----------|----------------------|--------|------------|
-| **Return types** | `HashSet<T>` / `BTreeSet<T>` return | Methods returning sets are skipped | Expose a wrapper returning `Vec<T>` |
-| **Return types** | `Option<DataClass>` return | Nullable data class returns are skipped | Return the data class non-nullable, or use a wrapper |
 | **Return types** | `Option<Vec<T>>` / `Option<HashSet<T>>` return | Nullable collections are skipped | &mdash; |
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
 | **Traits** | `impl Trait` return types | Not mapped | &mdash; |
@@ -236,6 +234,8 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | Construct | Behaviour | Notes |
 |-----------|-----------|-------|
 | `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; MAP properties not yet supported |
+| `HashSet<T>` / `BTreeSet<T>` return | Mapped to `Set<T>` | Serialized as list, deduplicated on JVM side via `.toSet()` |
+| `Option<DataClass>` return | Mapped to `DataClass?` | Uses presence flag (0=null, 1=present) + per-field out-params |
 | `OsStr` / `OsString` / `Path` / `PathBuf` | Mapped to `String` | Uses `to_string_lossy()` on output, may lose non-UTF-8 data |
 | `Vec<Object>` return | Elements returned as borrowed handles | Pointers into the parent collection; valid while parent lives |
 | Borrowed returns (`&T`) | Returned as borrowed handle (no ownership) | JVM proxy won't dispose the native object |

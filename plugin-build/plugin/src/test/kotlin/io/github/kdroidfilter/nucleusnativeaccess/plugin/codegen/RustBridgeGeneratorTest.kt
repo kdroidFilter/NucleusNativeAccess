@@ -443,6 +443,82 @@ class RustBridgeGeneratorTest {
         assertFalse("Should not generate getter for MAP property", mapCode.contains("get_scores"))
     }
 
+    // --- SET return ---
+
+    @Test
+    fun `generates SET return as list with out_buf`() {
+        val moduleWithSet = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "get_tags",
+                    params = emptyList(),
+                    returnType = KneType.SET(KneType.STRING),
+                )
+            ))
+        )
+        val setCode = RustBridgeGenerator().generate(moduleWithSet)
+        assertTrue("Should generate SET method", setCode.contains("get_tags"))
+        assertTrue("Should have out_buf param", setCode.contains("out_buf: *mut u8"))
+        assertTrue("Should return i32 count", setCode.contains("-> i32"))
+    }
+
+    // --- Option<DataClass> return ---
+
+    @Test
+    fun `generates nullable DataClass return with out-params and i32 presence flag`() {
+        val dc = KneType.DATA_CLASS(
+            fqName = "calculator.Point",
+            simpleName = "Point",
+            fields = listOf(
+                KneParam("x", KneType.DOUBLE),
+                KneParam("y", KneType.DOUBLE),
+            )
+        )
+        val moduleWithNullDc = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "find_point",
+                    params = emptyList(),
+                    returnType = KneType.NULLABLE(dc),
+                )
+            ))
+        )
+        val nullDcCode = RustBridgeGenerator().generate(moduleWithNullDc)
+        assertTrue("Should have find_point fn", nullDcCode.contains("find_point"))
+        assertTrue("Should have out_x param", nullDcCode.contains("out_x: *mut f64"))
+        assertTrue("Should have out_y param", nullDcCode.contains("out_y: *mut f64"))
+        assertTrue("Should return i32", nullDcCode.contains("-> i32"))
+        assertTrue("Should match Some", nullDcCode.contains("Some(v)"))
+        assertTrue("Should return 1 on Some", nullDcCode.contains("1i32"))
+        assertTrue("Should return 0 on None", nullDcCode.contains("0i32"))
+    }
+
+    @Test
+    fun `generates nullable DataClass with String field return`() {
+        val dc = KneType.DATA_CLASS(
+            fqName = "calculator.NamedValue",
+            simpleName = "NamedValue",
+            fields = listOf(
+                KneParam("name", KneType.STRING),
+                KneParam("value", KneType.INT),
+            )
+        )
+        val moduleWithNullDcStr = simpleModule.copy(
+            classes = listOf(simpleModule.classes.first().copy(
+                companionMethods = listOf(KneFunction(
+                    name = "find_named",
+                    params = emptyList(),
+                    returnType = KneType.NULLABLE(dc),
+                ))
+            ))
+        )
+        val code = RustBridgeGenerator().generate(moduleWithNullDcStr)
+        assertTrue("Should have companion fn", code.contains("companion_find_named"))
+        assertTrue("Should have out_name string param", code.contains("out_name: *mut u8"))
+        assertTrue("Should have out_name_len param", code.contains("out_name_len: i32"))
+        assertTrue("Should have out_value param", code.contains("out_value: *mut i32"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

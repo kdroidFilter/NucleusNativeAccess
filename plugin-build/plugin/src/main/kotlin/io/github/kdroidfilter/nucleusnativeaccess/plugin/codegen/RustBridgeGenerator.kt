@@ -218,10 +218,10 @@ class RustBridgeGenerator {
         if (needsBufOutput) {
             append(", out_buf: *mut u8, out_buf_len: i32")
         }
-        // Data class return: add per-field out-params
-        if (fn.returnType is KneType.DATA_CLASS) {
-            val dc = fn.returnType as KneType.DATA_CLASS
-            for (field in dc.fields) {
+        // Data class return (or nullable data class): add per-field out-params
+        val returnDc = extractReturnDataClass(fn.returnType)
+        if (returnDc != null) {
+            for (field in returnDc.fields) {
                 when (field.type) {
                     KneType.STRING -> {
                         append(", out_${field.name}: *mut u8, out_${field.name}_len: i32")
@@ -292,9 +292,9 @@ class RustBridgeGenerator {
             allParams.add("out_buf: *mut u8")
             allParams.add("out_buf_len: i32")
         }
-        if (fn.returnType is KneType.DATA_CLASS) {
-            val dc = fn.returnType as KneType.DATA_CLASS
-            for (field in dc.fields) {
+        val companionReturnDc = extractReturnDataClass(fn.returnType)
+        if (companionReturnDc != null) {
+            for (field in companionReturnDc.fields) {
                 when (field.type) {
                     KneType.STRING -> {
                         allParams.add("out_${field.name}: *mut u8")
@@ -384,12 +384,20 @@ class RustBridgeGenerator {
         }
     }
 
+    /** Extract a DATA_CLASS from a return type (handles both direct and nullable). */
+    private fun extractReturnDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
+        is KneType.DATA_CLASS -> type
+        is KneType.NULLABLE -> type.inner as? KneType.DATA_CLASS
+        else -> null
+    }
+
     /** Check if the return type is fully supported by the Rust bridge generator. */
     private fun isSupportedReturnType(type: KneType): Boolean = when (type) {
         is KneType.MAP -> true
-        is KneType.SET -> false
+        is KneType.SET -> true
         is KneType.NULLABLE -> when (type.inner) {
-            is KneType.DATA_CLASS, is KneType.LIST, is KneType.SET, is KneType.MAP -> false
+            is KneType.DATA_CLASS -> true
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> false
             else -> true
         }
         else -> true
@@ -1326,13 +1334,15 @@ class RustBridgeGenerator {
         when (inner) {
             KneType.INT -> {
                 val cast = primitiveCastType(inner, optionInnerRustType)
+                val rustInner = cast ?: "i32"
                 val someExpr = cast?.let { "${p.name} as $it" } ?: "${p.name} as i32"
-                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+                appendLine("${indent}let ${p.name}_opt: Option<$rustInner> = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
             }
             KneType.LONG -> {
                 val cast = primitiveCastType(inner, optionInnerRustType)
+                val rustInner = cast ?: "i64"
                 val someExpr = cast?.let { "${p.name} as $it" } ?: p.name
-                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+                appendLine("${indent}let ${p.name}_opt: Option<$rustInner> = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
             }
             KneType.STRING -> {
                 appendLine("${indent}let ${p.name}_opt = if ${p.name}.is_null() { None } else {")
@@ -1526,6 +1536,29 @@ class RustBridgeGenerator {
             }
             is KneType.ENUM -> {
                 appendLine("${indent}match $binding { Some(v) => v as i32, None => -1 }")
+            }
+            is KneType.DATA_CLASS -> {
+                val dc = nullableType.inner
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                for (field in dc.fields) {
+                    when (field.type) {
+                        KneType.STRING -> {
+                            appendLine("${indent}        let _f_bytes = v.${field.name}.as_bytes();")
+                            appendLine("${indent}        if (_f_bytes.len() as i32) < out_${field.name}_len {")
+                            appendLine("${indent}            unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
+                            appendLine("${indent}            unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
+                            appendLine("${indent}        }")
+                        }
+                        else -> {
+                            appendLine("${indent}        unsafe { *out_${field.name} = ${rustReturnExpr("v.${field.name}", field.type, field.rustType)}; }")
+                        }
+                    }
+                }
+                appendLine("${indent}        1i32")
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => 0i32")
+                appendLine("${indent}}")
             }
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
                 appendLine("${indent}match $binding {")
@@ -1760,6 +1793,7 @@ class RustBridgeGenerator {
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "i32"
             is KneType.ENUM -> "i32"
+            is KneType.DATA_CLASS -> "i32" // 0=None, 1=Some (fields in out-params)
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
             else -> "i64"
         }
@@ -1789,6 +1823,7 @@ class RustBridgeGenerator {
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "0i32"
             is KneType.ENUM -> "0i32"
+            is KneType.DATA_CLASS -> "0i32" // 0 = None
             else -> "0i64"
         }
         else -> "0"
