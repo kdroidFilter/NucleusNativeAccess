@@ -45,6 +45,7 @@ data class SystemInfo(
     val uptime: Long,
     val physicalCores: Long?,
     val distributionId: String,
+    val distributionIdLike: List<String>,
 )
 
 data class MemoryInfo(
@@ -102,10 +103,17 @@ data class ProcessInfo(
     val cwd: String?,
     val diskReadBytes: Long,
     val diskWrittenBytes: Long,
+    val cmd: List<String>,
+    val parentPid: Long?,
+    val openFiles: Long?,
+    val openFilesLimit: Long?,
+    val accumulatedCpuTime: Long,
+    val taskCount: Int?,
 )
 
 data class SensorInfo(
     val label: String,
+    val id: String?,
     val temperature: Float?,
     val max: Float?,
     val critical: Float?,
@@ -141,6 +149,7 @@ fun systemInfoFlow(): Flow<SystemInfo> = flow {
             uptime = System.uptime(),
             physicalCores = System.physical_core_count(),
             distributionId = System.distribution_id(),
+            distributionIdLike = System.distribution_id_like(),
         )
     )
 }.flowOn(Dispatchers.IO)
@@ -224,6 +233,12 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
                         cwd = proc.cwd(),
                         diskReadBytes = du.total_read_bytes,
                         diskWrittenBytes = du.total_written_bytes,
+                        cmd = proc.cmd(),
+                        parentPid = proc.parent()?.as_u32()?.toLong(),
+                        openFiles = proc.open_files(),
+                        openFilesLimit = proc.open_files_limit(),
+                        accumulatedCpuTime = proc.accumulated_cpu_time(),
+                        taskCount = proc.tasks()?.size,
                     )
                 }
 
@@ -232,6 +247,7 @@ fun dynamicStateFlow(interval: kotlin.time.Duration = 2.seconds): Flow<DynamicSt
             val sensors = compList.list().map { comp ->
                 SensorInfo(
                     label = comp.label(),
+                    id = comp.id(),
                     temperature = comp.temperature(),
                     max = comp.max(),
                     critical = comp.critical(),
@@ -329,6 +345,9 @@ fun SystemTab(info: SystemInfo?, loadAvg: LoadAvg?) {
         item { InfoRow("Hostname", info.hostname) }
         item { InfoRow("Architecture", info.cpuArch) }
         item { InfoRow("Distribution", info.distributionId) }
+        if (info.distributionIdLike.isNotEmpty()) {
+            item { InfoRow("Distribution Like", info.distributionIdLike.joinToString(", ")) }
+        }
         item { InfoRow("Physical Cores", info.physicalCores?.toString() ?: "N/A") }
         item { InfoRow("Uptime", formatDuration(info.uptime)) }
         item { InfoRow("Boot Time", "${System.boot_time()}s since epoch") }
@@ -525,15 +544,28 @@ fun ProcessesTab(processes: List<ProcessInfo>) {
                             Text("Disk W: ${formatBytes(proc.diskWrittenBytes)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f))
                         }
                     }
-                    if (proc.exe != null) {
+                    if (proc.cmd.isNotEmpty()) {
+                        Text("Cmd: ${proc.cmd.joinToString(" ")}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f), maxLines = 1)
+                    } else if (proc.exe != null) {
                         Text("Exe: ${proc.exe}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f), maxLines = 1)
-                    }
-                    if (proc.cwd != null) {
-                        Text("Cwd: ${proc.cwd}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f), maxLines = 1)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Status: ${proc.status}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
                         Text("Running: ${formatDuration(proc.runTime)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        if (proc.parentPid != null) {
+                            Text("Parent: ${proc.parentPid}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                        }
+                        Text("CPU time: ${formatDuration(proc.accumulatedCpuTime)}", fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
+                    }
+                    val details = buildList {
+                        proc.openFiles?.let { add("FDs: $it") }
+                        proc.openFilesLimit?.let { add("Limit: $it") }
+                        proc.taskCount?.let { add("Threads: $it") }
+                    }
+                    if (details.isNotEmpty()) {
+                        Text(details.joinToString(" | "), fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f))
                     }
                 }
             }
@@ -557,7 +589,12 @@ fun SensorsTab(sensors: List<SensorInfo>) {
                 elevation = 2.dp,
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(sensor.label, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(sensor.label, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        if (sensor.id != null) {
+                            Text(sensor.id, fontSize = 11.sp, color = MaterialTheme.colors.onSurface.copy(alpha = 0.4f))
+                        }
+                    }
                     if (sensor.temperature != null) {
                         val critical = sensor.critical
                         val max = sensor.max
