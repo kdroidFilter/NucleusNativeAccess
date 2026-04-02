@@ -115,6 +115,12 @@ impl Calculator {
         panic!("Intentional error for testing");
     }
 
+    /// A function that never returns normally (diverges).
+    /// Returns Rust's `!` (Never) type, bridged as `Nothing` in Kotlin.
+    pub fn panic_always(&self) -> ! {
+        panic!("This calculator has crashed");
+    }
+
     pub fn get_current(&self) -> i32 {
         self.accumulator
     }
@@ -274,7 +280,8 @@ impl Calculator {
             CalcResult::Nothing
         } else if self.accumulator % divisor != 0 {
             let value = self.accumulator / divisor;
-            let confidence = 1.0 - ((self.accumulator % divisor) as f64 / self.accumulator as f64).abs();
+            let confidence =
+                1.0 - ((self.accumulator % divisor) as f64 / self.accumulator as f64).abs();
             CalcResult::Partial { value, confidence }
         } else {
             CalcResult::Value(self.accumulator / divisor)
@@ -315,7 +322,10 @@ impl Calculator {
     // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {
-        Point { x: self.accumulator, y: self.accumulator * 2 }
+        Point {
+            x: self.accumulator,
+            y: self.accumulator * 2,
+        }
     }
 
     pub fn add_point(&mut self, p: &Point) -> i32 {
@@ -324,8 +334,15 @@ impl Calculator {
     }
 
     pub fn get_named_value(&self) -> NamedValue {
-        let name = if self.label.is_empty() { "default".to_string() } else { self.label.clone() };
-        NamedValue { name, value: self.accumulator }
+        let name = if self.label.is_empty() {
+            "default".to_string()
+        } else {
+            self.label.clone()
+        };
+        NamedValue {
+            name,
+            value: self.accumulator,
+        }
     }
 
     pub fn set_from_named(&mut self, nv: &NamedValue) {
@@ -412,7 +429,9 @@ impl Calculator {
     /// Emits score labels as strings.
     /// @kne:flow(String)
     pub fn score_labels(&self, count: i32) -> Vec<String> {
-        (1..=count).map(|i| format!("Score #{}: {}", i, self.accumulator * i)).collect()
+        (1..=count)
+            .map(|i| format!("Score #{}: {}", i, self.accumulator * i))
+            .collect()
     }
 }
 
@@ -420,7 +439,10 @@ impl Calculator {
 
 impl Describable for Calculator {
     fn describe_self(&self) -> String {
-        format!("Calculator(current={}, label={})", self.accumulator, self.label)
+        format!(
+            "Calculator(current={}, label={})",
+            self.accumulator, self.label
+        )
     }
 }
 

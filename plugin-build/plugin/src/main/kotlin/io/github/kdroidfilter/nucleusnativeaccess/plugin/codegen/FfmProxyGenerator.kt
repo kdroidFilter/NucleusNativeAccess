@@ -251,7 +251,7 @@ class FfmProxyGenerator {
                     else -> flatLayouts.add(upcallLayout(t))
                 }
             }
-            val ret = if (sig.returnType == KneType.UNIT) null else upcallLayout(sig.returnType)
+            val ret = if (sig.returnType == KneType.UNIT || sig.returnType == KneType.NEVER) null else upcallLayout(sig.returnType)
             reg(flatLayouts, ret)
         }
 
@@ -491,6 +491,17 @@ class FfmProxyGenerator {
         appendLine("            }")
         appendLine("        }")
         appendLine("    }")
+        appendLine()
+        appendLine("    val errorMessage: String?")
+        appendLine("        get() = try {")
+        appendLine("            val hasError = HAS_ERROR_HANDLE.invoke() as Int")
+        appendLine("            if (hasError == 0) null")
+        appendLine("            else Arena.ofConfined().use { arena ->")
+        appendLine("                val buf = arena.allocate($ERR_BUF_SIZE.toLong())")
+        appendLine("                GET_LAST_ERROR_HANDLE.invoke(buf, $ERR_BUF_SIZE)")
+        appendLine("                buf.getString(0)")
+        appendLine("            }")
+        appendLine("        } catch (e: Throwable) { null }")
 
         // Generate upcall infrastructure for each callback signature
         if (callbackSignatures.isNotEmpty()) {
@@ -664,7 +675,7 @@ class FfmProxyGenerator {
         }.joinToString(", ")
 
         val returnJvmType = upcallJvmType(sig.returnType)
-        val returnDecl = if (sig.returnType == KneType.UNIT) "" else ": $returnJvmType"
+        val returnDecl = if (sig.returnType == KneType.UNIT || sig.returnType == KneType.NEVER) "" else ": $returnJvmType"
 
         appendLine()
         appendLine("    @JvmStatic")
@@ -738,7 +749,7 @@ class FfmProxyGenerator {
             }
         }.joinToString(", ")
 
-        if (sig.returnType == KneType.UNIT) {
+        if (sig.returnType == KneType.UNIT || sig.returnType == KneType.NEVER) {
             appendLine("        _fn.invoke($invokeConvertedArgs)")
         } else if (sig.returnType == KneType.BOOLEAN) {
             appendLine("        return if (_fn.invoke($invokeConvertedArgs)) 1 else 0")
@@ -808,7 +819,7 @@ class FfmProxyGenerator {
 
         // FunctionDescriptor for the callback's C ABI (DATA_CLASS expanded to fields)
         val descLayouts = flatParams.joinToString(", ") { upcallLayout(it.type) }
-        val descExpr = if (sig.returnType == KneType.UNIT) {
+        val descExpr = if (sig.returnType == KneType.UNIT || sig.returnType == KneType.NEVER) {
             if (descLayouts.isEmpty()) "FunctionDescriptor.ofVoid()"
             else "FunctionDescriptor.ofVoid($descLayouts)"
         } else {
@@ -946,6 +957,7 @@ class FfmProxyGenerator {
         KneType.SHORT -> "Short"
         KneType.STRING -> "MemorySegment"
         KneType.UNIT -> "Unit"
+        KneType.NEVER -> "Nothing"
         KneType.BYTE_ARRAY -> "MemorySegment" // packed buffer for return; expanded to ADDRESS+INT for params
         is KneType.OBJECT -> "Long" // opaque StableRef handle
         is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
@@ -956,6 +968,7 @@ class FfmProxyGenerator {
     /** The MethodType argument for a callback param/return type. */
     private fun upcallMethodTypeArg(type: KneType): String = when (type) {
         KneType.UNIT -> "Void.TYPE"
+        KneType.NEVER -> "Void.TYPE"
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
         KneType.BYTE_ARRAY -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.OBJECT -> "Long::class.javaPrimitiveType"
@@ -1656,6 +1669,10 @@ class FfmProxyGenerator {
                         appendLine("        $handleName.invoke($invokeArgs)")
                         appendLine("        KneRuntime.checkError()")
                     }
+                    KneType.NEVER -> {
+                        appendLine("        $handleName.invoke($invokeArgs)")
+                        appendLine("        throw RuntimeException(KneRuntime.errorMessage ?: \"Rust panic\")")
+                    }
                     KneType.STRING -> {
                         appendLine("        val _buf = arena.allocate(${STRING_BUF_SIZE}.toLong())")
                         appendLine("        val _len = $handleName.invoke(this.handle${if (fn.params.isNotEmpty()) ", " + fn.params.joinToString(", ") { when (it.type) { KneType.STRING -> "${it.name}Seg"; KneType.BOOLEAN -> "if (${it.name}) 1 else 0"; else -> it.name } } else ""}, _buf, $STRING_BUF_SIZE) as Int")
@@ -1685,6 +1702,10 @@ class FfmProxyGenerator {
                     KneType.UNIT -> {
                         appendLine("    $handleName.invoke($invokeArgs)")
                         appendLine("    KneRuntime.checkError()")
+                    }
+                    KneType.NEVER -> {
+                        appendLine("    $handleName.invoke($invokeArgs)")
+                        appendLine("    throw RuntimeException(KneRuntime.errorMessage ?: \"Rust panic\")")
                     }
                     KneType.BOOLEAN -> {
                         appendLine("    val _r = $handleName.invoke($invokeArgs) as Int")
@@ -3495,6 +3516,7 @@ class FfmProxyGenerator {
             returnDc != null -> KneType.UNIT
             isDcColl -> KneType.LONG // opaque handle
             fn.returnType.isCollection() -> KneType.INT // element count
+            fn.returnType == KneType.NEVER -> KneType.UNIT // diverging - never returns normally
             else -> fn.returnType
         }
         return buildDescriptor(effectiveReturn, paramLayouts)
@@ -3606,6 +3628,7 @@ class FfmProxyGenerator {
             returnDc != null -> KneType.UNIT
             isDcColl -> KneType.LONG // opaque handle
             fn.returnType.isCollection() -> KneType.INT // element count
+            fn.returnType == KneType.NEVER -> KneType.UNIT // diverging - never returns normally
             else -> fn.returnType
         }
         return buildDescriptor(effectiveReturn, paramLayouts)
@@ -3613,7 +3636,7 @@ class FfmProxyGenerator {
 
     private fun buildDescriptor(returnType: KneType, paramLayouts: List<String>): String {
         val params = paramLayouts.filter { it.isNotEmpty() }.joinToString(", ")
-        return if (returnType == KneType.UNIT || returnType.returnsViaBuffer() || returnType is KneType.DATA_CLASS) {
+        return if (returnType == KneType.UNIT || returnType == KneType.NEVER || returnType.returnsViaBuffer() || returnType is KneType.DATA_CLASS) {
             val retLayout = if (returnType.returnsViaBuffer()) "JAVA_INT" else ""
             if (retLayout.isEmpty()) "FunctionDescriptor.ofVoid($params)"
             else "FunctionDescriptor.of($retLayout${if (params.isNotEmpty()) ", $params" else ""})"
@@ -4333,6 +4356,10 @@ class FfmProxyGenerator {
             KneType.UNIT -> {
                 appendLine("${indent}$handleName.invoke($invokeArgs)")
                 appendLine("${indent}KneRuntime.checkError()")
+            }
+            KneType.NEVER -> {
+                appendLine("${indent}$handleName.invoke($invokeArgs)")
+                appendLine("${indent}throw RuntimeException(KneRuntime.errorMessage ?: \"Rust panic\")")
             }
             KneType.STRING -> {
                 appendStringReadWithRetry(indent, handleName, invokeArgs)

@@ -177,7 +177,7 @@ class NativeBridgeGenerator {
     private fun StringBuilder.appendTryCatchEnd(returnType: KneType) {
         appendLine("    } catch (e: Throwable) {")
         appendLine("        _kneLastError.value = e.message ?: e::class.simpleName ?: \"Unknown error\"")
-        if (returnType != KneType.UNIT) {
+        if (returnType != KneType.UNIT && returnType != KneType.NEVER) {
             appendLine("        return ${defaultErrorValue(returnType)}")
         }
         appendLine("    }")
@@ -193,6 +193,7 @@ class NativeBridgeGenerator {
         KneType.SHORT -> "0"
         KneType.STRING -> "0"
         KneType.UNIT -> ""
+        KneType.NEVER -> ""
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0L"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when (type.inner) {
@@ -877,6 +878,7 @@ class NativeBridgeGenerator {
         type.returnsViaBuffer() -> ": Int" // byte count (or -1 for null)
         type.returnsViaCollectionBuffer() -> ": Int" // element count
         type == KneType.UNIT -> ""
+        type == KneType.NEVER -> ""
         type is KneType.OBJECT -> ": Long"
         type is KneType.INTERFACE -> ": Long"
         type is KneType.ENUM -> ": Int"
@@ -1251,7 +1253,7 @@ class NativeBridgeGenerator {
             }
         }.joinToString(", ")
 
-        if (fnType.returnType == KneType.UNIT) {
+        if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) {
             appendLine("        _fnPtr.invoke($invokeArgs)")
         } else if (fnType.returnType == KneType.BYTE_ARRAY) {
             // Callback returns ByteArray as packed buffer: [size:Int32][pad:4][data...]
@@ -1445,6 +1447,7 @@ class NativeBridgeGenerator {
 
     private fun cFunctionReturnType(type: KneType): String = when (type) {
         KneType.UNIT -> "Unit"
+        KneType.NEVER -> "Unit"
         KneType.BOOLEAN -> "Int" // C uses int for bool
         KneType.STRING -> "CPointer<ByteVar>?"
         KneType.BYTE_ARRAY -> "CPointer<ByteVar>?" // packed buffer: [size][pad][data]
@@ -1461,6 +1464,7 @@ class NativeBridgeGenerator {
             KneType.BYTE_ARRAY -> appendByteArrayReturn(expr)
             KneType.STRING -> appendStringReturn(expr)
             KneType.UNIT -> appendLine("    $expr")
+            KneType.NEVER -> appendLine("    $expr")
             KneType.BOOLEAN -> appendLine("    return if ($expr) 1 else 0")
             is KneType.OBJECT, is KneType.INTERFACE -> appendLine("    return StableRef.create($expr).asCPointer().toLong()")
             is KneType.ENUM -> appendLine("    return ($expr).ordinal")
@@ -1492,6 +1496,7 @@ class NativeBridgeGenerator {
             is KneType.OBJECT, is KneType.INTERFACE -> appendLine("    return if (_result != null) StableRef.create(_result).asCPointer().toLong() else 0L")
             is KneType.ENUM -> appendLine("    return _result?.ordinal ?: -1")
             KneType.UNIT -> appendLine("    _result")
+            KneType.NEVER -> appendLine("    _result")
             else -> appendLine("    return _result")
         }
     }
@@ -2207,7 +2212,7 @@ class NativeBridgeGenerator {
         appendLine("        try {")
 
         // Call suspend function and encode result
-        if (fn.returnType == KneType.UNIT) {
+        if (fn.returnType == KneType.UNIT || fn.returnType == KneType.NEVER) {
             appendLine("            obj.${fn.name}($callArgs)")
             appendLine("            val _contFn = _contPtr.toCPointer<CFunction<(Int, Long) -> Unit>>()!!")
             appendLine("            _contFn.invoke(1, 0L)")
@@ -2396,6 +2401,7 @@ class NativeBridgeGenerator {
 
         val returnDecl = when (fnType.returnType) {
             KneType.UNIT -> ""
+            KneType.NEVER -> ""
             KneType.BOOLEAN -> ": Int"
             KneType.STRING -> ": Long" // StableRef<String>
             KneType.BYTE_ARRAY -> ": Long" // StableRef<ByteArray>
@@ -2422,6 +2428,7 @@ class NativeBridgeGenerator {
 
         when (fnType.returnType) {
             KneType.UNIT -> appendLine("    _fn.invoke($invokeArgs)")
+            KneType.NEVER -> appendLine("    _fn.invoke($invokeArgs)")
             KneType.BOOLEAN -> appendLine("    return if (_fn.invoke($invokeArgs)) 1 else 0")
             KneType.STRING -> appendLine("    return StableRef.create(_fn.invoke($invokeArgs)).asCPointer().toLong()")
             KneType.BYTE_ARRAY -> appendLine("    return StableRef.create(_fn.invoke($invokeArgs)).asCPointer().toLong()")

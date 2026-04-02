@@ -133,6 +133,7 @@ sealed class KneType : Serializable {
     object SHORT : KneType()
     object STRING : KneType()
     object UNIT : KneType()
+    object NEVER : KneType()
     data class OBJECT(val fqName: String, val simpleName: String) : KneType()
     data class INTERFACE(val fqName: String, val simpleName: String) : KneType()
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
@@ -158,6 +159,7 @@ sealed class KneType : Serializable {
             SHORT -> "JAVA_SHORT"
             STRING -> "ADDRESS" // char* (input) or output buffer pattern (return)
             UNIT -> "" // void — used with FunctionDescriptor.ofVoid(...)
+            NEVER -> "" // void — diverging type never returns
             is OBJECT -> "JAVA_LONG" // opaque handle
             is INTERFACE -> "JAVA_LONG" // opaque handle (same as OBJECT)
             is SEALED_ENUM -> "JAVA_LONG" // opaque handle
@@ -191,6 +193,7 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "String"
             UNIT -> "Unit"
+            NEVER -> "Nothing"
             is OBJECT -> simpleName
             is INTERFACE -> simpleName
             is SEALED_ENUM -> simpleName
@@ -217,6 +220,7 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "CPointer<ByteVar>?" // null-terminated char*
             UNIT -> "Unit"
+            NEVER -> "Nothing" // diverging type - never returns
             is OBJECT -> "Long" // opaque handle
             is INTERFACE -> "Long" // opaque handle (same as OBJECT)
             is SEALED_ENUM -> "Long" // opaque handle

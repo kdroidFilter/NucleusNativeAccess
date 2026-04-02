@@ -243,28 +243,43 @@ class RustBridgeGenerator {
             if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
             append(", out_max_len: i32")
         }
-        appendLine(") -> ${rustCReturnType(fn.returnType)} {")
+        appendLine(") -> ${if (fn.returnType == KneType.NEVER) "()" else rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
-        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-        appendReceiverBinding(fn, cls.rustTypeName)
-        for (p in fn.params) {
-            appendParamConversion(p)
-        }
-        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
-        if (fn.canFail) {
-            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+        if (fn.returnType == KneType.NEVER) {
+            appendReceiverBinding(fn, cls.rustTypeName)
+            for (p in fn.params) {
+                appendParamConversion(p)
+            }
+            val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+            val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendLine("        $expr")
+            appendLine("    })) {")
+            appendLine("        Ok(_) => unreachable!(),")
+            appendLine("        Err(e) => { kne_set_panic_error(e); }")
+            appendLine("    }")
         } else {
-            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendReceiverBinding(fn, cls.rustTypeName)
+            for (p in fn.params) {
+                appendParamConversion(p)
+            }
+            val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+            val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
+            if (fn.canFail) {
+                appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            } else {
+                appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            }
+            appendLine("    })) {")
+            if (fn.returnType is KneType.DATA_CLASS) {
+                appendLine("        Ok(_) => {},")
+            } else {
+                appendLine("        Ok(v) => v,")
+            }
+            appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
+            appendLine("    }")
         }
-        appendLine("    })) {")
-        if (fn.returnType is KneType.DATA_CLASS) {
-            appendLine("        Ok(_) => {},")
-        } else {
-            appendLine("        Ok(v) => v,")
-        }
-        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
-        appendLine("    }")
         appendLine("}")
         appendLine()
     }
@@ -517,6 +532,9 @@ class RustBridgeGenerator {
                 appendLine("${indent}len")
             }
             KneType.UNIT -> {
+                appendLine("${indent}()")
+            }
+            KneType.NEVER -> {
                 appendLine("${indent}()")
             }
             is KneType.DATA_CLASS -> {
@@ -1278,6 +1296,7 @@ class RustBridgeGenerator {
                 appendLine("                cont_fn(1, str_handle);")
             }
             KneType.UNIT -> appendLine("                cont_fn(1, 0i64);")
+            KneType.NEVER -> appendLine("                cont_fn(1, 0i64);")
             is KneType.OBJECT -> {
                 appendLine("                let obj_handle = Box::into_raw(Box::new(value)) as i64;")
                 appendLine("                cont_fn(1, obj_handle);")
@@ -1572,20 +1591,20 @@ class RustBridgeGenerator {
         if (!needsConversion) {
             // Direct transmute to Rust fn pointer (safe for primitives on x86-64/aarch64)
             val nativeParams = fnType.paramTypes.joinToString(", ") { rustNativeType(it) }
-            val nativeRet = if (fnType.returnType == KneType.UNIT) "()" else rustNativeType(fnType.returnType)
+            val nativeRet = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustNativeType(fnType.returnType)
             appendLine("${indent}let ${p.name}_fn: fn($nativeParams) -> $nativeRet = unsafe { std::mem::transmute(${p.name}) };")
         } else {
             // Transmute to extern "C" fn, then wrap in closure for type conversion
             val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->
                 "_p$i: ${rustCType(t)}"
             }.joinToString(", ")
-            val cRetType = if (fnType.returnType == KneType.UNIT) "()" else rustCType(fnType.returnType)
+            val cRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustCType(fnType.returnType)
             appendLine("${indent}let ${p.name}_c: extern \"C\" fn($cParamTypes) -> $cRetType = unsafe { std::mem::transmute(${p.name}) };")
 
             val closureParams = fnType.paramTypes.mapIndexed { i, t ->
                 "_cp$i: ${rustNativeType(t)}"
             }.joinToString(", ")
-            val closureRetType = if (fnType.returnType == KneType.UNIT) "" else " -> ${rustNativeType(fnType.returnType)}"
+            val closureRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "" else " -> ${rustNativeType(fnType.returnType)}"
             val callArgs = fnType.paramTypes.mapIndexed { i, t ->
                 rustToCCallArgConvert("_cp$i", t)
             }.joinToString(", ")
@@ -1618,6 +1637,7 @@ class RustBridgeGenerator {
     /** Convert a C ABI return value back to Rust native type. */
     private fun rustFromCRetConvert(expr: String, type: KneType): String = when (type) {
         KneType.UNIT -> expr
+        KneType.NEVER -> expr
         KneType.BOOLEAN -> "$expr != 0"
         KneType.STRING -> "unsafe { std::ffi::CString::from_raw($expr as *mut c_char) }.into_string().unwrap_or_default()"
         else -> expr
@@ -1954,6 +1974,7 @@ class RustBridgeGenerator {
         KneType.SHORT -> "i16"
         KneType.STRING -> "*const c_char"
         KneType.UNIT -> "()"
+        KneType.NEVER -> "!"
         is KneType.OBJECT -> "i64" // opaque handle
         is KneType.INTERFACE -> "i64"
         is KneType.SEALED_ENUM -> "i64" // opaque handle
@@ -1980,6 +2001,7 @@ class RustBridgeGenerator {
         KneType.STRING -> "i32"
         KneType.BYTE_ARRAY -> "i32"
         KneType.UNIT -> "()"
+        KneType.NEVER -> "!"
         is KneType.LIST -> "i32"
         is KneType.MAP -> "i32" // element count
         is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
@@ -2011,6 +2033,7 @@ class RustBridgeGenerator {
         KneType.BOOLEAN -> "0"
         KneType.STRING -> "0" // byte count = 0
         KneType.UNIT -> "()"
+        KneType.NEVER -> "()"
         is KneType.MAP -> "0" // element count = 0
         is KneType.DATA_CLASS -> "()" // out-params pattern, void return
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"

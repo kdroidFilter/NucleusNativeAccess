@@ -466,4 +466,64 @@ class RustdocJsonParserTest {
         val appIndicator = builder.methods.first { it.name == "app_indicator" }
         assertTrue(appIndicator.isUnsafe)
     }
+
+    @Test
+    fun `reports unsupported signatures through callback`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0,
+                  "crate_id": 0,
+                  "name": "sample",
+                  "visibility": "public",
+                  "inner": {
+                    "module": {
+                      "items": [1],
+                      "is_crate": true,
+                      "is_stripped": false
+                    }
+                  }
+                },
+                "1": {
+                  "id": 1,
+                  "crate_id": 0,
+                  "name": "bad_fn",
+                  "visibility": "public",
+                  "span": {
+                    "filename": "src/lib.rs"
+                  },
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [
+                          ["value", {"tuple": [
+                            {"primitive": "i32"},
+                            {"primitive": "i32"}
+                          ]}]
+                        ],
+                        "output": {"primitive": "i32"},
+                        "is_c_variadic": false
+                      },
+                      "generics": {
+                        "params": [],
+                        "where_predicates": []
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val unsupported = mutableListOf<String>()
+        val parsed = RustdocJsonParser().parse(json, "sample") { unsupported.add(it) }
+
+        assertTrue(parsed.functions.isEmpty())
+        assertTrue(unsupported.size >= 1)
+        assertTrue(unsupported.any { it.contains("bad_fn") })
+        assertTrue(unsupported.any { it.contains("unsupported param 'value'") })
+        assertTrue(unsupported.any { it.contains("unsupported parameter type") })
+    }
 }

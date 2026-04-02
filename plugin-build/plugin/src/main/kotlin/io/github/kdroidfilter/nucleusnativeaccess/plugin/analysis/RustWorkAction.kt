@@ -52,8 +52,13 @@ object RustWorkAction {
 
         // Step 4: Parse JSON → KneModule
         val jsonContent = rustdocJson.readText()
-        val module = RustdocJsonParser().parse(jsonContent, libName)
+        val unsupported = mutableListOf<String>()
+        val module = RustdocJsonParser().parse(jsonContent, libName) { unsupported.add(it) }
         logger.lifecycle("kne-rust: Parsed ${module.classes.size} classes, ${module.dataClasses.size} data classes, ${module.enums.size} enums, ${module.functions.size} functions")
+        if (unsupported.isNotEmpty()) {
+            logger.warn("kne-rust: Skipped unsupported API elements:")
+            unsupported.forEach { logger.warn("kne-rust:   $it") }
+        }
 
         // Step 5: Generate Rust bridges (into Gradle build dir, NOT into crate src)
         if (module.classes.isNotEmpty() || module.enums.isNotEmpty() || module.functions.isNotEmpty() || module.dataClasses.isNotEmpty()) {

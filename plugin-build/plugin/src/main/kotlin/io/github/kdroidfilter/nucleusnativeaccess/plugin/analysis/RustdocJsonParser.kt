@@ -43,7 +43,11 @@ class RustdocJsonParser {
         val rustType: String? = null,
     )
 
-    fun parse(json: String, libName: String): KneModule {
+    fun parse(
+        json: String,
+        libName: String,
+        onUnsupported: (String) -> Unit = {},
+    ): KneModule {
         encounteredOpaqueClasses = linkedMapOf()
         reservedTopLevelTypeNames = emptySet()
 
@@ -174,7 +178,10 @@ class RustdocJsonParser {
                     val sig = fn.getAsJsonObject("sig")
                     val inputs = sig.getAsJsonArray("inputs")
                     val genericTypes = resolveGenericMappings(fn.getAsJsonObject("generics"), knownStructs, knownEnums, emptyMap(), selfType)
-                    if (hasUnsupportedGenerics(fn.getAsJsonObject("generics"), genericTypes)) continue
+                    if (hasUnsupportedGenerics(fn.getAsJsonObject("generics"), genericTypes)) {
+                        onUnsupported("Skipped constructor '${methodName}' for ${typeDisplayName(selfType)}: unsupported generic signature")
+                        continue
+                    }
                     val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, emptyMap(), genericTypes, selfType)
                     val isConstructor = methodName == "new" && !hasSelfParam(inputs) && returnType?.type == selfType
 
@@ -223,6 +230,7 @@ class RustdocJsonParser {
                 knownEnums = knownEnums,
                 knownDataClasses = knownDataClasses,
                 selfType = selfType,
+                onUnsupported = { onUnsupported("Class '$name': $it") },
             )
 
             val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { entry ->
@@ -234,6 +242,7 @@ class RustdocJsonParser {
                     receiverKind = entry.receiverKind,
                     docs = entry.docs,
                     ownerType = selfType,
+                    onUnsupported = { onUnsupported("Class '${name}': $it") },
                 )?.let { if (entry.isOverride) it.copy(isOverride = true) else it }
             }
 
@@ -246,6 +255,7 @@ class RustdocJsonParser {
                     receiverKind = KneReceiverKind.NONE,
                     docs = methodItem.get("docs").safeString(),
                     ownerType = selfType,
+                    onUnsupported = { onUnsupported("Class '${name}': $it") },
                 )
             }
 
@@ -285,6 +295,8 @@ class RustdocJsonParser {
                         knownStructs = knownStructs,
                         knownEnums = knownEnums,
                         knownDataClasses = knownDataClasses,
+                        context = "${name}::${variantName}",
+                        onUnsupported = onUnsupported,
                     ) ?: continue
                     variants.add(KneSealedVariant(variantName, parsed.first, parsed.second))
                 }
@@ -329,6 +341,7 @@ class RustdocJsonParser {
                 receiverKind = KneReceiverKind.NONE,
                 docs = item.get("docs").safeString(),
                 ownerType = null,
+                onUnsupported = { onUnsupported("Top-level function '$name': $it") },
             )?.let(topLevelFunctions::add)
         }
 
@@ -350,6 +363,7 @@ class RustdocJsonParser {
                     knownDataClasses = knownDataClasses,
                     receiverKind = if (hasSelfParam(sig.getAsJsonArray("inputs"))) classifyReceiverKind(sig.getAsJsonArray("inputs")) else KneReceiverKind.NONE,
                     ownerType = selfType,
+                    onUnsupported = onUnsupported,
                 )
             }
             interfaces.add(
@@ -460,10 +474,15 @@ class RustdocJsonParser {
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        context: String = "unknown variant",
+        onUnsupported: (String) -> Unit = {},
     ): Pair<List<KneParam>, Boolean>? {
         if (kind == null || kind.isJsonNull) return emptyList<KneParam>() to false
         if (kind.isJsonPrimitive && kind.asString == "plain") return emptyList<KneParam>() to false
-        if (!kind.isJsonObject) return null
+        if (!kind.isJsonObject) {
+            onUnsupported("Skipped $context: unsupported variant kind")
+            return null
+        }
         val kindObj = kind.asJsonObject
 
         if (kindObj.has("tuple")) {
@@ -493,6 +512,7 @@ class RustdocJsonParser {
             return fields to false
         }
 
+        onUnsupported("Skipped $context: unsupported variant structure")
         return null
     }
 
@@ -652,15 +672,32 @@ class RustdocJsonParser {
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass>,
         selfType: KneType.OBJECT,
+        onUnsupported: (String) -> Unit = {},
     ): KneConstructor {
         if (newFn != null) {
             val function = newFn.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
             val generics = resolveGenericMappings(function.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, selfType)
-            if (!hasUnsupportedGenerics(function.getAsJsonObject("generics"), generics)) {
-                val sig = function.getAsJsonObject("sig")
-                val params = buildParams(sig.getAsJsonArray("inputs"), knownStructs, knownEnums, knownDataClasses, generics, selfType)
+            if (hasUnsupportedGenerics(function.getAsJsonObject("generics"), generics)) {
+                onUnsupported("Skipped constructor '${selfType.simpleName}::new': unsupported generic signature")
+                return KneConstructor(emptyList(), KneConstructorKind.NONE)
+            }
+
+            val sig = function.getAsJsonObject("sig")
+            val params = buildParams(
+                inputs = sig.getAsJsonArray("inputs"),
+                knownStructs = knownStructs,
+                knownEnums = knownEnums,
+                knownDataClasses = knownDataClasses,
+                genericTypes = generics,
+                selfType = selfType,
+                context = "constructor ${selfType.simpleName}",
+                onUnsupported = onUnsupported,
+            )
+            if (params != null) {
                 return KneConstructor(params = params, kind = KneConstructorKind.FUNCTION, canFail = isResultType(sig.get("output")))
             }
+            onUnsupported("Skipped constructor '${selfType.simpleName}::new': unsupported parameter type")
+            return KneConstructor(emptyList(), KneConstructorKind.NONE)
         }
 
         val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return KneConstructor(emptyList(), KneConstructorKind.NONE)
@@ -691,17 +728,45 @@ class RustdocJsonParser {
         receiverKind: KneReceiverKind = KneReceiverKind.NONE,
         docs: String? = null,
         ownerType: KneType? = null,
+        onUnsupported: (String) -> Unit = {},
     ): KneFunction? {
         val name = methodItem.get("name").safeString() ?: return null
         val inner = methodItem.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return null
         val genericTypes = resolveGenericMappings(inner.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, ownerType)
-        if (hasUnsupportedGenerics(inner.getAsJsonObject("generics"), genericTypes)) return null
+        if (hasUnsupportedGenerics(inner.getAsJsonObject("generics"), genericTypes)) {
+            onUnsupported("Skipped method '$name': unsupported generic signature")
+            return null
+        }
 
         val sig = inner.getAsJsonObject("sig")
         val inputs = sig.getAsJsonArray("inputs")
-        val params = buildParams(inputs, knownStructs, knownEnums, knownDataClasses, genericTypes, ownerType, skipSelf = hasSelfParam(inputs))
-        val returnResolved = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, ownerType)
-        val returnType = returnResolved?.type ?: KneType.UNIT
+        val params = buildParams(
+            inputs = inputs,
+            knownStructs = knownStructs,
+            knownEnums = knownEnums,
+            knownDataClasses = knownDataClasses,
+            genericTypes = genericTypes,
+            selfType = ownerType,
+            skipSelf = hasSelfParam(inputs),
+            context = "method '$name'",
+            onUnsupported = onUnsupported,
+        ) ?: run {
+            onUnsupported("Skipped method '$name': unsupported parameter type")
+            return null
+        }
+        val returnResolved = resolveReturnTypeOrUnit(
+            output = sig.get("output"),
+            knownStructs = knownStructs,
+            knownEnums = knownEnums,
+            knownDataClasses = knownDataClasses,
+            genericTypes = genericTypes,
+            selfType = ownerType,
+        )
+        if (returnResolved == null) {
+            onUnsupported("Skipped method '$name': unsupported return type")
+            return null
+        }
+        val returnType = returnResolved.type
 
         val isSuspend = docs?.contains("@kne:suspend") == true
         val flowMatch = docs?.let { Regex("@kne:flow\\((\\w+)\\)").find(it) }
@@ -729,8 +794,8 @@ class RustdocJsonParser {
             isMutating = receiverKind == KneReceiverKind.BORROWED_MUT,
             receiverKind = receiverKind,
             canFail = isResultType(sig.get("output")),
-            returnsBorrowed = returnResolved?.isBorrowed == true,
-            returnRustType = returnResolved?.rustType,
+            returnsBorrowed = returnResolved.isBorrowed,
+            returnRustType = returnResolved.rustType,
             isUnsafe = inner.getAsJsonObject("header")?.get("is_unsafe")?.asBoolean == true,
         )
     }
@@ -743,13 +808,19 @@ class RustdocJsonParser {
         genericTypes: Map<String, ResolvedType> = emptyMap(),
         selfType: KneType? = null,
         skipSelf: Boolean = false,
-    ): List<KneParam> {
+        context: String = "unknown item",
+        onUnsupported: (String) -> Unit = {},
+    ): List<KneParam>? {
         val params = mutableListOf<KneParam>()
         for (input in inputs) {
             val arr = input.asJsonArray
             val paramName = arr[0].asString
             if (skipSelf && paramName == "self") continue
-            val resolved = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: continue
+            val resolved = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+            if (resolved == null) {
+                onUnsupported("$context has unsupported param '$paramName'")
+                return null
+            }
             params.add(
                 KneParam(
                     name = paramName,
@@ -786,6 +857,20 @@ class RustdocJsonParser {
         return resolveType(obj, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
     }
 
+    private fun resolveReturnTypeOrUnit(
+        output: JsonElement?,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
+        genericTypes: Map<String, ResolvedType> = emptyMap(),
+        selfType: KneType? = null,
+    ): ResolvedType? {
+        if (output == null || output.isJsonNull) {
+            return ResolvedType(type = KneType.UNIT, rustType = "()")
+        }
+        return resolveTypeWithBorrow(output, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+    }
+
     private fun resolveType(
         typeJson: JsonElement?,
         knownStructs: Map<Int, String>,
@@ -808,6 +893,8 @@ class RustdocJsonParser {
                 "i8", "u8" -> KneType.BYTE
                 "i16", "u16" -> KneType.SHORT
                 "str" -> KneType.STRING
+                "!" -> KneType.NEVER
+                "never" -> KneType.NEVER
                 else -> null
             } ?: return null
             return ResolvedType(type = type, rustType = primitive)
@@ -1044,6 +1131,15 @@ class RustdocJsonParser {
         else -> false
     }
 
+    private fun typeDisplayName(type: KneType?): String = when (type) {
+        null -> "unknown"
+        is KneType.OBJECT -> type.fqName
+        is KneType.INTERFACE -> type.fqName
+        is KneType.ENUM -> type.fqName
+        is KneType.SEALED_ENUM -> type.fqName
+        else -> type.toString()
+    }
+
     private fun recordOpaqueClass(simpleName: String, fqName: String, rustTypeName: String): KneClass {
         return encounteredOpaqueClasses.getOrPut(fqName) {
             val uniqueSimpleName = uniqueOpaqueSimpleName(simpleName, fqName)
@@ -1263,6 +1359,7 @@ class RustdocJsonParser {
         KneType.SHORT -> "i16"
         KneType.STRING -> "String"
         KneType.UNIT -> "()"
+        KneType.NEVER -> "!"
         is KneType.OBJECT -> type.simpleName
         is KneType.INTERFACE -> type.simpleName
         is KneType.ENUM -> type.simpleName
