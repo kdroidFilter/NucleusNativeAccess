@@ -302,9 +302,9 @@ class RustBridgeGenerator {
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
             val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
             if (fn.canFail) {
-                appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+                appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
             } else {
-                appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+                appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
             }
             appendLine("    })) {")
             if (fn.returnType is KneType.DATA_CLASS) {
@@ -377,9 +377,9 @@ class RustBridgeGenerator {
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
         val expr = wrapCallForSafety("${cls.simpleName}::${fn.name}($callArgs)", fn.isUnsafe)
         if (fn.canFail) {
-            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
-            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         }
         appendLine("    })) {")
         if (fn.returnType is KneType.DATA_CLASS) {
@@ -526,10 +526,11 @@ class RustBridgeGenerator {
         returnType: KneType,
         returnRustType: String? = null,
         returnsBorrowed: Boolean = false,
+        returnConversion: String? = null,
     ) {
         appendLine("        match $expr {")
         appendLine("            Ok(result) => {")
-        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "            ")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "            ", returnConversion)
         appendLine("            }")
         appendLine("            Err(e) => {")
         appendLine("                kne_set_error(e.to_string());")
@@ -543,9 +544,10 @@ class RustBridgeGenerator {
         returnType: KneType,
         returnRustType: String? = null,
         returnsBorrowed: Boolean = false,
+        returnConversion: String? = null,
     ) {
         appendLine("        let result = $expr;")
-        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "        ")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "        ", returnConversion)
     }
 
     private fun StringBuilder.appendValueReturnFromBinding(
@@ -554,7 +556,11 @@ class RustBridgeGenerator {
         returnRustType: String? = null,
         returnsBorrowed: Boolean = false,
         indent: String = "        ",
+        returnConversion: String? = null,
     ) {
+        if (returnConversion != null) {
+            appendLine("${indent}let $binding = $binding$returnConversion;")
+        }
         when (returnType) {
             KneType.STRING -> {
                 appendStringOutput(binding, indent, returnRustType)
@@ -1159,9 +1165,9 @@ class RustBridgeGenerator {
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
         val expr = wrapCallForSafety("${fn.name}($callArgs)", fn.isUnsafe)
         if (fn.canFail) {
-            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
-            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed)
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         }
         appendLine("    })) {")
         if (fn.returnType is KneType.DATA_CLASS) {

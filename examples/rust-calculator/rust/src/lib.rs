@@ -506,6 +506,146 @@ impl Calculator {
             .map(|i| format!("Score #{}: {}", i, self.accumulator * i))
             .collect()
     }
+
+    // ── impl Trait return types ─────────────────────────────────────────
+
+    /// Returns an iterator over the recent scores (impl Iterator<Item = i32>).
+    pub fn iter_scores(&self) -> impl Iterator<Item = i32> {
+        let acc = self.accumulator;
+        (1..=3).map(move |i| acc * i)
+    }
+
+    /// Returns an iterator over score labels (impl Iterator<Item = String>).
+    pub fn iter_labels(&self) -> impl Iterator<Item = String> {
+        let acc = self.accumulator;
+        (1..=3).map(move |i| format!("score_{}", acc * i))
+    }
+
+    /// Returns an empty iterator (edge case: zero elements).
+    pub fn iter_empty(&self) -> impl Iterator<Item = i32> {
+        std::iter::empty()
+    }
+
+    /// Returns a Display-able description (impl Display).
+    pub fn display_value(&self) -> impl std::fmt::Display {
+        format!("Calc({})", self.accumulator)
+    }
+
+    /// Returns impl ToString (mapped via .to_string()).
+    pub fn as_string_repr(&self) -> impl ToString {
+        self.accumulator
+    }
+
+    /// Returns an ExactSizeIterator (also recognized as Iterator).
+    pub fn exact_scores(&self) -> impl ExactSizeIterator<Item = i32> {
+        let acc = self.accumulator;
+        vec![acc, acc * 2, acc * 3].into_iter()
+    }
+
+    /// Returns impl Iterator with a Result-wrapped return (canFail + implTrait).
+    pub fn try_iter_scores(&self) -> Result<impl Iterator<Item = i32>, String> {
+        if self.accumulator < 0 {
+            Err("negative accumulator".to_string())
+        } else {
+            let acc = self.accumulator;
+            Ok((1..=3).map(move |i| acc * i))
+        }
+    }
+
+    /// impl Iterator<Item = bool> — tests boolean element type.
+    pub fn iter_flags(&self) -> impl Iterator<Item = bool> {
+        let acc = self.accumulator;
+        vec![acc > 0, acc > 10, acc > 100].into_iter()
+    }
+
+    /// impl Iterator<Item = f64> — tests float element type.
+    pub fn iter_ratios(&self) -> impl Iterator<Item = f64> {
+        let acc = self.accumulator as f64;
+        vec![acc / 2.0, acc / 3.0, acc / 4.0].into_iter()
+    }
+
+    /// impl Iterator<Item = i64> — tests Long element type.
+    pub fn iter_big_values(&self) -> impl Iterator<Item = i64> {
+        let acc = self.accumulator as i64;
+        vec![acc * 1_000_000, acc * 2_000_000].into_iter()
+    }
+
+    /// Large iterator — triggers buffer overflow/retry logic (>4096 elements).
+    pub fn iter_large(&self, count: i32) -> impl Iterator<Item = i32> {
+        let acc = self.accumulator;
+        (0..count).map(move |i| acc + i)
+    }
+
+    /// &mut self + impl Iterator — mutable receiver with impl Trait return.
+    pub fn drain_and_iter(&mut self, n: i32) -> impl Iterator<Item = i32> {
+        self.accumulator += n;
+        let acc = self.accumulator;
+        (1..=3).map(move |i| acc * i)
+    }
+
+    /// impl Display with unicode content.
+    pub fn display_unicode(&self) -> impl std::fmt::Display {
+        format!("計算機({})", self.accumulator)
+    }
+
+    /// impl Display with very long string (>8192 bytes, triggers buffer retry).
+    pub fn display_long(&self) -> impl std::fmt::Display {
+        format!("x{}", "A".repeat(10_000))
+    }
+
+    /// impl DoubleEndedIterator — tested to ensure trait recognition.
+    pub fn iter_reversed(&self) -> impl DoubleEndedIterator<Item = i32> {
+        let acc = self.accumulator;
+        vec![acc, acc * 2, acc * 3].into_iter()
+    }
+
+    /// impl IntoIterator — tested to ensure trait recognition.
+    pub fn iter_into(&self) -> impl IntoIterator<Item = i32> {
+        let acc = self.accumulator;
+        vec![acc, acc + 1, acc + 2]
+    }
+
+    /// impl Iterator + Send — multiple bounds, should still work.
+    pub fn iter_sendable(&self) -> impl Iterator<Item = i32> + Send {
+        let acc = self.accumulator;
+        vec![acc, acc * 10].into_iter()
+    }
+
+    /// Result<impl Display, String> — fallible + Display.
+    pub fn try_display(&self) -> Result<impl std::fmt::Display, String> {
+        if self.accumulator < 0 {
+            Err("negative".to_string())
+        } else {
+            Ok(format!("OK({})", self.accumulator))
+        }
+    }
+
+    /// Panic during .collect() — tests error propagation from inside iterator.
+    pub fn iter_panicking(&self) -> impl Iterator<Item = i32> {
+        let acc = self.accumulator;
+        (0..3).map(move |i| {
+            if i == 2 && acc < 0 { panic!("iterator panic at index 2"); }
+            acc + i
+        })
+    }
+
+    /// Companion/static method returning impl Iterator (no &self).
+    pub fn fibonacci_iter(n: i32) -> impl Iterator<Item = i32> {
+        let mut a = 0i32;
+        let mut b = 1i32;
+        (0..n).map(move |_| {
+            let val = a;
+            let next = a.wrapping_add(b);
+            a = b;
+            b = next;
+            val
+        })
+    }
+
+    /// Companion/static method returning impl Display (no &self).
+    pub fn static_label(prefix: String, value: i32) -> impl std::fmt::Display {
+        format!("{}={}", prefix, value)
+    }
 }
 
 // ── Trait implementations ───────────────────────────────────────────────
@@ -562,6 +702,41 @@ pub fn sum_all(numbers: &[i32]) -> i32 {
 /// Finds the maximum value in a slice, or None if empty.
 pub fn find_max(numbers: &[i32]) -> Option<i32> {
     numbers.iter().copied().max()
+}
+
+/// Top-level function returning impl Iterator (generates a range).
+pub fn generate_range(start: i32, end: i32) -> impl Iterator<Item = i32> {
+    start..end
+}
+
+/// Top-level function returning impl Display.
+pub fn format_pair(a: i32, b: i32) -> impl std::fmt::Display {
+    format!("{} + {} = {}", a, b, a + b)
+}
+
+/// Top-level impl Into<String>.
+pub fn into_greeting(name: String) -> impl Into<String> {
+    format!("Hi, {}!", name)
+}
+
+/// Top-level impl AsRef<str>.
+pub fn as_ref_label(value: i32) -> impl AsRef<str> {
+    format!("label_{}", value)
+}
+
+/// Top-level impl Iterator<Item = String> with String param.
+pub fn repeat_str(text: String, count: i32) -> impl Iterator<Item = String> {
+    let t = text;
+    (0..count).map(move |_| t.clone())
+}
+
+/// Top-level Result<impl Display, String>.
+pub fn try_format(a: i32, b: i32) -> Result<impl std::fmt::Display, String> {
+    if b == 0 {
+        Err("division by zero".to_string())
+    } else {
+        Ok(format!("{} / {} = {}", a, b, a / b))
+    }
 }
 
 #[cfg(test)]
@@ -644,6 +819,54 @@ mod tests {
         assert_eq!(compute(3, 4, &Operation::Add), 7);
         assert_eq!(compute(10, 3, &Operation::Subtract), 7);
         assert_eq!(compute(3, 4, &Operation::Multiply), 12);
+    }
+
+    #[test]
+    fn test_impl_trait_iter_scores() {
+        let calc = Calculator::new(5);
+        let scores: Vec<i32> = calc.iter_scores().collect();
+        assert_eq!(scores, vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn test_impl_trait_iter_labels() {
+        let calc = Calculator::new(2);
+        let labels: Vec<String> = calc.iter_labels().collect();
+        assert_eq!(labels, vec!["score_2", "score_4", "score_6"]);
+    }
+
+    #[test]
+    fn test_impl_trait_iter_empty() {
+        let calc = Calculator::new(1);
+        let empty: Vec<i32> = calc.iter_empty().collect();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_impl_trait_display_value() {
+        let calc = Calculator::new(42);
+        assert_eq!(calc.display_value().to_string(), "Calc(42)");
+    }
+
+    #[test]
+    fn test_impl_trait_generate_range() {
+        let range: Vec<i32> = generate_range(1, 4).collect();
+        assert_eq!(range, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_impl_trait_format_pair() {
+        assert_eq!(format_pair(3, 4).to_string(), "3 + 4 = 7");
+    }
+
+    #[test]
+    fn test_impl_trait_try_iter_scores() {
+        let calc = Calculator::new(5);
+        let scores: Vec<i32> = calc.try_iter_scores().unwrap().collect();
+        assert_eq!(scores, vec![5, 10, 15]);
+
+        let neg = Calculator::new(-1);
+        assert!(neg.try_iter_scores().is_err());
     }
 }
 

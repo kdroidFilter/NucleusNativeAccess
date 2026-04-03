@@ -104,6 +104,8 @@ data class KneFunction(
     val returnsBorrowed: Boolean = false,
     val returnRustType: String? = null,
     val isUnsafe: Boolean = false,
+    /** Rust expression suffix for `impl Trait` return conversion (e.g. `.collect::<Vec<_>>()`). */
+    val returnConversion: String? = null,
 ) : Serializable
 
 data class KneProperty(

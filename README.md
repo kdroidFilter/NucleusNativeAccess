@@ -212,6 +212,9 @@ fun main() {
 | `(A, B)` / `(A, B, C)` tuples | `KneTupleN_<TypeId>` data class | Arity 0–16; nested tuples supported (e.g. `(i32, (String, bool))`) |
 | Tuple as param | Expanded to individual parameters | `fn sum(coords: (i32, i32))` → `fun sum(coords: KneTuple2_TII)` |
 | `!` (Never type) | Diverging functions (`panic!`, `std::process::exit`) | Returns `Unit`, throws `RuntimeException` on JVM with panic message |
+| `impl Iterator<Item=T>` return | `List<T>` | Collected via `.collect()` in bridge; also `ExactSizeIterator`, `IntoIterator`, `DoubleEndedIterator` |
+| `impl Display` / `impl ToString` return | `String` | Materialized via `.to_string()` in bridge |
+| `impl Into<T>` return | `T` | Converted via `.into()` in bridge |
 
 ### Current limitations (Rust Import)
 
@@ -220,7 +223,6 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | Category | Unsupported construct | Impact | Workaround |
 |----------|----------------------|--------|------------|
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
-| **Traits** | `impl Trait` return types | Not mapped | &mdash; |
 | **Traits** | Trait objects (`dyn Trait`) | Not mapped | &mdash; |
 | **Types** | Tuple with `Vec<T>` / collection element | Collections inside tuple elements not yet mapped | Use a struct or return separately |
 | **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
@@ -245,6 +247,11 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | Borrowed returns (`&T`) | Returned as borrowed handle (no ownership) | JVM proxy won't dispose the native object |
 | `unsafe fn` methods | Generated with `unsafe { }` wrapper | Caller is responsible for safety invariants |
 | Tuple return with nested tuples | `(i32, (String, bool))` → `KneTuple2_TITRZ` | Inner tuples heap-allocated with 8-byte-slot layout; supports arbitrary nesting depth; buffers and string copies freed after reading |
+| `impl Iterator<Item=T>` return | Mapped to `List<T>` | Collected via `.collect::<Vec<_>>()` in bridge; also supports `ExactSizeIterator`, `DoubleEndedIterator`, `IntoIterator` |
+| `impl Display` / `impl ToString` return | Mapped to `String` | Materialized via `.to_string()` in bridge |
+| `impl AsRef<str>` return | Mapped to `String` | Materialized via `.as_ref().to_string()` in bridge |
+| `impl Into<T>` return | Mapped to `T` | Converted via `.into()` in bridge |
+| `Result<impl Trait, E>` return | Combined with above | Result unwrapped first, then impl Trait conversion applied |
 
 ### 5. Run
 

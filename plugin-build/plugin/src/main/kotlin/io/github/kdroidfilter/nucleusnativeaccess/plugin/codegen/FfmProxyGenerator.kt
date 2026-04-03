@@ -3666,12 +3666,17 @@ class FfmProxyGenerator {
 
             val arenaNeeded = needsConfinedArena(fn.params, fn.returnType)
             val hasCollectionParams = fn.params.any { it.type == KneType.BYTE_ARRAY || it.type is KneType.LIST || it.type is KneType.SET }
-            if (arenaNeeded || hasCollectionParams) {
+            val returnsCollection = fn.returnType.isCollection()
+            if (arenaNeeded || hasCollectionParams || returnsCollection) {
                 appendLine("        Arena.ofConfined().use { arena ->")
                 appendStringInvokeArgsAlloc("            ", fn.params)
                 appendCollectionParamAlloc("            ", fn.params)
                 val invokeArgs = buildTopLevelInvokeArgs(fn)
-                appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs, fn.returnsBorrowed)
+                if (returnsCollection) {
+                    appendCollectionReturnProxy("            ", fn, handleName, invokeArgs)
+                } else {
+                    appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs, fn.returnsBorrowed)
+                }
                 appendLine("        }")
             } else {
                 val invokeArgs = fn.params.joinToString(", ") { fp ->
@@ -4415,21 +4420,21 @@ class FfmProxyGenerator {
     }
 
     /** Generate the return-proxy for collection types (handles nullable: -1 = null). */
-    private fun StringBuilder.appendCollectionReturnProxy(indent: String, fn: KneFunction, handleName: String) {
+    private fun StringBuilder.appendCollectionReturnProxy(indent: String, fn: KneFunction, handleName: String, baseInvokeArgs: String? = null) {
         val isNullable = fn.returnType is KneType.NULLABLE
         val inner = fn.returnType.unwrapCollection()
         when (inner) {
-            is KneType.LIST -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "List", isNullable)
-            is KneType.SET -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "Set", isNullable)
-            is KneType.MAP -> appendMapReturnProxy(indent, fn, handleName, inner, isNullable)
+            is KneType.LIST -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "List", isNullable, baseInvokeArgs)
+            is KneType.SET -> appendListReturnProxy(indent, fn, handleName, inner.elementType, "Set", isNullable, baseInvokeArgs)
+            is KneType.MAP -> appendMapReturnProxy(indent, fn, handleName, inner, isNullable, baseInvokeArgs)
             else -> {}
         }
     }
 
-    private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String, nullable: Boolean = false) {
+    private fun StringBuilder.appendListReturnProxy(indent: String, fn: KneFunction, handleName: String, elemType: KneType, collType: String, nullable: Boolean = false, baseInvokeArgs: String? = null) {
         // List<DataClass> — opaque handle pattern
         if (elemType is KneType.DATA_CLASS) {
-            val invokeArgs = buildClassInvokeArgsExpanded(fn)
+            val invokeArgs = baseInvokeArgs ?: buildClassInvokeArgsExpanded(fn)
             appendLine("${indent}val _listHandle = $handleName.invoke($invokeArgs) as Long")
             appendLine("${indent}KneRuntime.checkError()")
             if (nullable) appendLine("${indent}if (_listHandle == 0L) return null")
@@ -4465,10 +4470,11 @@ class FfmProxyGenerator {
             appendLine("${indent}}")
             return
         }
+        val baseArgs = baseInvokeArgs ?: buildClassInvokeArgsExpanded(fn)
         when (elemType) {
             KneType.STRING -> {
                 appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, $STRING_BUF_SIZE"
+                val invokeArgs = "$baseArgs, _outBuf, $STRING_BUF_SIZE"
                 appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
                 if (nullable) appendLine("${indent}if (_count < 0) return null")
@@ -4482,14 +4488,14 @@ class FfmProxyGenerator {
                 val layout = KneType.collectionElementLayout(elemType)
                 appendLine("${indent}var _bufSize = $MAX_COLLECTION_SIZE")
                 appendLine("${indent}var _outBuf = arena.allocate($layout, _bufSize.toLong())")
-                val invokeArgs = buildClassInvokeArgsExpanded(fn) + ", _outBuf, _bufSize"
+                val invokeArgs = "$baseArgs, _outBuf, _bufSize"
                 appendLine("${indent}var _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
                 if (nullable) appendLine("${indent}if (_count < 0) return null")
                 appendLine("${indent}if (_count > _bufSize) {")
                 appendLine("${indent}    _bufSize = _count")
                 appendLine("${indent}    _outBuf = arena.allocate($layout, _bufSize.toLong())")
-                val invokeArgs2 = buildClassInvokeArgsExpanded(fn) + ", _outBuf, _bufSize"
+                val invokeArgs2 = "$baseArgs, _outBuf, _bufSize"
                 appendLine("${indent}    _count = $handleName.invoke($invokeArgs2) as Int")
                 appendLine("${indent}    KneRuntime.checkError()")
                 appendLine("${indent}}")
@@ -4591,7 +4597,7 @@ class FfmProxyGenerator {
         }
     }
 
-    private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP, nullable: Boolean = false) {
+    private fun StringBuilder.appendMapReturnProxy(indent: String, fn: KneFunction, handleName: String, type: KneType.MAP, nullable: Boolean = false, baseInvokeArgs: String? = null) {
         val kLayout = KneType.collectionElementLayout(type.keyType)
         val vLayout = KneType.collectionElementLayout(type.valueType)
         val isKeyString = type.keyType == KneType.STRING
@@ -4602,8 +4608,12 @@ class FfmProxyGenerator {
         else appendLine("${indent}val _valuesBuf = arena.allocate($vLayout, $MAX_COLLECTION_SIZE.toLong())")
 
         val invokeArgs = buildList {
-            add(buildReceiverInvokeArg(fn))
-            fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            if (baseInvokeArgs != null) {
+                add(baseInvokeArgs)
+            } else {
+                add(buildReceiverInvokeArg(fn))
+                fn.params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) }
+            }
             add("_keysBuf")
             if (isKeyString) add("$STRING_BUF_SIZE")
             add("_valuesBuf")

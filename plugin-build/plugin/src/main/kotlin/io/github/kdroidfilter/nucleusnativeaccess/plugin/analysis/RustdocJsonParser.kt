@@ -41,6 +41,8 @@ class RustdocJsonParser {
         val type: KneType,
         val isBorrowed: Boolean = false,
         val rustType: String? = null,
+        /** Rust expression suffix to apply in bridge code for `impl Trait` return types (e.g. `.collect::<Vec<_>>()`). */
+        val implTraitConversion: String? = null,
     )
 
     fun parse(
@@ -797,6 +799,7 @@ class RustdocJsonParser {
             returnsBorrowed = returnResolved.isBorrowed,
             returnRustType = returnResolved.rustType,
             isUnsafe = inner.getAsJsonObject("header")?.get("is_unsafe")?.asBoolean == true,
+            returnConversion = returnResolved.implTraitConversion,
         )
     }
 
@@ -1030,6 +1033,13 @@ class RustdocJsonParser {
             return null
         }
 
+        if (obj.has("impl_trait")) {
+            return resolveImplTrait(
+                obj.getAsJsonArray("impl_trait"),
+                knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+            )
+        }
+
         if (obj.has("generic")) {
             val name = obj.get("generic").asString
             if (name == "Self" && selfType != null) {
@@ -1038,6 +1048,105 @@ class RustdocJsonParser {
             return genericTypes[name]
         }
 
+        return null
+    }
+
+    /**
+     * Resolves `impl Trait` return types by mapping well-known traits to concrete KneTypes.
+     * The returned [ResolvedType.implTraitConversion] carries the Rust expression suffix
+     * the bridge generator must append to materialise the value (e.g. `.collect::<Vec<_>>()`).
+     */
+    private fun resolveImplTrait(
+        bounds: JsonArray,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass>,
+        genericTypes: Map<String, ResolvedType>,
+        selfType: KneType?,
+    ): ResolvedType? {
+        for (bound in bounds) {
+            val boundObj = bound.asJsonObject
+            if (!boundObj.has("trait_bound")) continue
+            val traitBound = boundObj.getAsJsonObject("trait_bound")
+            val traitObj = traitBound.getAsJsonObject("trait") ?: continue
+            val path = traitObj.get("path")?.asString ?: continue
+            val traitName = lastPathSegment(path)
+            val args = traitObj.get("args")
+
+            when (traitName) {
+                "Iterator", "ExactSizeIterator", "DoubleEndedIterator" -> {
+                    val itemType = extractAssociatedTypeBinding(
+                        args, "Item", knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    ) ?: return null
+                    val rustType = "Vec<${itemType.rustType ?: renderRustType(itemType.type)}>"
+                    val kneType = if (itemType.type == KneType.BYTE) KneType.BYTE_ARRAY else KneType.LIST(itemType.type)
+                    return ResolvedType(kneType, rustType = rustType, implTraitConversion = ".collect::<Vec<_>>()")
+                }
+
+                "IntoIterator" -> {
+                    val itemType = extractAssociatedTypeBinding(
+                        args, "Item", knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    ) ?: return null
+                    val rustType = "Vec<${itemType.rustType ?: renderRustType(itemType.type)}>"
+                    val kneType = if (itemType.type == KneType.BYTE) KneType.BYTE_ARRAY else KneType.LIST(itemType.type)
+                    return ResolvedType(kneType, rustType = rustType, implTraitConversion = ".into_iter().collect::<Vec<_>>()")
+                }
+
+                "Display", "ToString" -> {
+                    return ResolvedType(KneType.STRING, rustType = "String", implTraitConversion = ".to_string()")
+                }
+
+                "AsRef" -> {
+                    val innerType = extractFirstGenericArg(
+                        args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    )
+                    if (innerType?.type == KneType.STRING) {
+                        return ResolvedType(KneType.STRING, rustType = "String", implTraitConversion = ".as_ref().to_string()")
+                    }
+                    return null
+                }
+
+                "Into" -> {
+                    val innerType = extractFirstGenericArg(
+                        args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    ) ?: return null
+                    return ResolvedType(innerType.type, rustType = innerType.rustType, implTraitConversion = ".into()")
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Extracts an associated type binding from trait args (e.g. `Item = i32` in `Iterator<Item = i32>`).
+     * Looks for `angle_bracketed.bindings[].name == bindingName` and resolves the equality type.
+     */
+    private fun extractAssociatedTypeBinding(
+        args: JsonElement?,
+        bindingName: String,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass>,
+        genericTypes: Map<String, ResolvedType>,
+        selfType: KneType?,
+    ): ResolvedType? {
+        if (args == null || args.isJsonNull) return null
+        val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
+        // rustdoc JSON uses "constraints" (newer) or "bindings" (older) for associated types
+        val bindings = ab.getAsJsonArray("constraints") ?: ab.getAsJsonArray("bindings") ?: return null
+        for (binding in bindings) {
+            val bindingObj = binding.asJsonObject
+            val name = bindingObj.get("name")?.asString ?: continue
+            if (name != bindingName) continue
+            val bindingKind = bindingObj.getAsJsonObject("binding") ?: continue
+            val equalityType = bindingKind.get("equality") ?: continue
+            if (equalityType.isJsonObject && equalityType.asJsonObject.has("type")) {
+                return resolveTypeWithBorrow(
+                    equalityType.asJsonObject.get("type"),
+                    knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                )
+            }
+        }
         return null
     }
 
