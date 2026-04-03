@@ -508,7 +508,7 @@ class RustBridgeGenerator {
         KneType.STRING, KneType.BYTE_ARRAY -> true
         is KneType.LIST, is KneType.SET -> true
         is KneType.NULLABLE -> when (type.inner) {
-            KneType.STRING -> true
+            KneType.STRING, KneType.BYTE_ARRAY -> true
             is KneType.LIST, is KneType.SET -> true
             else -> false
         }
@@ -1822,6 +1822,18 @@ class RustBridgeGenerator {
                 appendLine("${indent}    None => 0i32")
                 appendLine("${indent}}")
             }
+            KneType.BYTE_ARRAY -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendLine("${indent}        let len = v.len() as i32;")
+                appendLine("${indent}        if len <= out_buf_len {")
+                appendLine("${indent}            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), out_buf, v.len()); }")
+                appendLine("${indent}        }")
+                appendLine("${indent}        len")
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
             is KneType.LIST -> {
                 appendLine("${indent}match $binding {")
                 appendLine("${indent}    Some(v) => {")
@@ -2102,7 +2114,7 @@ class RustBridgeGenerator {
         is KneType.TUPLE -> "()" // Tuple returns use per-field out-params
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
-            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "i32"
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING, KneType.BYTE_ARRAY -> "i32"
             is KneType.ENUM -> "i32"
             is KneType.DATA_CLASS -> "i32" // 0=None, 1=Some (fields in out-params)
             is KneType.LIST, is KneType.SET, is KneType.MAP -> "i32" // count or -1 for None
@@ -2210,7 +2222,7 @@ class RustBridgeGenerator {
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when ((type).inner) {
-            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "0i32"
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING, KneType.BYTE_ARRAY -> "0i32"
             is KneType.ENUM -> "0i32"
             is KneType.DATA_CLASS -> "0i32" // 0 = None
             is KneType.LIST, is KneType.SET, is KneType.MAP -> "0" // count = 0 on error

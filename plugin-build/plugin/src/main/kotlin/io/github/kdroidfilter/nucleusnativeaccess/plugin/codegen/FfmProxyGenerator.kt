@@ -267,7 +267,7 @@ class FfmProxyGenerator {
         this == KneType.STRING || (this is KneType.NULLABLE && inner == KneType.STRING)
 
     private fun KneType.isByteArrayType(): Boolean =
-        this == KneType.BYTE_ARRAY
+        this == KneType.BYTE_ARRAY || (this is KneType.NULLABLE && inner == KneType.BYTE_ARRAY)
 
     private fun KneType.isFunctionType(): Boolean = this is KneType.FUNCTION
 
@@ -4844,6 +4844,10 @@ class FfmProxyGenerator {
             KneType.STRING -> {
                 appendStringReadWithRetry(indent, handleName, invokeArgs)
                 appendLine("${indent}return if (_len < 0) null else _buf.getString(0)")
+            }
+            KneType.BYTE_ARRAY -> {
+                appendStringReadWithRetry(indent, handleName, invokeArgs)
+                appendLine("${indent}return if (_len < 0) null else _buf.asSlice(0, _len.toLong()).toArray(JAVA_BYTE)")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")

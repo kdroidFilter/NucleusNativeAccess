@@ -230,6 +230,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |
 | **Lifetimes** | Explicit lifetime parameters on structs | Struct skipped if lifetimes can't be resolved | &mdash; |
+| **Mutability** | `&mut T` parameters on standalone `pub fn` | Treated as `&T` (immutable borrow) | Wrap `T` in a newtype with `UnsafeCell` for interior mutability, or use `impl` methods with `&mut self` instead |
 
 **Supported but with caveats:**
 
@@ -238,6 +239,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; MAP properties now supported via StableRef |
 | `HashSet<T>` / `BTreeSet<T>` return | Mapped to `Set<T>` | Serialized as list, deduplicated on JVM side via `.toSet()` |
 | `Option<DataClass>` return | Mapped to `DataClass?` | Uses presence flag (0=null, 1=present) + per-field out-params |
+| `Option<Vec<u8>>` return | Mapped to `ByteArray?` | Uses buffer pattern; returns `-1` for `None`, byte count for `Some` |
 | `OsStr` / `OsString` / `Path` / `PathBuf` | Mapped to `String` | Uses `to_string_lossy()` on output, may lose non-UTF-8 data |
 | `Vec<Object>` return | Elements returned as borrowed handles | Pointers into the parent collection; valid while parent lives |
 | Borrowed returns (`&T`) | Returned as borrowed handle (no ownership) | JVM proxy won't dispose the native object |
