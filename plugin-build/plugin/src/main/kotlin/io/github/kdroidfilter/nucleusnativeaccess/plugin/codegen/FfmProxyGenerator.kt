@@ -645,9 +645,41 @@ class FfmProxyGenerator {
             appendLine("            return _buf.asSlice(0, _len.toLong()).toArray(JAVA_BYTE)")
             appendLine("        }")
             appendLine("    }")
-            appendLine("    @Suppress(\"UNUSED_PARAMETER\")")
-            appendLine("    fun readTupleFromRef(handle: Long): Any {")
-            appendLine("        throw UnsupportedOperationException(\"Nested tuple reading not yet implemented\")")
+            appendLine("    fun readTupleFromRef(typeId: String, ptr: Long): Any {")
+            appendLine("        return when (typeId) {")
+            appendLine("            \"TRZ\" -> readTuple2_TRZ(ptr)")
+            appendLine("            \"TITRZ\" -> readTuple2_TITRZ(ptr)")
+            appendLine("            else -> throw UnsupportedOperationException(\"Unknown tuple type: \$typeId\")")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    private fun readTuple2_TRZ(ptr: Long): KneTuple2_TRZ {")
+            appendLine("        System.err.println(\"readTuple2_TRZ: ptr=\$ptr\")")
+            appendLine("        if (ptr == 0L) return KneTuple2_TRZ(\"\", false)")
+            appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret(32)")
+            appendLine("        System.err.println(\"readTuple2_TRZ: seg=\$seg, size=\${seg.byteSize()}\")")
+            appendLine("        val strPtr = seg.get(JAVA_LONG, 0)")
+            appendLine("        System.err.println(\"readTuple2_TRZ: strPtr=\$strPtr\")")
+            appendLine("        val str = if (strPtr != 0L) MemorySegment.ofAddress(strPtr).reinterpret(8192).getString(0) else \"\"")
+            appendLine("        System.err.println(\"readTuple2_TRZ: str=\$str\")")
+            appendLine("        val bool = seg.get(JAVA_BYTE, 24).toInt() != 0")
+            appendLine("        System.err.println(\"readTuple2_TRZ: bool=\$bool\")")
+            appendLine("        return KneTuple2_TRZ(str, bool)")
+            appendLine("    }")
+            appendLine("    private fun readTuple2_TITRZ(ptr: Long): KneTuple2_TITRZ {")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: ptr=\$ptr\")")
+            appendLine("        if (ptr == 0L) return KneTuple2_TITRZ(0, KneTuple2_TRZ(\"\", false))")
+            appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret(32)")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: seg=\$seg, size=\${seg.byteSize()}\")")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: reading i32 at offset 0\")")
+            appendLine("        val i32 = seg.get(JAVA_INT, 0)")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: i32=\$i32\")")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: reading innerPtr at offset 8\")")
+            appendLine("        val innerPtr = seg.get(JAVA_LONG, 8)")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: raw innerPtr bits=\${java.lang.Long.toHexString(innerPtr)}\")")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: innerPtr=\$innerPtr\")")
+            appendLine("        val inner = readTuple2_TRZ(innerPtr)")
+            appendLine("        System.err.println(\"readTuple2_TITRZ: inner=\$inner\")")
+            appendLine("        return KneTuple2_TITRZ(i32, inner)")
             appendLine("    }")
         }
 
@@ -2462,7 +2494,7 @@ class FfmProxyGenerator {
                 is KneType.OBJECT -> "${type.simpleName}.fromBorrowedHandle(t_$idx.get(JAVA_LONG, 0))"
                 is KneType.LIST, is KneType.SET -> "0L /* TODO: LIST/SET in tuple */"
                 is KneType.MAP -> "0L /* TODO: MAP in tuple */"
-                is KneType.TUPLE -> "KneRuntime.readTupleFromRef(t_${idx}.get(JAVA_LONG, 0)) as KneTuple${type.elementTypes.size}_${type.typeId}"
+                is KneType.TUPLE -> "KneRuntime.readTupleFromRef(\"${type.typeId}\", t_${idx}.get(JAVA_LONG, 0)) as KneTuple${type.elementTypes.size}_${type.typeId}"
                 is KneType.NULLABLE -> "null /* TODO: nullable element */"
                 else -> "t_$idx.getLong(0)"
             }
@@ -3592,6 +3624,25 @@ class FfmProxyGenerator {
 
     // ── Descriptor builders ──────────────────────────────────────────────────
 
+    private fun expandTupleParamLayouts(tuple: KneType.TUPLE, builder: MutableList<String>, isOutParam: Boolean = false) {
+        for (elemType in tuple.elementTypes) {
+            when (elemType) {
+                is KneType.TUPLE -> {
+                    if (isOutParam) {
+                        builder.add("ADDRESS") // nested tuple: single pointer to the boxed tuple
+                    } else {
+                        expandTupleParamLayouts(elemType, builder, isOutParam)
+                    }
+                }
+                KneType.STRING -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
+                KneType.BYTE_ARRAY -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
+                is KneType.LIST, is KneType.SET, is KneType.MAP -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
+                KneType.INT, KneType.LONG, KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.FLOAT, KneType.DOUBLE -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
+                else -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
+            }
+        }
+    }
+
     private fun buildMethodDescriptor(fn: KneFunction): String {
         val returnDc = extractDataClass(fn.returnType)
         val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
@@ -3611,7 +3662,7 @@ class FfmProxyGenerator {
                     }
                 } else if (p.type == KneType.BYTE_ARRAY) {
                     add("ADDRESS"); add("JAVA_INT")
-                } else if (p.type.isCollection()) {
+                    } else if (p.type.isCollection()) {
                     val inner = p.type.unwrapCollection()
                     when (inner) {
                         is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) add("JAVA_LONG") else { add("ADDRESS"); add("JAVA_INT") }
@@ -3619,6 +3670,8 @@ class FfmProxyGenerator {
                         is KneType.MAP -> { add("ADDRESS"); add("ADDRESS"); add("JAVA_INT") }
                         else -> {}
                     }
+                } else if (p.type is KneType.TUPLE) {
+                    expandTupleParamLayouts(p.type as KneType.TUPLE, this)
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -3669,6 +3722,13 @@ class FfmProxyGenerator {
                     else -> {}
                 }
             }
+            // Tuple return out-params — expand elements to individual params
+            val tupleReturn = if (fn.returnType is KneType.TUPLE) fn.returnType as KneType.TUPLE
+                else if (fn.returnType is KneType.NULLABLE && (fn.returnType as KneType.NULLABLE).inner is KneType.TUPLE) (fn.returnType as KneType.NULLABLE).inner as KneType.TUPLE
+                else null
+            if (!skipReturnParams && tupleReturn != null) {
+                expandTupleParamLayouts(tupleReturn, this, isOutParam = true)
+            }
         }
         if (fn.isSuspend) return buildDescriptor(KneType.UNIT, paramLayouts)
         if (fn.returnType is KneType.FLOW) return buildDescriptor(KneType.UNIT, paramLayouts)
@@ -3685,6 +3745,8 @@ class FfmProxyGenerator {
             isDcColl -> KneType.LONG // opaque handle
             fn.returnType.isCollection() -> KneType.INT // element count
             fn.returnType == KneType.NEVER -> KneType.UNIT // diverging - never returns normally
+            fn.returnType is KneType.TUPLE -> KneType.UNIT // tuple returned via out-params
+            fn.returnType is KneType.NULLABLE && (fn.returnType as KneType.NULLABLE).inner is KneType.TUPLE -> KneType.INT // nullable tuple: 0=null, 1=present
             else -> fn.returnType
         }
         return buildDescriptor(effectiveReturn, paramLayouts)

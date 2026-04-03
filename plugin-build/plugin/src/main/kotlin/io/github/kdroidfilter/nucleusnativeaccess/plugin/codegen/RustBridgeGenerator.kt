@@ -587,8 +587,41 @@ class RustBridgeGenerator {
                             appendLine("${indent}}")
                         }
                         is KneType.TUPLE -> {
-                            appendLine("${indent}let _inner_box = Box::into_raw(Box::new($binding.$idx));")
-                            appendLine("${indent}unsafe { out_t_$idx.write(_inner_box as i64); }")
+                            appendLine("${indent}// Write nested tuple fields to a buffer in Kotlin's expected layout")
+                            appendLine("${indent}let _tuple_buf_ptr = Box::into_raw(Box::new([0u8; 32])) as *mut u8;")
+                            for ((subIdx, subType) in (elemType as KneType.TUPLE).elementTypes.withIndex()) {
+                                when (subType) {
+                                    KneType.STRING -> {
+                                        val str = "$binding.$idx.$subIdx"
+                                        appendLine("${indent}unsafe {")
+                                        appendLine("${indent}    let _s_bytes = $str.as_bytes();")
+                                        appendLine("${indent}    let _s_len = _s_bytes.len();")
+                                        appendLine("${indent}    if _s_len > 0 {")
+                                        appendLine("${indent}        let _s_copy = Box::into_raw(vec![0u8; _s_len + 1].into_boxed_slice()) as *mut u8;")
+                                        appendLine("${indent}        std::ptr::copy_nonoverlapping(_s_bytes.as_ptr(), _s_copy, _s_len);")
+                                        appendLine("${indent}        *(_tuple_buf_ptr as *mut usize) = _s_copy as usize;")
+                                        appendLine("${indent}    } else {")
+                                        appendLine("${indent}        *(_tuple_buf_ptr as *mut usize) = 0usize;")
+                                        appendLine("${indent}    }")
+                                        appendLine("${indent}    *(_tuple_buf_ptr as *mut usize).add(1) = _s_len;")
+                                        appendLine("${indent}    *(_tuple_buf_ptr as *mut usize).add(2) = 0usize;")
+                                        appendLine("${indent}}")
+                                    }
+                                    KneType.BOOLEAN -> {
+                                        appendLine("${indent}unsafe { _tuple_buf_ptr.add(24).write(if $binding.$idx.$subIdx { 1u8 } else { 0u8 }); }")
+                                    }
+                                    KneType.INT -> {
+                                        appendLine("${indent}unsafe { *(_tuple_buf_ptr as *mut i32).add($subIdx) = $binding.$idx.$subIdx; }")
+                                    }
+                                    KneType.LONG -> {
+                                        appendLine("${indent}unsafe { *(_tuple_buf_ptr as *mut i64).add($subIdx) = $binding.$idx.$subIdx; }")
+                                    }
+                                    else -> {
+                                        appendLine("${indent}// TODO: handle ${subType::class.simpleName} in nested tuple")
+                                    }
+                                }
+                            }
+                            appendLine("${indent}unsafe { out_t_$idx.write(_tuple_buf_ptr as i64); }")
                         }
                         else -> {
                             appendLine("${indent}unsafe { *out_t_$idx = ${rustReturnExpr("$binding.$idx", elemType, null)}; }")
