@@ -209,6 +209,7 @@ fun main() {
 | `&[u8]` / `&[i32]` params | `ByteArray` / `List<Int>` | Pointer + length expansion |
 | `HashMap<K,V>` | `Map<K,V>` | Parallel arrays |
 | Error propagation | `KotlinNativeException` | `catch_unwind` + thread-local error |
+| `!` (Never type) | Diverging functions (`panic!`, `std::process::exit`) | Returns `Unit`, throws `RuntimeException` on JVM with panic message |
 
 ### Current limitations (Rust Import)
 
@@ -233,7 +234,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 
 | Construct | Behaviour | Notes |
 |-----------|-----------|-------|
-| `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; MAP properties not yet supported |
+| `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; MAP properties now supported via StableRef |
 | `HashSet<T>` / `BTreeSet<T>` return | Mapped to `Set<T>` | Serialized as list, deduplicated on JVM side via `.toSet()` |
 | `Option<DataClass>` return | Mapped to `DataClass?` | Uses presence flag (0=null, 1=present) + per-field out-params |
 | `OsStr` / `OsString` / `Path` / `PathBuf` | Mapped to `String` | Uses `to_string_lossy()` on output, may lose non-UTF-8 data |
