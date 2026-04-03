@@ -213,7 +213,7 @@ When fixing a complex bug, **maintain a debugging log** to avoid repeating the s
 - Losing track of which combination of fixes worked
 
 **Always document**:
-- Every change attempted (哪怕是小改动)
+- Every change attempted
 - The exact error/log output after each attempt
 - Why something failed
 - What you learned about the problem
