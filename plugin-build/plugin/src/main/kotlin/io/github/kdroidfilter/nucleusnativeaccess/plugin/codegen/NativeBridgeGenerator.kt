@@ -211,6 +211,7 @@ class NativeBridgeGenerator {
         is KneType.SET -> "0"
         is KneType.MAP -> "0"
         is KneType.FLOW -> ""
+        is KneType.TUPLE -> "0"
     }
 
     // ── Classes ──────────────────────────────────────────────────────────────

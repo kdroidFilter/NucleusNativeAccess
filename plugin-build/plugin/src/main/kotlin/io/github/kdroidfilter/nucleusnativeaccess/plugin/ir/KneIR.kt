@@ -146,6 +146,32 @@ sealed class KneType : Serializable {
     data class SET(val elementType: KneType) : KneType()
     data class MAP(val keyType: KneType, val valueType: KneType) : KneType()
     data class FLOW(val elementType: KneType) : KneType()
+    data class TUPLE(val elementTypes: List<KneType>) : KneType() {
+        val typeId: String get() {
+            fun go(sb: StringBuilder, t: KneType) {
+                when (t) {
+                    is TUPLE -> { sb.append("T"); t.elementTypes.forEach { go(sb, it) } }
+                    UNIT -> sb.append("U"); BOOLEAN -> sb.append("Z"); BYTE -> sb.append("B")
+                    SHORT -> sb.append("S"); INT -> sb.append("I"); LONG -> sb.append("J")
+                    FLOAT -> sb.append("F"); DOUBLE -> sb.append("D"); STRING -> sb.append("R")
+                    BYTE_ARRAY -> sb.append("Y")
+                    is ENUM -> sb.append("E${t.simpleName}")
+                    is OBJECT -> sb.append("O${t.simpleName}")
+                    is DATA_CLASS -> sb.append("D${t.simpleName}")
+                    is LIST -> { sb.append("L"); go(sb, t.elementType) }
+                    is SET -> { sb.append("S"); go(sb, t.elementType) }
+                    is MAP -> { sb.append("M"); go(sb, t.keyType); go(sb, t.valueType) }
+                    is FLOW -> { sb.append("W"); go(sb, t.elementType) }
+                    is NULLABLE -> { sb.append("N"); go(sb, t.inner) }
+                    is FUNCTION -> { sb.append("F"); t.paramTypes.forEach { go(sb, it) }; sb.append("X"); go(sb, t.returnType) }
+                    is INTERFACE -> sb.append("I${t.simpleName}")
+                    is SEALED_ENUM -> sb.append("K${t.simpleName}")
+                    NEVER -> sb.append("V")
+                }
+            }
+            return buildString { go(this, this@TUPLE) }
+        }
+    }
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -179,6 +205,7 @@ sealed class KneType : Serializable {
             is SET -> "ADDRESS"  // same encoding as LIST
             is MAP -> "ADDRESS"  // keys pointer (+ values pointer + size handled in expansion)
             is FLOW -> "" // void — result delivered via callbacks (like suspend)
+            is TUPLE -> "ADDRESS" // pointer to tuple data on heap
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -206,6 +233,7 @@ sealed class KneType : Serializable {
             is SET -> "Set<${elementType.jvmTypeName}>"
             is MAP -> "Map<${keyType.jvmTypeName}, ${valueType.jvmTypeName}>"
             is FLOW -> "kotlinx.coroutines.flow.Flow<${elementType.jvmTypeName}>"
+            is TUPLE -> "KneTuple${elementTypes.size}_${typeId}"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -241,6 +269,7 @@ sealed class KneType : Serializable {
             is SET -> collectionPointerType(elementType)
             is MAP -> collectionPointerType(keyType) // keys pointer type; values handled in expansion
             is FLOW -> "Unit" // void — callbacks deliver values
+            is TUPLE -> "Long" // pointer to tuple on heap
         }
 
     /** The native pointer type for out-param usage (e.g. IntVar for Int). */

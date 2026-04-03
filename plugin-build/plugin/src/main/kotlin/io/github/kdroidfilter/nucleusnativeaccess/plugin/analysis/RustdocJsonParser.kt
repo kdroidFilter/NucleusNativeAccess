@@ -986,7 +986,15 @@ class RustdocJsonParser {
         if (obj.has("tuple")) {
             val elems = obj.getAsJsonArray("tuple")
             if (elems.size() == 0) return ResolvedType(KneType.UNIT, rustType = "()")
-            return null
+            val elementTypes = mutableListOf<KneType>()
+            val rustTypeParts = mutableListOf<String>()
+            for (elem in elems) {
+                val resolved = resolveType(elem, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
+                elementTypes.add(resolved.type)
+                rustTypeParts.add(resolved.rustType ?: renderRustType(resolved.type))
+            }
+            val rustType = rustTypeParts.joinToString(", ", "(", ")")
+            return ResolvedType(KneType.TUPLE(elementTypes), rustType = rustType)
         }
 
         if (obj.has("function_pointer")) {
@@ -1372,5 +1380,6 @@ class RustdocJsonParser {
         is KneType.SET -> "HashSet<${renderRustType(type.elementType)}>"
         is KneType.MAP -> "HashMap<${renderRustType(type.keyType)}, ${renderRustType(type.valueType)}>"
         is KneType.FLOW -> "Flow"
+        is KneType.TUPLE -> "(${type.elementTypes.joinToString(", ") { renderRustType(it) }})"
     }
 }

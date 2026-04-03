@@ -214,6 +214,12 @@ class RustBridgeGenerator {
                 for (field in dc.fields) {
                     append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
                 }
+            } else if (p.type is KneType.TUPLE) {
+                // Expand tuple fields as individual C params
+                val tuple = p.type as KneType.TUPLE
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    append(", ${p.name}_$idx: ${rustCType(elemType)}")
+                }
             } else {
                 append(", ${p.name}: ${rustCType(p.type)}")
             }
@@ -242,6 +248,20 @@ class RustBridgeGenerator {
             append(", out_values: ${mapOutPointerType(mapType.valueType)}")
             if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
             append(", out_max_len: i32")
+        }
+        // Tuple return: add per-element out-params
+        if (fn.returnType is KneType.TUPLE) {
+            val tuple = fn.returnType as KneType.TUPLE
+            for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                when (elemType) {
+                    KneType.STRING -> {
+                        append(", out_t_$idx: *mut u8, out_t_${idx}_len: i32")
+                    }
+                    else -> {
+                        append(", out_t_$idx: *mut ${rustCType(elemType)}")
+                    }
+                }
+            }
         }
         appendLine(") -> ${if (fn.returnType == KneType.NEVER) "()" else rustCReturnType(fn.returnType)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
@@ -550,6 +570,28 @@ class RustBridgeGenerator {
                         }
                         else -> {
                             appendLine("${indent}unsafe { *out_${field.name} = ${rustReturnExpr("$binding.${field.name}", field.type, field.rustType)}; }")
+                        }
+                    }
+                }
+                appendLine("${indent}()")
+            }
+            is KneType.TUPLE -> {
+                val tuple = returnType
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    when (elemType) {
+                        KneType.STRING -> {
+                            appendLine("${indent}let _e_bytes = $binding.$idx.as_bytes();")
+                            appendLine("${indent}if (_e_bytes.len() as i32) < out_t_${idx}_len {")
+                            appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping(_e_bytes.as_ptr(), out_t_$idx, _e_bytes.len()); }")
+                            appendLine("${indent}    unsafe { *out_t_$idx.add(_e_bytes.len()) = 0; }")
+                            appendLine("${indent}}")
+                        }
+                        is KneType.TUPLE -> {
+                            appendLine("${indent}let _inner_box = Box::into_raw(Box::new($binding.$idx));")
+                            appendLine("${indent}unsafe { out_t_$idx.write(_inner_box as i64); }")
+                        }
+                        else -> {
+                            appendLine("${indent}unsafe { *out_t_$idx = ${rustReturnExpr("$binding.$idx", elemType, null)}; }")
                         }
                     }
                 }
@@ -1040,6 +1082,11 @@ class RustBridgeGenerator {
                 for (field in dc.fields) {
                     allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
                 }
+            } else if (p.type is KneType.TUPLE) {
+                val tuple = p.type as KneType.TUPLE
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    allParams.add("${p.name}_$idx: ${rustCType(elemType)}")
+                }
             } else {
                 allParams.add("${p.name}: ${rustCType(p.type)}")
             }
@@ -1059,6 +1106,21 @@ class RustBridgeGenerator {
                     }
                     else -> {
                         allParams.add("out_${field.name}: *mut ${rustCType(field.type)}")
+                    }
+                }
+            }
+        }
+        // Tuple return: add per-element out-params
+        if (fn.returnType is KneType.TUPLE) {
+            val tuple = fn.returnType as KneType.TUPLE
+            for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                when (elemType) {
+                    KneType.STRING -> {
+                        allParams.add("out_t_$idx: *mut u8")
+                        allParams.add("out_t_${idx}_len: i32")
+                    }
+                    else -> {
+                        allParams.add("out_t_$idx: *mut ${rustCType(elemType)}")
                     }
                 }
             }
@@ -1381,6 +1443,20 @@ class RustBridgeGenerator {
             is KneType.DATA_CLASS -> {
                 appendDataClassParamConversion(p, p.type as KneType.DATA_CLASS, indent)
             }
+            is KneType.TUPLE -> {
+                val tuple = p.type as KneType.TUPLE
+                val convertedFields = tuple.elementTypes.mapIndexed { idx, elemType ->
+                    when (elemType) {
+                        KneType.STRING -> "${p.name}_${idx}_str"
+                        KneType.BOOLEAN -> "${p.name}_${idx}_conv"
+                        is KneType.ENUM -> "${p.name}_${idx}_conv"
+                        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "${p.name}_${idx}_owned"
+                        is KneType.LIST, KneType.BYTE_ARRAY -> "${p.name}_${idx}_slice"
+                        else -> "${p.name}_$idx"
+                    }
+                }
+                appendLine("${indent}let ${p.name}_tuple = (${convertedFields.joinToString(", ")});")
+            }
             is KneType.NULLABLE -> {
                 appendNullableParamConversion(p, indent)
             }
@@ -1657,6 +1733,7 @@ class RustBridgeGenerator {
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
             if (p.isBorrowed) "${p.name}_borrowed" else "${p.name}_owned"
         is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
+        is KneType.TUPLE -> "${p.name}_tuple"
         is KneType.NULLABLE -> "${p.name}_opt"
         KneType.BYTE_ARRAY -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
         is KneType.LIST -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
@@ -1992,6 +2069,7 @@ class RustBridgeGenerator {
         is KneType.MAP -> "i64"
         KneType.BYTE_ARRAY -> "i64"
         is KneType.DATA_CLASS -> "i64"
+        is KneType.TUPLE -> "i64"
         is KneType.FUNCTION -> "i64"
         is KneType.FLOW -> "()"
     }
@@ -2005,6 +2083,7 @@ class RustBridgeGenerator {
         is KneType.LIST -> "i32"
         is KneType.MAP -> "i32" // element count
         is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
+        is KneType.TUPLE -> "()" // Tuple returns use per-field out-params
         is KneType.NULLABLE -> when ((type).inner) {
             KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
             KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING -> "i32"
@@ -2036,6 +2115,7 @@ class RustBridgeGenerator {
         KneType.NEVER -> "()"
         is KneType.MAP -> "0" // element count = 0
         is KneType.DATA_CLASS -> "()" // out-params pattern, void return
+        is KneType.TUPLE -> "()" // out-params pattern, void return
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
         is KneType.ENUM -> "0"
         is KneType.NULLABLE -> when ((type).inner) {

@@ -407,6 +407,28 @@ impl Calculator {
         }
     }
 
+    // ── Tuple support ─────────────────────────────────────────────────
+
+    /// Returns coordinates as a tuple (x, y).
+    pub fn get_coordinates(&self) -> (i32, i32) {
+        (self.accumulator, self.accumulator * 2)
+    }
+
+    /// Returns a triple: (count, label, enabled).
+    pub fn get_triple(&self) -> (i32, String, bool) {
+        (self.accumulator, self.label.clone(), self.enabled)
+    }
+
+    /// Takes a tuple parameter and returns the sum.
+    pub fn sum_tuple(&self, coords: (i32, i32)) -> i32 {
+        self.accumulator + coords.0 + coords.1
+    }
+
+    /// Returns nested tuple.
+    pub fn get_nested_tuple(&self) -> (i32, (String, bool)) {
+        (self.accumulator, (self.label.clone(), self.enabled))
+    }
+
     // ── Async/suspend-like methods ────────────────────────────────────
     // Functions annotated with `@kne:suspend` in doc comments are bridged
     // as Kotlin suspend functions. The bridge spawns a thread, calls the
