@@ -153,9 +153,18 @@ Le test "empty label" passait car `_s_len == 0` écrivait `0usize` comme pointeu
 
 **Fix**: vérifier `isOutParam` pour les types primitifs, comme le faisait déjà la branche `else`.
 
+**3. Generic nested tuple layout (RustBridgeGenerator.kt + FfmProxyGenerator.kt)**
+
+The nested tuple buffer used hardcoded 32-byte size and manually placed offsets only for the `(String, bool)` case. `readTuple` functions were also hardcoded per type.
+
+**Fix**: Uniform 8-byte-slot layout. Each element at offset `idx * 8`, buffer size = `count * 8`. A recursive `appendNestedTupleWrite` generates the Rust writer for any tuple structure at any nesting depth. `readTupleN_SIG` functions are generated for every collected tuple type. Removed all debug `System.err.println` logging.
+
+**4. Memory leak on nested tuple buffers and string copies (both generators)**
+
+Heap-allocated tuple buffers (`Box::into_raw(vec![...])`) and string copies were never freed.
+
+**Fix**: Added `kne_free_buf(ptr, size)` to the Rust bridge. Kotlin `readTuple` functions free string copies (by UTF-8 byte size + 1) and the tuple buffer itself after reading all elements. Nested tuples are freed bottom-up via recursive `readTuple` calls.
+
 ### Limitations restantes
 
-- Les offsets dans le buffer des tuples imbriqués sont hardcodés pour le cas `(String, bool)` — un support générique nécessiterait un calcul dynamique des offsets
-- Les fonctions `readTuple` côté Kotlin sont hardcodées par type (TRZ, TITRZ) — à rendre génériques
-- Pas de support pour les tuples imbriqués à 3+ niveaux
-- La mémoire allouée pour les buffers de tuples imbriqués (32 bytes fixe + copies de strings) n'est pas libérée (memory leak)
+- None for the tuple feature — all 4 original limitations are resolved

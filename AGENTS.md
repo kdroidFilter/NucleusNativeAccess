@@ -294,3 +294,4 @@ Calculator(0).use { calc ->
 - **Je ne cheat pas**: Implement fully regardless of complexity
 - **Tests first**: Always run tests after changes, use `--no-build-cache`
 - **Battle test edge cases**: Every new feature needs edge case tests, load tests, and concurrency tests
+- **Update README**: After implementing a feature or fixing a bug, update the README.md to document the change (new supported type, limitation fixed, etc.)

@@ -222,7 +222,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
 | **Traits** | `impl Trait` return types | Not mapped | &mdash; |
 | **Traits** | Trait objects (`dyn Trait`) | Not mapped | &mdash; |
-| **Types** | Deeply nested tuples (3+ levels) | Only 2-level nesting supported | Flatten or use a struct |
+| **Types** | Tuple with `Vec<T>` / collection element | Collections inside tuple elements not yet mapped | Use a struct or return separately |
 | **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
 | **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |
 | **Enums** | Tagged enum variants with `Vec<T>` / collection fields | Variant constructors with collection fields skipped | &mdash; |
@@ -242,7 +242,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | `Vec<Object>` return | Elements returned as borrowed handles | Pointers into the parent collection; valid while parent lives |
 | Borrowed returns (`&T`) | Returned as borrowed handle (no ownership) | JVM proxy won't dispose the native object |
 | `unsafe fn` methods | Generated with `unsafe { }` wrapper | Caller is responsible for safety invariants |
-| Tuple return with nested tuples | `(i32, (String, bool))` → `KneTuple2_TITRZ` | Inner tuple heap-allocated with copied string data; reader generated per unique type shape |
+| Tuple return with nested tuples | `(i32, (String, bool))` → `KneTuple2_TITRZ` | Inner tuples heap-allocated with 8-byte-slot layout; supports arbitrary nesting depth; buffers and string copies freed after reading |
 
 ### 5. Run
 

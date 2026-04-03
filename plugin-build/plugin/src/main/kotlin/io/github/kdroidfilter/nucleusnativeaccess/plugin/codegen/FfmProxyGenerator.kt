@@ -312,7 +312,8 @@ class FfmProxyGenerator {
 
         val moduleSuspend = module.classes.any { cls -> cls.methods.any { it.isSuspend } } || module.functions.any { it.isSuspend }
         val moduleFlow = module.classes.any { cls -> cls.methods.any { it.returnType is KneType.FLOW } } || module.functions.any { it.returnType is KneType.FLOW }
-        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend || moduleFlow, moduleFlow)
+        val tupleTypes = collectTupleTypes(module)
+        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend || moduleFlow, moduleFlow, tupleTypes)
         files["KotlinNativeException.kt"] = generateException(jvmPackage)
 
         module.dataClasses.filter { !it.isCommon }.forEach { dc ->
@@ -348,8 +349,7 @@ class FfmProxyGenerator {
             files["Extensions.kt"] = generateExtensionsFile(extensionFunctions, module, jvmPackage)
         }
 
-        // Collect and generate tuple classes (KneTupleN subclasses with unique names per structure)
-        val tupleTypes = collectTupleTypes(module)
+        // Generate tuple data classes
         tupleTypes.forEach { tuple ->
             val sig = tuple.typeId
             files["KneTuple${tuple.elementTypes.size}_$sig.kt"] = generateTupleClass(tuple, jvmPackage)
@@ -407,6 +407,85 @@ class FfmProxyGenerator {
         }
     }
 
+    // ── Tuple reader generation ─────────────────────────────────────────────
+
+    /** Default expression for a tuple element type (used when ptr is 0). */
+    private fun tupleElementDefault(type: KneType): String = when (type) {
+        KneType.STRING -> "\"\""
+        KneType.BOOLEAN -> "false"
+        KneType.BYTE -> "0"
+        KneType.SHORT -> "0"
+        KneType.INT -> "0"
+        KneType.LONG -> "0L"
+        KneType.FLOAT -> "0.0f"
+        KneType.DOUBLE -> "0.0"
+        is KneType.ENUM -> "${type.simpleName}.entries[0]"
+        is KneType.TUPLE -> {
+            val innerN = type.elementTypes.size
+            val innerSig = type.typeId
+            val innerDefaults = type.elementTypes.joinToString(", ") { tupleElementDefault(it) }
+            "KneTuple${innerN}_$innerSig($innerDefaults)"
+        }
+        else -> "null"
+    }
+
+    /**
+     * Read expression for element at [idx] from a MemorySegment named [segVar].
+     * Uses uniform 8-byte slots: element i is at byte offset i * 8.
+     */
+    private fun tupleElementReadExpr(type: KneType, segVar: String, idx: Int): String {
+        val offset = idx * 8L
+        return when (type) {
+            KneType.STRING ->
+                "run { val _sp = $segVar.get(JAVA_LONG, $offset); if (_sp != 0L) { val _ss = MemorySegment.ofAddress(_sp).reinterpret(8192).getString(0); FREE_BUF_HANDLE.invoke(_sp, _ss.toByteArray(Charsets.UTF_8).size.toLong() + 1L); _ss } else \"\" }"
+            KneType.BOOLEAN -> "$segVar.get(JAVA_BYTE, $offset).toInt() != 0"
+            KneType.BYTE -> "$segVar.get(JAVA_BYTE, $offset)"
+            KneType.SHORT -> "$segVar.get(JAVA_SHORT, $offset)"
+            KneType.INT -> "$segVar.get(JAVA_INT, $offset)"
+            KneType.LONG -> "$segVar.get(JAVA_LONG, $offset)"
+            KneType.FLOAT -> "$segVar.get(JAVA_FLOAT, $offset)"
+            KneType.DOUBLE -> "$segVar.get(JAVA_DOUBLE, $offset)"
+            is KneType.ENUM -> "${type.simpleName}.entries[$segVar.get(JAVA_INT, $offset)]"
+            is KneType.OBJECT -> "${type.simpleName}.fromBorrowedHandle($segVar.get(JAVA_LONG, $offset))"
+            is KneType.TUPLE -> {
+                val innerN = type.elementTypes.size
+                val innerSig = type.typeId
+                "readTuple${innerN}_$innerSig($segVar.get(JAVA_LONG, $offset))"
+            }
+            else -> "$segVar.get(JAVA_LONG, $offset)"
+        }
+    }
+
+    /**
+     * Generate a readTupleN_SIG function for the given tuple type.
+     * After reading, frees the heap-allocated buffer via FREE_BUF_HANDLE.
+     */
+    private fun StringBuilder.appendGeneratedReadTupleFunction(tuple: KneType.TUPLE) {
+        val n = tuple.elementTypes.size
+        val sig = tuple.typeId
+        val className = "KneTuple${n}_$sig"
+        val bufSize = n * 8L
+
+        val defaults = tuple.elementTypes.joinToString(", ") { tupleElementDefault(it) }
+        appendLine("    private fun readTuple${n}_$sig(ptr: Long): $className {")
+        appendLine("        if (ptr == 0L) return $className($defaults)")
+        appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret($bufSize)")
+
+        val readExprs = tuple.elementTypes.mapIndexed { idx, type ->
+            tupleElementReadExpr(type, "seg", idx)
+        }
+        // Read all elements
+        readExprs.forEachIndexed { idx, expr ->
+            appendLine("        val _e$idx = $expr")
+        }
+        // Free the buffer
+        appendLine("        FREE_BUF_HANDLE.invoke(ptr, ${bufSize}L)")
+        // Construct and return
+        val ctorArgs = (0 until n).joinToString(", ") { "_e$it" }
+        appendLine("        return $className($ctorArgs)")
+        appendLine("    }")
+    }
+
     // ── Runtime helper ────────────────────────────────────────────────────────
 
     /** Collect all unique KneType.FUNCTION signatures used as parameters in the module (including nullable). */
@@ -437,7 +516,7 @@ class FfmProxyGenerator {
 
     private fun fnInvokeId(fnType: KneType.FUNCTION): String = callbackId(fnType)
 
-    private fun generateRuntime(libName: String, pkg: String, callbackSignatures: Set<KneType.FUNCTION> = emptySet(), hasSuspend: Boolean = false, hasFlow: Boolean = false): String = buildString {
+    private fun generateRuntime(libName: String, pkg: String, callbackSignatures: Set<KneType.FUNCTION> = emptySet(), hasSuspend: Boolean = false, hasFlow: Boolean = false, tupleTypes: Set<KneType.TUPLE> = emptySet()): String = buildString {
         appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
         appendLine("package $pkg")
         appendLine()
@@ -645,42 +724,28 @@ class FfmProxyGenerator {
             appendLine("            return _buf.asSlice(0, _len.toLong()).toArray(JAVA_BYTE)")
             appendLine("        }")
             appendLine("    }")
-            appendLine("    fun readTupleFromRef(typeId: String, ptr: Long): Any {")
-            appendLine("        return when (typeId) {")
-            appendLine("            \"TRZ\" -> readTuple2_TRZ(ptr)")
-            appendLine("            \"TITRZ\" -> readTuple2_TITRZ(ptr)")
-            appendLine("            else -> throw UnsupportedOperationException(\"Unknown tuple type: \$typeId\")")
-            appendLine("        }")
+            // FREE_BUF_HANDLE for cleaning up heap-allocated tuple buffers
+            appendLine("    val FREE_BUF_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_free_buf\", FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG))")
             appendLine("    }")
-            appendLine("    private fun readTuple2_TRZ(ptr: Long): KneTuple2_TRZ {")
-            appendLine("        System.err.println(\"readTuple2_TRZ: ptr=\$ptr\")")
-            appendLine("        if (ptr == 0L) return KneTuple2_TRZ(\"\", false)")
-            appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret(32)")
-            appendLine("        System.err.println(\"readTuple2_TRZ: seg=\$seg, size=\${seg.byteSize()}\")")
-            appendLine("        val strPtr = seg.get(JAVA_LONG, 0)")
-            appendLine("        System.err.println(\"readTuple2_TRZ: strPtr=\$strPtr\")")
-            appendLine("        val str = if (strPtr != 0L) MemorySegment.ofAddress(strPtr).reinterpret(8192).getString(0) else \"\"")
-            appendLine("        System.err.println(\"readTuple2_TRZ: str=\$str\")")
-            appendLine("        val bool = seg.get(JAVA_BYTE, 24).toInt() != 0")
-            appendLine("        System.err.println(\"readTuple2_TRZ: bool=\$bool\")")
-            appendLine("        return KneTuple2_TRZ(str, bool)")
-            appendLine("    }")
-            appendLine("    private fun readTuple2_TITRZ(ptr: Long): KneTuple2_TITRZ {")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: ptr=\$ptr\")")
-            appendLine("        if (ptr == 0L) return KneTuple2_TITRZ(0, KneTuple2_TRZ(\"\", false))")
-            appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret(32)")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: seg=\$seg, size=\${seg.byteSize()}\")")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: reading i32 at offset 0\")")
-            appendLine("        val i32 = seg.get(JAVA_INT, 0)")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: i32=\$i32\")")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: reading innerPtr at offset 8\")")
-            appendLine("        val innerPtr = seg.get(JAVA_LONG, 8)")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: raw innerPtr bits=\${java.lang.Long.toHexString(innerPtr)}\")")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: innerPtr=\$innerPtr\")")
-            appendLine("        val inner = readTuple2_TRZ(innerPtr)")
-            appendLine("        System.err.println(\"readTuple2_TITRZ: inner=\$inner\")")
-            appendLine("        return KneTuple2_TITRZ(i32, inner)")
-            appendLine("    }")
+
+            // Generate readTupleFromRef dispatcher and per-type readers
+            if (tupleTypes.isNotEmpty()) {
+                appendLine("    fun readTupleFromRef(typeId: String, ptr: Long): Any {")
+                appendLine("        return when (typeId) {")
+                for (tuple in tupleTypes) {
+                    val sig = tuple.typeId
+                    val n = tuple.elementTypes.size
+                    appendLine("            \"$sig\" -> readTuple${n}_$sig(ptr)")
+                }
+                appendLine("            else -> throw UnsupportedOperationException(\"Unknown tuple type: \$typeId\")")
+                appendLine("        }")
+                appendLine("    }")
+
+                for (tuple in tupleTypes) {
+                    appendGeneratedReadTupleFunction(tuple)
+                }
+            }
         }
 
         // Generate flow infrastructure (onNext reuses suspendExc stub, onComplete is new)

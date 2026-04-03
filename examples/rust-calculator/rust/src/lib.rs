@@ -429,6 +429,21 @@ impl Calculator {
         (self.accumulator, (self.label.clone(), self.enabled))
     }
 
+    /// Returns deeply nested tuple (3 levels).
+    pub fn get_deep_tuple(&self) -> (i32, (String, (bool, i32))) {
+        (self.accumulator, (self.label.clone(), (self.enabled, self.accumulator * 3)))
+    }
+
+    /// Returns tuple with two nested tuples.
+    pub fn get_double_nested(&self) -> ((i32, i32), (String, bool)) {
+        ((self.accumulator, self.accumulator * 2), (self.label.clone(), self.enabled))
+    }
+
+    /// Returns nested tuple with all primitive types.
+    pub fn get_typed_nested(&self) -> (i64, (f64, i32)) {
+        (self.accumulator as i64 * 1000, (self.scale, self.accumulator))
+    }
+
     // ── Async/suspend-like methods ────────────────────────────────────
     // Functions annotated with `@kne:suspend` in doc comments are bridged
     // as Kotlin suspend functions. The bridge spawns a thread, calls the
