@@ -97,4 +97,48 @@ class CollectionTest {
     @Test fun `find_max single element`() {
         assertEquals(42, Rustcalc.find_max(listOf(42)))
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Option<Vec<T>> return
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `get_optional_scores returns Some when accumulator is positive`() {
+        Calculator(5).use { calc ->
+            val scores = calc.get_optional_scores()
+            assertEquals(listOf(5, 10, 15), scores)
+        }
+    }
+
+    @Test fun `get_optional_scores returns null when accumulator is zero`() {
+        Calculator(0).use { calc ->
+            assertEquals(null, calc.get_optional_scores())
+        }
+    }
+
+    @Test fun `get_optional_tags returns Some when label is set`() {
+        Calculator(1).use { calc ->
+            calc.label = "test"
+            val tags = calc.get_optional_tags()
+            assertEquals(listOf("test", "scale:1"), tags)
+        }
+    }
+
+    @Test fun `get_optional_tags returns null when label is empty`() {
+        Calculator(1).use { calc ->
+            assertEquals(null, calc.get_optional_tags())
+        }
+    }
+
+    @Test fun `get_optional_metadata returns Some when accumulator is not zero`() {
+        Calculator(10).use { calc ->
+            val metadata = calc.get_optional_metadata()
+            assertEquals(mapOf("current" to 10, "scale" to 1), metadata)
+        }
+    }
+
+    @Test fun `get_optional_metadata returns null when accumulator is zero`() {
+        Calculator(0).use { calc ->
+            assertEquals(null, calc.get_optional_metadata())
+        }
+    }
 }

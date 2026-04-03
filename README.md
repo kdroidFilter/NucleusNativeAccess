@@ -217,7 +217,6 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 
 | Category | Unsupported construct | Impact | Workaround |
 |----------|----------------------|--------|------------|
-| **Return types** | `Option<Vec<T>>` / `Option<HashSet<T>>` return | Nullable collections are skipped | &mdash; |
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
 | **Traits** | `impl Trait` return types | Not mapped | &mdash; |
 | **Traits** | Trait objects (`dyn Trait`) | Not mapped | &mdash; |

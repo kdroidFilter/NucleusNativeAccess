@@ -371,6 +371,42 @@ impl Calculator {
         vec![self.accumulator, self.accumulator * 2, self.accumulator * 3]
     }
 
+    // ── Optional collection support ────────────────────────────────────────
+
+    /// Returns optional scores — Some if accumulator > 0, None otherwise.
+    pub fn get_optional_scores(&self) -> Option<Vec<i32>> {
+        if self.accumulator > 0 {
+            Some(vec![
+                self.accumulator,
+                self.accumulator * 2,
+                self.accumulator * 3,
+            ])
+        } else {
+            None
+        }
+    }
+
+    /// Returns optional tags — Some if label is set, None otherwise.
+    pub fn get_optional_tags(&self) -> Option<Vec<String>> {
+        if self.label.is_empty() {
+            None
+        } else {
+            Some(vec![self.label.clone(), format!("scale:{}", self.scale)])
+        }
+    }
+
+    /// Returns optional metadata map.
+    pub fn get_optional_metadata(&self) -> Option<std::collections::HashMap<String, i32>> {
+        if self.accumulator == 0 {
+            None
+        } else {
+            let mut map = std::collections::HashMap::new();
+            map.insert("current".to_string(), self.accumulator);
+            map.insert("scale".to_string(), self.scale as i32);
+            Some(map)
+        }
+    }
+
     // ── Async/suspend-like methods ────────────────────────────────────
     // Functions annotated with `@kne:suspend` in doc comments are bridged
     // as Kotlin suspend functions. The bridge spawns a thread, calls the
