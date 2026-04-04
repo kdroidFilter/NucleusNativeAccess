@@ -85,6 +85,15 @@ class RustBridgeGenerator {
         appendLine("    });")
         appendLine("}")
         appendLine()
+        appendLine("// Helper to convert a C string pointer to a Rust String")
+        appendLine("fn cstr_to_string(ptr: *const c_char) -> String {")
+        appendLine("    if ptr.is_null() {")
+        appendLine("        String::new()")
+        appendLine("    } else {")
+        appendLine("        unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or(\"\").to_string()")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
     }
 
     // --- Error infrastructure ---
@@ -245,6 +254,13 @@ class RustBridgeGenerator {
             val ndc = nullableDataClass(p.type)
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                append(", ${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) append(", ${p.name}_keys_len: i32")
+                append(", ${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) append(", ${p.name}_values_len: i32")
+                append(", ${p.name}_size: i32")
             } else if (ndc != null) {
                 appendNullableDataClassSignatureParams(p.name, ndc)
             } else if (p.type is KneType.DATA_CLASS) {
@@ -374,6 +390,13 @@ class RustBridgeGenerator {
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
                 allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                allParams.add("${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) allParams.add("${p.name}_keys_len: i32")
+                allParams.add("${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) allParams.add("${p.name}_values_len: i32")
+                allParams.add("${p.name}_size: i32")
             } else if (ndc != null) {
                 allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
             } else if (p.type is KneType.DATA_CLASS) {
@@ -1277,6 +1300,13 @@ class RustBridgeGenerator {
             if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
                 allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
                 allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                allParams.add("${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) allParams.add("${p.name}_keys_len: i32")
+                allParams.add("${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) allParams.add("${p.name}_values_len: i32")
+                allParams.add("${p.name}_size: i32")
             } else if (ndc != null) {
                 allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
             } else if (p.type is KneType.DATA_CLASS) {
@@ -1923,6 +1953,19 @@ class RustBridgeGenerator {
                     appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
                 }
             }
+            is KneType.MAP -> {
+                val mapType = p.type as KneType.MAP
+                val keyType = mapType.keyType
+                val valueType = mapType.valueType
+                appendLine("${indent}let ${p.name}_keys_slice = unsafe { std::slice::from_raw_parts(${p.name}_keys_ptr, ${p.name}_size as usize) };")
+                appendLine("${indent}let ${p.name}_values_slice = unsafe { std::slice::from_raw_parts(${p.name}_values_ptr, ${p.name}_size as usize) };")
+                val keyConv = mapSliceElemReadExpr("${p.name}_keys_slice", "i", keyType)
+                val valueConv = mapSliceElemReadExpr("${p.name}_values_slice", "i", valueType)
+                appendLine("${indent}let ${p.name}_map: std::collections::HashMap<${mapValueRustType(keyType)}, ${mapValueRustType(valueType)}> = std::collections::HashMap::new();")
+                appendLine("${indent}for i in 0..${p.name}_size {")
+                appendLine("${indent}    ${p.name}_map.insert($keyConv, $valueConv);")
+                appendLine("${indent}}")
+            }
             else -> {
                 primitiveCastType(p.type, p.rustType)?.let { castType ->
                     appendLine("${indent}let ${p.name}_conv = ${p.name} as $castType;")
@@ -2525,6 +2568,43 @@ class RustBridgeGenerator {
             params.add("${paramName}_${field.name}: ${rustCType(field.type)}")
         }
         return params
+    }
+
+    /** Generate Rust expression to read one element at index i from a map slice. */
+    private fun mapSliceElemReadExpr(sliceName: String, indexExpr: String, elemType: KneType): String = when (elemType) {
+        KneType.BOOLEAN -> "$sliceName[$indexExpr] != 0"
+        KneType.INT -> "$sliceName[$indexExpr]"
+        KneType.LONG -> "$sliceName[$indexExpr]"
+        KneType.DOUBLE -> "$sliceName[$indexExpr]"
+        KneType.FLOAT -> "$sliceName[$indexExpr]"
+        KneType.SHORT -> "$sliceName[$indexExpr]"
+        KneType.BYTE -> "$sliceName[$indexExpr]"
+        KneType.STRING -> "cstr_to_string($sliceName[$indexExpr])"
+        is KneType.ENUM -> {
+            val enumName = elemType.simpleName
+            "unsafe { std::mem::transmute($sliceName[$indexExpr] as u8) }"
+        }
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+            "unsafe { *Box::from_raw($sliceName[$indexExpr] as *mut _) }"
+        }
+        else -> "$sliceName[$indexExpr]"
+    }
+
+    /** Render a Rust owned type for HashMap key/value (not C ABI pointer types). */
+    private fun mapValueRustType(type: KneType): String = when (type) {
+        KneType.BOOLEAN -> "bool"
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.SHORT -> "i16"
+        KneType.BYTE -> "i8"
+        KneType.STRING -> "String"
+        is KneType.ENUM -> type.simpleName
+        is KneType.OBJECT -> type.simpleName
+        is KneType.INTERFACE -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        else -> "i64"
     }
 
     /** C ABI type for a parameter. */
