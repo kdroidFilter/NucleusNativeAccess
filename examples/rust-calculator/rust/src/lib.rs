@@ -431,17 +431,34 @@ impl Calculator {
 
     /// Returns deeply nested tuple (3 levels).
     pub fn get_deep_tuple(&self) -> (i32, (String, (bool, i32))) {
-        (self.accumulator, (self.label.clone(), (self.enabled, self.accumulator * 3)))
+        (
+            self.accumulator,
+            (self.label.clone(), (self.enabled, self.accumulator * 3)),
+        )
     }
 
     /// Returns tuple with two nested tuples.
     pub fn get_double_nested(&self) -> ((i32, i32), (String, bool)) {
-        ((self.accumulator, self.accumulator * 2), (self.label.clone(), self.enabled))
+        (
+            (self.accumulator, self.accumulator * 2),
+            (self.label.clone(), self.enabled),
+        )
     }
 
     /// Returns nested tuple with all primitive types.
     pub fn get_typed_nested(&self) -> (i64, (f64, i32)) {
-        (self.accumulator as i64 * 1000, (self.scale, self.accumulator))
+        (
+            self.accumulator as i64 * 1000,
+            (self.scale, self.accumulator),
+        )
+    }
+
+    /// Returns tuple with a vector: (scores, label).
+    pub fn get_with_scores(&self) -> (Vec<i32>, String) {
+        (
+            vec![self.accumulator, self.accumulator * 2, self.accumulator * 3],
+            self.label.clone(),
+        )
     }
 
     // ── Async/suspend-like methods ────────────────────────────────────
@@ -624,7 +641,9 @@ impl Calculator {
     pub fn iter_panicking(&self) -> impl Iterator<Item = i32> {
         let acc = self.accumulator;
         (0..3).map(move |i| {
-            if i == 2 && acc < 0 { panic!("iterator panic at index 2"); }
+            if i == 2 && acc < 0 {
+                panic!("iterator panic at index 2");
+            }
             acc + i
         })
     }
@@ -777,7 +796,8 @@ pub fn maybe_create_describable(initial: i32) -> Option<Box<dyn Describable>> {
 
 /// Returns a Vec of dyn Describable trait objects.
 pub fn create_describable_list(values: &[i32]) -> Vec<Box<dyn Describable>> {
-    values.iter()
+    values
+        .iter()
         .map(|&v| Box::new(Calculator::new(v)) as Box<dyn Describable>)
         .collect()
 }

@@ -250,4 +250,122 @@ class TupleTest {
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Tuple with Vec<T> element
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `tuple - get_with_scores returns list and string`() {
+        Calculator(10).use { calc ->
+            calc.label = "test"
+            val result = calc.get_with_scores()
+            assertEquals(listOf(10, 20, 30), result._0)
+            assertEquals("test", result._1)
+        }
+    }
+
+    @Test
+    fun `tuple - get_with_scores with zero`() {
+        Calculator(0).use { calc ->
+            calc.label = ""
+            val result = calc.get_with_scores()
+            assertEquals(listOf(0, 0, 0), result._0)
+            assertEquals("", result._1)
+        }
+    }
+
+    @Test
+    fun `tuple - get_with_scores with negative`() {
+        Calculator(-5).use { calc ->
+            calc.label = "neg"
+            val result = calc.get_with_scores()
+            assertEquals(listOf(-5, -10, -15), result._0)
+            assertEquals("neg", result._1)
+        }
+    }
+
+    @Test
+    fun `tuple - get_with_scores repeated calls`() {
+        Calculator(7).use { calc ->
+            calc.label = "repeat"
+            repeat(100) {
+                val result = calc.get_with_scores()
+                assertEquals(3, result._0.size)
+                assertEquals(7, result._0[0])
+                assertEquals("repeat", result._1)
+            }
+        }
+    }
+
+    @Test
+    fun `edge tuple - get_with_scores with MAX_VALUE`() {
+        Calculator(Int.MAX_VALUE).use { calc ->
+            calc.label = "max"
+            val result = calc.get_with_scores()
+            assertEquals(Int.MAX_VALUE, result._0[0])
+            assertEquals("max", result._1)
+        }
+    }
+
+    @Test
+    fun `edge tuple - get_with_scores with MIN_VALUE`() {
+        Calculator(Int.MIN_VALUE).use { calc ->
+            calc.label = "min"
+            val result = calc.get_with_scores()
+            assertEquals(Int.MIN_VALUE, result._0[0])
+            assertEquals("min", result._1)
+        }
+    }
+
+    @Test
+    fun `str tuple - get_with_scores with unicode label`() {
+        Calculator(1).use { calc ->
+            calc.label = "\u00e9\u00e0\u00fc\u00f1 \u4e16\u754c \ud83d\ude80"
+            val result = calc.get_with_scores()
+            assertEquals(listOf(1, 2, 3), result._0)
+            assertEquals("\u00e9\u00e0\u00fc\u00f1 \u4e16\u754c \ud83d\ude80", result._1)
+        }
+    }
+
+    @Test
+    fun `edge tuple - get_with_scores lifecycle create use close`() {
+        repeat(50) {
+            Calculator(it).use { calc ->
+                calc.label = "iter$it"
+                val result = calc.get_with_scores()
+                assertEquals(it, result._0[0])
+                assertEquals("iter$it", result._1)
+            }
+        }
+    }
+
+    @Test
+    fun `load - 100K get_with_scores calls`() {
+        Calculator(1).use { calc ->
+            calc.label = "load"
+            repeat(100_000) {
+                val result = calc.get_with_scores()
+                assertEquals(listOf(1, 2, 3), result._0)
+            }
+        }
+    }
+
+    @Test
+    fun `concurrent - 10 threads x 10K get_with_scores`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    calc.label = "t$tid"
+                    repeat(10_000) {
+                        val result = calc.get_with_scores()
+                        assertEquals(listOf(tid, tid * 2, tid * 3), result._0)
+                        assertEquals("t$tid", result._1)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }

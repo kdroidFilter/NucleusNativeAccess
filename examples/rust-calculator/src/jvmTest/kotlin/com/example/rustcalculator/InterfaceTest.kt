@@ -171,25 +171,25 @@ class InterfaceTest {
     // &dyn Trait load tests
     // ═══════════════════════════════════════════════════════════════════════════
 
-    @Test fun `load - 10K describe_trait_object calls`() {
+    @Test fun `load - 100K describe_trait_object calls`() {
         val obj = Rustcalc.create_describable(42) as DynDescribable
-        repeat(10_000) {
+        repeat(100_000) {
             val desc = Rustcalc.describe_trait_object(obj)
             assertTrue(desc.contains("42"))
         }
     }
 
-    @Test fun `load - 10K measure_trait_object calls`() {
+    @Test fun `load - 100K measure_trait_object calls`() {
         val obj = Rustcalc.create_measurable(7) as DynMeasurable
-        repeat(10_000) {
+        repeat(100_000) {
             val result = Rustcalc.measure_trait_object(obj)
             assertTrue(result.contains("7"))
         }
     }
 
-    @Test fun `load - 10K reset_trait_object calls`() {
+    @Test fun `load - 100K reset_trait_object calls`() {
         val obj = Rustcalc.create_resettable(99) as DynResettable
-        repeat(10_000) {
+        repeat(100_000) {
             Rustcalc.reset_trait_object(obj)
         }
     }
@@ -198,11 +198,11 @@ class InterfaceTest {
     // &dyn Trait concurrency tests
     // ═══════════════════════════════════════════════════════════════════════════
 
-    @Test fun `concurrent - 10 threads x 1K describe_trait_object`() {
+    @Test fun `concurrent - 10 threads x 10K describe_trait_object`() {
         val threads = (1..10).map { tid ->
             Thread {
                 val obj = Rustcalc.create_describable(tid * 100) as DynDescribable
-                repeat(1_000) {
+                repeat(10_000) {
                     val desc = Rustcalc.describe_trait_object(obj)
                     assertTrue(desc.contains("${tid * 100}"), "Thread $tid failed, got: $desc")
                 }
@@ -212,11 +212,11 @@ class InterfaceTest {
         threads.forEach { it.join() }
     }
 
-    @Test fun `concurrent - 10 threads x 1K measure_trait_object`() {
+    @Test fun `concurrent - 10 threads x 10K measure_trait_object`() {
         val threads = (1..10).map { tid ->
             Thread {
                 val obj = Rustcalc.create_measurable(tid) as DynMeasurable
-                repeat(1_000) {
+                repeat(10_000) {
                     val result = Rustcalc.measure_trait_object(obj)
                     assertTrue(result.contains("$tid"))
                 }

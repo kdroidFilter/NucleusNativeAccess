@@ -254,10 +254,18 @@ class RustBridgeGenerator {
                     append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
                 }
             } else if (p.type is KneType.TUPLE) {
-                // Expand tuple fields as individual C params
                 val tuple = p.type as KneType.TUPLE
                 for ((idx, elemType) in tuple.elementTypes.withIndex()) {
-                    append(", ${p.name}_$idx: ${rustCType(elemType)}")
+                    when (elemType) {
+                        is KneType.LIST, is KneType.SET -> {
+                            append(", ${p.name}_${idx}_ptr: ${slicePointerType(elemType)}, ${p.name}_${idx}_len: i32")
+                        }
+                        is KneType.MAP -> {
+                            append(", ${p.name}_${idx}_keys_ptr: ${mapSlicePointerType(elemType.keyType)}, ${p.name}_${idx}_keys_len: i32")
+                            append(", ${p.name}_${idx}_values_ptr: ${mapSlicePointerType(elemType.valueType)}, ${p.name}_${idx}_values_len: i32")
+                        }
+                        else -> append(", ${p.name}_$idx: ${rustCType(elemType)}")
+                    }
                 }
             } else {
                 append(", ${p.name}: ${rustCType(p.type)}")
@@ -295,6 +303,16 @@ class RustBridgeGenerator {
                 when (elemType) {
                     KneType.STRING -> {
                         append(", out_t_$idx: *mut u8, out_t_${idx}_len: i32")
+                    }
+                    is KneType.LIST, is KneType.SET -> {
+                        val innerElem = when (elemType) { is KneType.LIST -> elemType.elementType; is KneType.SET -> (elemType as KneType.SET).elementType; else -> KneType.INT }
+                        val ptrType = listOutPointerType(innerElem)
+                        append(", out_t_$idx: $ptrType, out_t_${idx}_cap: i32, out_t_${idx}_len: *mut i32")
+                    }
+                    is KneType.MAP -> {
+                        append(", out_t_${idx}_keys: *mut u8, out_t_${idx}_keys_len: i32")
+                        append(", out_t_${idx}_values: *mut u8, out_t_${idx}_values_len: i32")
+                        append(", out_t_${idx}_len: i32")
                     }
                     else -> {
                         append(", out_t_$idx: *mut ${rustCType(elemType)}")
@@ -677,6 +695,23 @@ class RustBridgeGenerator {
                             appendLine("${indent}    unsafe { *out_t_$idx.add(_e_bytes.len()) = 0; }")
                             appendLine("${indent}}")
                         }
+                        is KneType.LIST -> {
+                            appendLine("${indent}let _list_len_$idx = $binding.$idx.len() as i32;")
+                            appendLine("${indent}unsafe { *out_t_${idx}_len = _list_len_$idx; }")
+                            appendLine("${indent}if _list_len_$idx <= out_t_${idx}_cap {")
+                            appendListTupleElementWrite("$binding.$idx", elemType as KneType.LIST, "out_t_$idx", indent)
+                            appendLine("${indent}}")
+                        }
+                        is KneType.SET -> {
+                            appendLine("${indent}let _set_len_$idx = $binding.$idx.len() as i32;")
+                            appendLine("${indent}unsafe { *out_t_${idx}_len = _set_len_$idx; }")
+                            appendLine("${indent}if _set_len_$idx <= out_t_${idx}_cap {")
+                            appendListTupleElementWrite("$binding.$idx", KneType.LIST(elemType.elementType), "out_t_$idx", indent)
+                            appendLine("${indent}}")
+                        }
+                        is KneType.MAP -> {
+                            appendMapTupleElementWrite("$binding.$idx", elemType as KneType.MAP, idx, indent)
+                        }
                         is KneType.TUPLE -> {
                             val bufVar = appendNestedTupleWrite(indent, "$binding.$idx", elemType as KneType.TUPLE, tupleCounter)
                             appendLine("${indent}unsafe { out_t_$idx.write($bufVar as i64); }")
@@ -820,6 +855,76 @@ class RustBridgeGenerator {
                 appendLine("${indent}len")
             }
         }
+    }
+
+    private fun StringBuilder.appendListTupleElementWrite(
+        binding: String, listType: KneType.LIST, bufName: String, indent: String
+    ) {
+        val elemType = listType.elementType
+        when (elemType) {
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $binding.iter() {")
+                appendLine("${indent}    let bytes = s.as_bytes();")
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), $bufName.add(offset), bytes.len());")
+                appendLine("${indent}        *$bufName.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
+                appendLine("${indent}}")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}}")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}}")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}}")
+            }
+            else -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendMapTupleElementWrite(
+        binding: String, mapType: KneType.MAP, idx: Int, indent: String
+    ) {
+        val keyType = mapType.keyType
+        val valueType = mapType.valueType
+        appendLine("${indent}let _map_len = $binding.len() as i32;")
+        appendLine("${indent}if _map_len <= out_t_${idx}_len {")
+        appendLine("${indent}    let mut _key_offset = 0usize;")
+        appendLine("${indent}    let mut _val_offset = 0usize;")
+        appendLine("${indent}    for (k, v) in $binding.iter().enumerate() {")
+        appendMapElementWrite("Some(k)", keyType, "out_t_${idx}_keys", indent + "        ", null)
+        appendMapElementWrite("Some(v)", valueType, "out_t_${idx}_values", indent + "        ", null)
+        appendLine("${indent}    }")
+        appendLine("${indent}}")
     }
 
     // ── MAP return bridge ────────────────────────────────────────────────────
@@ -2361,6 +2466,20 @@ class RustBridgeGenerator {
         else -> "*$valueExpr"
     }
 
+    /** Mutable pointer type for a LIST element out-buffer in tuple returns. */
+    private fun listOutPointerType(elemType: KneType): String = when (elemType) {
+        KneType.INT, KneType.BOOLEAN -> "*mut i32"
+        KneType.LONG -> "*mut i64"
+        KneType.DOUBLE -> "*mut f64"
+        KneType.FLOAT -> "*mut f32"
+        KneType.SHORT -> "*mut i16"
+        KneType.BYTE -> "*mut i8"
+        KneType.STRING -> "*mut u8"
+        is KneType.ENUM -> "*mut i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*mut i64"
+        else -> "*mut i32"
+    }
+
     /** C ABI pointer type for a slice parameter. */
     private fun slicePointerType(type: KneType): String = when (type) {
         KneType.BYTE_ARRAY -> "*const u8"
@@ -2372,6 +2491,19 @@ class RustBridgeGenerator {
             else -> "*const i64"
         }
         else -> "*const u8"
+    }
+
+    private fun mapSlicePointerType(elemType: KneType): String = when (elemType) {
+        KneType.STRING -> "*const u8"
+        KneType.INT, KneType.BOOLEAN -> "*const i32"
+        KneType.LONG -> "*const i64"
+        KneType.DOUBLE -> "*const f64"
+        KneType.FLOAT -> "*const f32"
+        KneType.SHORT -> "*const i16"
+        KneType.BYTE -> "*const i8"
+        is KneType.ENUM -> "*const i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const i64"
+        else -> "*const i64"
     }
 
     /** Extract DATA_CLASS from a nullable param type, if applicable. */

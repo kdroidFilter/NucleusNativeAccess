@@ -429,6 +429,7 @@ class FfmProxyGenerator {
         KneType.FLOAT -> "0.0f"
         KneType.DOUBLE -> "0.0"
         is KneType.ENUM -> "${type.simpleName}.entries[0]"
+        is KneType.LIST, is KneType.SET -> "emptyList<${when (type) { is KneType.LIST -> (type as KneType.LIST).elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }.jvmTypeName}>()"
         is KneType.TUPLE -> {
             val innerN = type.elementTypes.size
             val innerSig = type.typeId
@@ -481,11 +482,24 @@ class FfmProxyGenerator {
         appendLine("        val seg = MemorySegment.ofAddress(ptr).reinterpret($bufSize)")
 
         val readExprs = tuple.elementTypes.mapIndexed { idx, type ->
-            tupleElementReadExpr(type, "seg", idx)
+            when (type) {
+                is KneType.LIST, is KneType.SET -> null // Handle specially below
+                else -> tupleElementReadExpr(type, "seg", idx)
+            }
         }
         // Read all elements
-        readExprs.forEachIndexed { idx, expr ->
-            appendLine("        val _e$idx = $expr")
+        tuple.elementTypes.forEachIndexed { idx, type ->
+            when (type) {
+                is KneType.LIST, is KneType.SET -> {
+                    val elemType = when (type) { is KneType.LIST -> type.elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }
+                    val collType = if (type is KneType.SET) "Set" else "List"
+                    val layout = KneType.collectionElementLayout(elemType)
+                    appendLine("        val _e${idx}_ptr = seg.get(JAVA_LONG, ${idx * 8}L)")
+                    appendLine("        val _e${idx}_size = 0 // LIST size from Rust return, not stored in tuple")
+                    appendLine("        val _e$idx = if (_e${idx}_ptr == 0L) ${if (collType == "Set") "emptySet()" else "emptyList<Int>()"} else List(0) { MemorySegment.ofAddress(_e${idx}_ptr).getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+                }
+                else -> appendLine("        val _e$idx = ${readExprs[idx]}")
+            }
         }
         // Free the buffer
         appendLine("        FREE_BUF_HANDLE.invoke(ptr, ${bufSize}L)")
@@ -2520,7 +2534,13 @@ class FfmProxyGenerator {
                 KneType.STRING -> {
                     appendLine("${indent}val t_${idx}_buf = arena.allocate($STRING_BUF_SIZE.toLong())")
                 }
-                KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                is KneType.LIST, is KneType.SET -> {
+                    val innerElem = when (type) { is KneType.LIST -> type.elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }
+                    val layout = KneType.collectionElementLayout(innerElem)
+                    appendLine("${indent}val t_${idx}_buf = arena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
+                    appendLine("${indent}val t_${idx}_size = arena.allocate(JAVA_INT)")
+                }
+                KneType.BYTE_ARRAY, is KneType.MAP -> {
                     appendLine("${indent}val t_${idx}_ptr = arena.allocate(ADDRESS)")
                     appendLine("${indent}val t_${idx}_size = arena.allocate(JAVA_INT)")
                 }
@@ -2535,7 +2555,10 @@ class FfmProxyGenerator {
             elements.forEachIndexed { idx, type ->
                 when (type) {
                     KneType.STRING -> { add("t_${idx}_buf"); add("$STRING_BUF_SIZE") }
-                    KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET, is KneType.MAP -> {
+                    is KneType.LIST, is KneType.SET -> {
+                        add("t_${idx}_buf"); add("$MAX_COLLECTION_SIZE"); add("t_${idx}_size")
+                    }
+                    KneType.BYTE_ARRAY, is KneType.MAP -> {
                         add("t_${idx}_ptr"); add("t_${idx}_size")
                     }
                     else -> add("t_$idx")
@@ -2566,7 +2589,7 @@ class FfmProxyGenerator {
                 KneType.BYTE_ARRAY -> "KneRuntime.readByteArrayFromRef(t_${idx}_ptr.get(JAVA_LONG, 0))"
                 is KneType.ENUM -> "${type.simpleName}.entries[t_$idx.get(JAVA_INT, 0)]"
                 is KneType.OBJECT -> "${type.simpleName}.fromBorrowedHandle(t_$idx.get(JAVA_LONG, 0))"
-                is KneType.LIST, is KneType.SET -> "0L /* TODO: LIST/SET in tuple */"
+                is KneType.LIST, is KneType.SET -> buildListCollectionReadExpr(idx, type as KneType)
                 is KneType.MAP -> "0L /* TODO: MAP in tuple */"
                 is KneType.TUPLE -> "KneRuntime.readTupleFromRef(\"${type.typeId}\", t_${idx}.get(JAVA_LONG, 0)) as KneTuple${type.elementTypes.size}_${type.typeId}"
                 is KneType.NULLABLE -> "null /* TODO: nullable element */"
@@ -2582,6 +2605,29 @@ class FfmProxyGenerator {
         "readListFromTuple($ptr, $size)"
     private fun StringBuilder.readMapFromTuple(ptr: Long, size: Int): String =
         "readMapFromTuple($ptr, $size)"
+
+    private fun buildListCollectionReadExpr(idx: Int, type: KneType): String {
+        val elemType = when (type) { is KneType.LIST -> type.elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }
+        val collType = if (type is KneType.SET) "Set" else "List"
+        val layout = KneType.collectionElementLayout(elemType)
+        val buf = "t_${idx}_buf"
+        val countExpr = "t_${idx}_size.get(JAVA_INT, 0)"
+        return when (elemType) {
+            KneType.INT -> "List($countExpr) { $buf.getAtIndex(JAVA_INT, it.toLong()) }"
+            KneType.LONG -> "List($countExpr) { $buf.getAtIndex(JAVA_LONG, it.toLong()) }"
+            KneType.DOUBLE -> "List($countExpr) { $buf.getAtIndex(JAVA_DOUBLE, it.toLong()) }"
+            KneType.FLOAT -> "List($countExpr) { $buf.getAtIndex(JAVA_FLOAT, it.toLong()) }"
+            KneType.BOOLEAN -> "List($countExpr) { $buf.getAtIndex(JAVA_INT, it.toLong()) != 0 }"
+            KneType.BYTE -> "List($countExpr) { $buf.getAtIndex(JAVA_BYTE, it.toLong()) }"
+            KneType.SHORT -> "List($countExpr) { $buf.getAtIndex(JAVA_SHORT, it.toLong()) }"
+            is KneType.ENUM -> "List($countExpr) { ${elemType.simpleName}.entries[$buf.getAtIndex(JAVA_INT, it.toLong())] }"
+            is KneType.OBJECT -> "List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($buf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }"
+            KneType.STRING -> {
+                "run { val _sb = mutableListOf<String>(); var _off = 0L; repeat($countExpr) { _sb.add($buf.getString(_off)); _off += _sb.last().toByteArray(Charsets.UTF_8).size + 1 }; _sb.toList() }"
+            }
+            else -> "emptyList() /* unsupported LIST element type in tuple */"
+        }.let { expr -> if (collType == "Set") "$expr.toSet()" else expr }
+    }
 
     /** Generate the return-via-out-params pattern for DATA_CLASS property types. */
     private fun StringBuilder.appendDataClassReturnProxyForProperty(indent: String, prop: KneProperty, handleName: String, nullable: Boolean = false) {
@@ -3723,7 +3769,14 @@ class FfmProxyGenerator {
                 }
                 KneType.STRING -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
                 KneType.BYTE_ARRAY -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
-                is KneType.LIST, is KneType.SET, is KneType.MAP -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
+                is KneType.LIST, is KneType.SET -> {
+                    if (isOutParam) {
+                        builder.add("ADDRESS"); builder.add("JAVA_INT"); builder.add("ADDRESS") // buf, cap, len_out
+                    } else {
+                        builder.add("ADDRESS"); builder.add("JAVA_INT") // ptr, len
+                    }
+                }
+                is KneType.MAP -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
                 KneType.INT, KneType.LONG, KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.FLOAT, KneType.DOUBLE -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
                 else -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
             }

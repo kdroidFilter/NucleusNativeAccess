@@ -228,7 +228,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 |----------|----------------------|--------|------------|
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
 | **Traits** | Trait objects (`dyn Trait`) | **Fully supported** | `Box<dyn Trait>`, `Option<Box<dyn Trait>>`, `Result<Box<dyn Trait>, E>`, `Vec<Box<dyn Trait>>` returns via registry. `&dyn Trait` / `&mut dyn Trait` params pass handle and reconstruct reference via transmute | &mdash; |
-| **Types** | Tuple with `Vec<T>` / collection element | Collections inside tuple elements not yet mapped | Use a struct or return separately |
+| **Types** | Tuple with `Vec<T>` / collection element | `Vec<T>` / `HashSet<T>` in tuple returns supported via pre-allocated buffer + count out-param | &mdash; |
 | **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
 | **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |
 | **Enums** | Tagged enum variants with `Vec<T>` / collection fields | Variant constructors with collection fields skipped | &mdash; |
