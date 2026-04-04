@@ -739,6 +739,63 @@ pub fn try_format(a: i32, b: i32) -> Result<impl std::fmt::Display, String> {
     }
 }
 
+// ── dyn Trait functions (trait objects) ──────────────────────────────────
+
+/// Creates a Describable trait object from a Calculator.
+pub fn create_describable(initial: i32) -> Box<dyn Describable> {
+    Box::new(Calculator::new(initial))
+}
+
+/// Creates a Measurable trait object from a Calculator.
+pub fn create_measurable(initial: i32) -> Box<dyn Measurable> {
+    Box::new(Calculator::new(initial))
+}
+
+/// Creates a Resettable trait object from a Calculator with mutations.
+pub fn create_resettable(initial: i32) -> Box<dyn Resettable> {
+    Box::new(Calculator::new(initial))
+}
+
+/// Takes a reference to a dyn Describable and returns its description.
+pub fn describe_trait_object(obj: &dyn Describable) -> String {
+    obj.describe_self()
+}
+
+/// Takes a Box<dyn Measurable> and returns the measurement + unit.
+pub fn measure_trait_object(obj: &dyn Measurable) -> String {
+    format!("{} {}", obj.measure(), obj.unit())
+}
+
+/// Factory: returns Option<Box<dyn Describable>>.
+pub fn maybe_create_describable(initial: i32) -> Option<Box<dyn Describable>> {
+    if initial >= 0 {
+        Some(Box::new(Calculator::new(initial)))
+    } else {
+        None
+    }
+}
+
+/// Returns a Vec of dyn Describable trait objects.
+pub fn create_describable_list(values: &[i32]) -> Vec<Box<dyn Describable>> {
+    values.iter()
+        .map(|&v| Box::new(Calculator::new(v)) as Box<dyn Describable>)
+        .collect()
+}
+
+/// Mutates a dyn Resettable trait object.
+pub fn reset_trait_object(obj: &mut dyn Resettable) {
+    obj.reset_to_default();
+}
+
+/// Returns Result<Box<dyn Describable>, String>.
+pub fn try_create_describable(initial: i32) -> Result<Box<dyn Describable>, String> {
+    if initial == i32::MIN {
+        Err("invalid initial value".to_string())
+    } else {
+        Ok(Box::new(Calculator::new(initial)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

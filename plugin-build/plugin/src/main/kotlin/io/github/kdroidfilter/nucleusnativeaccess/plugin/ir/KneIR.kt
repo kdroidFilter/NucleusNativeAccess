@@ -46,6 +46,8 @@ data class KneClass(
     val isCommon: Boolean = false,
     val isOpaque: Boolean = false,
     val rustTypeName: String = simpleName,
+    /** True for synthetic classes wrapping `Box<dyn Trait>` trait objects. */
+    val isDynTrait: Boolean = false,
 ) : Serializable
 
 data class KneEnum(

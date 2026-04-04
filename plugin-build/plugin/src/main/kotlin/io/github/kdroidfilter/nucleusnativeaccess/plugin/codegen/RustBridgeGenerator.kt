@@ -45,6 +45,9 @@ class RustBridgeGenerator {
         }
 
         for (fn in module.functions) {
+            if (fn.params.any { it.type is KneType.INTERFACE }) {
+                continue
+            }
             sb.appendTopLevelFunction(fn, prefix)
         }
 
@@ -58,8 +61,32 @@ class RustBridgeGenerator {
         appendLine()
         appendLine("use std::cell::RefCell;")
         appendLine("use std::ffi::CStr;")
+        appendLine("use std::collections::HashMap;")
         appendLine("use std::os::raw::c_char;")
         appendLine("use std::panic::catch_unwind;")
+        appendLine()
+        appendLine("// dyn Trait registry: stores fat pointer components as [usize; 2]")
+        appendLine("// Box<dyn Trait> is a fat pointer (data + vtable). We transmute it to [usize; 2] for storage.")
+        appendLine()
+        appendLine("thread_local! {")
+        appendLine("    static KNE_TRAIT_REGISTRY: RefCell<HashMap<u64, [usize; 2]>> = RefCell::new(HashMap::new());")
+        appendLine("    static KNE_NEXT_HANDLE: RefCell<u64> = RefCell::new(1);")
+        appendLine("}")
+        appendLine()
+        appendLine("// Drop a trait object by handle")
+        appendLine("// We reconstruct the Box<dyn Trait> from the stored fat pointer components.")
+        appendLine("fn kne_drop_trait_object(handle: u64) {")
+        appendLine("    KNE_TRAIT_REGISTRY.with(|reg| {")
+        appendLine("        if let Some(words) = reg.borrow_mut().remove(&handle) {")
+        appendLine("            unsafe {")
+        appendLine("                // Reconstruct Box<dyn Trait> from [usize; 2]")
+        appendLine("                let fat_ptr: *mut dyn std::any::Any = std::mem::transmute(words);")
+        appendLine("                let boxed: Box<Box<dyn std::any::Any>> = Box::from_raw(fat_ptr as *mut Box<dyn std::any::Any>);")
+        appendLine("                drop(boxed);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
         appendLine()
     }
 
@@ -481,6 +508,52 @@ class RustBridgeGenerator {
             else -> true
         }
         else -> true
+    }
+
+    /**
+     * Returns true if the given type is a dyn Trait (fat pointer) that cannot be
+     * represented as an i64 handle across the FFM boundary.
+     * Handles: dyn Trait, &dyn Trait, &mut dyn Trait, Box<dyn Trait>
+     */
+    private fun isDynTraitType(type: KneType, rustType: String?): Boolean {
+        if (type is KneType.INTERFACE) {
+            val rt = rustType ?: return false
+            // Check for direct dyn Trait or dyn Trait in Box/Option/Result
+            rt.startsWith("dyn ") || rt.startsWith("&dyn ") || rt.startsWith("&mut dyn ") ||
+                rt.startsWith("Box<dyn") || rt.startsWith("Option<Box<dyn") || rt.startsWith("Result<Box<dyn")
+        }
+        return false
+    }
+
+    /**
+     * Returns true if the given param uses dyn Trait.
+     */
+    private fun isDynTraitParam(p: KneParam): Boolean =
+        isDynTraitType(p.type, p.rustType)
+
+    /**
+     * Returns true if this function uses dyn Trait and should be handled by the dyn Trait handler.
+     * Returns false if the function should be skipped (e.g., &dyn Trait params which can't be bridged).
+     */
+    private fun isDynTraitFunction(fn: KneFunction): Boolean {
+        // If params contain &dyn Trait (INTERFACE type with isBorrowed=true), we can't bridge - skip entirely
+        // Note: &dyn Trait has rustType="dyn Trait" (WITHOUT the &), isBorrowed=true, type=INTERFACE
+        if (fn.params.any { p -> p.type is KneType.INTERFACE }) {
+            return false  // Skip - can't handle &dyn Trait params
+        }
+
+        // If return type is dyn Trait (Box<dyn Trait>, Option<...>, Result<...>), handle via registry
+        val retRt = fn.returnRustType ?: ""
+        if (retRt.contains("dyn ")) {
+            return true  // Handle via registry
+        }
+
+        // If return type is INTERFACE (dyn Trait interface), handle via registry
+        if (isDynTraitType(fn.returnType, fn.returnRustType)) {
+            return true
+        }
+
+        return false  // Not a dyn Trait function
     }
 
     /** Extract MAP type from a direct MAP or Nullable<MAP> return. */
@@ -1086,6 +1159,12 @@ class RustBridgeGenerator {
     // --- Top-level functions ---
 
     private fun StringBuilder.appendTopLevelFunction(fn: KneFunction, prefix: String) {
+        // Handle dyn Trait functions with registry-based approach
+        if (isDynTraitFunction(fn)) {
+            appendDynTraitTopLevelFunction(fn, prefix)
+            return
+        }
+
         val sym = "${prefix}_${fn.name}"
         val needsBuf = needsOutputBuffer(fn.returnType)
 
@@ -1213,6 +1292,294 @@ class RustBridgeGenerator {
         appendLine("    len + 1")
         appendLine("}")
         appendLine()
+    }
+
+    /**
+     * Generates bridge code for functions that use dyn Trait.
+     * Uses a registry-based approach: Box<dyn Trait> objects are stored in a registry
+     * and referenced by u64 handles across the FFM boundary.
+     */
+    private fun StringBuilder.appendDynTraitTopLevelFunction(fn: KneFunction, prefix: String) {
+        val sym = "${prefix}_${fn.name}"
+        val returnType = fn.returnType
+        val params = fn.params
+        val rustRetType = fn.returnRustType ?: ""
+        val needsBuf = needsOutputBuffer(returnType)
+
+        // Determine trait handle params
+        val traitHandleParams = params.filter { p ->
+            val rt = p.rustType ?: ""
+            rt.startsWith("&dyn ") || rt.startsWith("&mut dyn ") || rt.startsWith("Box<dyn ")
+        }
+
+        // Determine return type category
+        val isBoxDynTrait = rustRetType.startsWith("Box<dyn ")
+        val isOptionBoxDyn = rustRetType.startsWith("Option<Box<dyn ")
+        val isVecBoxDyn = rustRetType.startsWith("Vec<Box<dyn ")
+        val isResultBoxDyn = rustRetType.startsWith("Result<Box<dyn ")
+
+        // Build parameter list
+        val allParams = mutableListOf<String>()
+        for (p in params) {
+            val rt = p.rustType ?: ""
+            when {
+                rt.startsWith("&dyn ") || rt.startsWith("&mut dyn ") || rt.startsWith("Box<dyn ") -> {
+                    allParams.add("${p.name}_handle: i64")
+                }
+                p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST -> {
+                    allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                    allParams.add("${p.name}_len: i32")
+                }
+                p.type is KneType.DATA_CLASS -> {
+                    val dc = p.type as KneType.DATA_CLASS
+                    for (field in dc.fields) {
+                        allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                    }
+                }
+                p.type is KneType.TUPLE -> {
+                    val tuple = p.type as KneType.TUPLE
+                    for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                        allParams.add("${p.name}_$idx: ${rustCType(elemType)}")
+                    }
+                }
+                else -> allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
+        }
+
+        // Add output buffer for string returns
+        if (needsBuf) {
+            allParams.add("out_buf: *mut u8")
+            allParams.add("out_buf_len: i32")
+        }
+
+        // Handle different return types - order matters! Result<Box<dyn...> must be before Box<dyn...
+        // Note: returnRustType for Result returns shows inner type (Box<dyn Trait>), not Result<...>.
+        // We detect Result returns via fn.canFail flag combined with isBoxDynTrait.
+        val isResultReturn = fn.canFail && isBoxDynTrait
+        when {
+            // Result<Box<dyn Trait>, E> return - detected via canFail flag
+            isResultReturn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        match result {")
+                appendLine("            Ok(v) => {")
+                appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                    let h = *counter.borrow();")
+                appendLine("                    *counter.borrow_mut() += 1;")
+                appendLine("                    h")
+                appendLine("                });")
+                appendLine("                let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(v) };")
+                appendLine("                KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("                handle as i64")
+                appendLine("            }")
+                appendLine("            Err(e) => {")
+                appendLine("                kne_set_error(e.to_string());")
+                appendLine("                0i64")
+                appendLine("            }")
+                appendLine("        }")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Option<Box<dyn Trait>> return
+            isOptionBoxDyn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        match result {")
+                appendLine("            Some(v) => {")
+                appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                    let h = *counter.borrow();")
+                appendLine("                    *counter.borrow_mut() += 1;")
+                appendLine("                    h")
+                appendLine("                });")
+                appendLine("                let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(v) };")
+                appendLine("                KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("                handle as i64")
+                appendLine("            }")
+                appendLine("            None => 0i64")
+                appendLine("        }")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Vec<Box<dyn Trait>> return
+            isVecBoxDyn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}, out_handles: *mut i64, out_count: *mut i32) -> i32 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                for (p in params) {
+                    if (p.type is KneType.LIST || p.type == KneType.BYTE_ARRAY) {
+                        appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    }
+                }
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let count = result.len() as i32;")
+                appendLine("        unsafe { out_count.write(count); }")
+                appendLine("        for (i, item) in result.into_iter().enumerate() {")
+                appendLine("            let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                let h = *counter.borrow();")
+                appendLine("                *counter.borrow_mut() += 1;")
+                appendLine("                h")
+                appendLine("            });")
+                appendLine("            let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(item) };")
+                appendLine("            KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("            unsafe { out_handles.add(i).write(handle as i64); }")
+                appendLine("        }")
+                appendLine("        count")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); -1 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Box<dyn Trait> return
+            isBoxDynTrait -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("            let h = *counter.borrow();")
+                appendLine("            *counter.borrow_mut() += 1;")
+                appendLine("            h")
+                appendLine("        });")
+                appendLine("        let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(result) };")
+                appendLine("        KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("        handle as i64")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Functions taking &dyn Trait (immutable borrow)
+            traitHandleParams.isNotEmpty() && !needsBuf -> {
+                // Extract trait names for downcast
+                val traitNames = traitHandleParams.map { p ->
+                    val rt = p.rustType ?: ""
+                    val start = rt.indexOf("dyn ") + 4
+                    val end = rt.lastIndexOf('>')
+                    if (start > 4 && end > start) rt.substring(start, end) else "Unknown"
+                }
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> ${rustCReturnType(returnType)} {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                // For each trait param, lookup, downcast, and reborrow
+                traitHandleParams.forEachIndexed { idx, p ->
+                    val paramName = p.name
+                    val traitName = traitNames[idx]
+                    appendLine("        let obj_$paramName = kne_trait_registry_get(${paramName}_handle as u64);")
+                    appendLine("        let obj_$paramName = obj_$paramName.expect(\"Invalid trait handle\");")
+                    appendLine("        let obj_$paramName = obj_$paramName.downcast_ref::<Box<dyn $traitName>>().expect(\"Wrong trait type\");")
+                }
+                // Build call args with borrowed trait objects
+                val callArgs = params.joinToString(", ") { p ->
+                    if (traitHandleParams.contains(p)) {
+                        val rt = p.rustType ?: ""
+                        if (rt.startsWith("&mut dyn ")) "&mut **obj_${p.name}" else "&**obj_${p.name}"
+                    } else {
+                        convertedParamName(p)
+                    }
+                }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                when (returnType) {
+                    is KneType.INTERFACE -> {
+                        appendLine("        let handle = kne_register_trait_object(result);")
+                        appendLine("        handle as i64")
+                    }
+                    KneType.UNIT -> appendLine("        result")
+                    KneType.INT -> appendLine("        result as i32")
+                    KneType.LONG -> appendLine("        result as i64")
+                    KneType.BOOLEAN -> appendLine("        if result { 1 } else { 0 }")
+                    else -> appendLine("        result")
+                }
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(returnType)} }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Functions taking &dyn Trait with string return
+            traitHandleParams.isNotEmpty() && needsBuf -> {
+                // Extract trait names for downcast
+                val traitNames = traitHandleParams.map { p ->
+                    val rt = p.rustType ?: ""
+                    val start = rt.indexOf("dyn ") + 4
+                    val end = rt.lastIndexOf('>')
+                    if (start > 4 && end > start) rt.substring(start, end) else "Unknown"
+                }
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i32 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                traitHandleParams.forEachIndexed { idx, p ->
+                    val paramName = p.name
+                    val traitName = traitNames[idx]
+                    appendLine("        let obj_$paramName = kne_trait_registry_get(${paramName}_handle as u64);")
+                    appendLine("        let obj_$paramName = obj_$paramName.expect(\"Invalid trait handle\");")
+                    appendLine("        let obj_$paramName = obj_$paramName.downcast_ref::<Box<dyn $traitName>>().expect(\"Wrong trait type\");")
+                }
+                val callArgs = params.joinToString(", ") { p ->
+                    if (traitHandleParams.contains(p)) {
+                        val rt = p.rustType ?: ""
+                        if (rt.startsWith("&mut dyn ")) "&mut **obj_${p.name}" else "&**obj_${p.name}"
+                    } else {
+                        convertedParamName(p)
+                    }
+                }
+                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let bytes = result.as_bytes();")
+                appendLine("        let len = bytes.len() as i32;")
+                appendLine("        if len < out_buf_len {")
+                appendLine("            unsafe {")
+                appendLine("                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+                appendLine("                *out_buf.add(bytes.len()) = 0;")
+                appendLine("            }")
+                appendLine("        }")
+                appendLine("        len + 1")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            else -> {
+                // Unhandled dyn Trait return type - should not reach here with current cases
+            }
+        }
     }
 
     private fun StringBuilder.appendFlowMethod(fn: KneFunction, cls: KneClass, prefix: String) {

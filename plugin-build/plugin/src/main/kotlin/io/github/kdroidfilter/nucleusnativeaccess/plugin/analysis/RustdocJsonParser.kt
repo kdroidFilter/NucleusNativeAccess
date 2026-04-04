@@ -27,6 +27,12 @@ class RustdocJsonParser {
     /** Public type names exported by the parsed crate root. Used to avoid Kotlin name collisions. */
     private var reservedTopLevelTypeNames: Set<String> = emptySet()
 
+    /** Known trait IDs → names, set during [parse] for `dyn Trait` resolution. */
+    private var currentKnownTraits: Map<Int, String> = emptyMap()
+
+    /** Trait names that appear as `dyn Trait` in function signatures (need synthetic wrapper classes). */
+    private val dynTraitNames = mutableSetOf<String>()
+
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
         if (!this.isJsonPrimitive) return null
@@ -52,6 +58,7 @@ class RustdocJsonParser {
     ): KneModule {
         encounteredOpaqueClasses = linkedMapOf()
         reservedTopLevelTypeNames = emptySet()
+        dynTraitNames.clear()
 
         val root = JsonParser.parseString(json).asJsonObject
         val index = root.getAsJsonObject("index")
@@ -104,6 +111,7 @@ class RustdocJsonParser {
                 inner.has("trait") -> knownTraits[intId] = name
             }
         }
+        currentKnownTraits = knownTraits
 
         val sealedEnumIds = mutableSetOf<Int>()
         for ((id, _) in knownEnums) {
@@ -449,6 +457,30 @@ class RustdocJsonParser {
                 existingFqNames.add(opaque.fqName)
                 renamedClasses.add(opaque)
             }
+        }
+
+        // Create synthetic wrapper classes for each trait used as `dyn Trait`
+        for (iface in renamedInterfaces) {
+            if (iface.simpleName !in dynTraitNames) continue
+            val dynName = "Dyn${iface.simpleName}"
+            val dynFqName = "${iface.fqName.substringBeforeLast('.')}.$dynName"
+            if (dynFqName in existingFqNames) continue
+            existingFqNames.add(dynFqName)
+            val dynClass = KneClass(
+                simpleName = dynName,
+                fqName = dynFqName,
+                constructor = KneConstructor(emptyList(), KneConstructorKind.NONE),
+                methods = iface.methods.map { m ->
+                    m.copy(isOverride = true)
+                },
+                properties = iface.properties.map { p ->
+                    p.copy(isOverride = true)
+                },
+                interfaces = listOf(iface.fqName),
+                isDynTrait = true,
+                rustTypeName = "Box<dyn ${iface.simpleName}>",
+            )
+            renamedClasses.add(dynClass)
         }
 
         val pkg = crateName.replace('-', '.').replace('_', '.')
@@ -914,6 +946,20 @@ class RustdocJsonParser {
             val id = rp.get("id")?.takeIf { !it.isJsonNull }?.asInt
             val args = rp.get("args")
 
+            // Handle Box<dyn Trait> — unwrap Box, resolve inner dyn_trait
+            if (pathSegment == "Box") {
+                val innerTypeObj = extractFirstGenericArgRaw(args)
+                if (innerTypeObj != null && innerTypeObj.has("dyn_trait")) {
+                    val inner = resolveType(innerTypeObj, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                    if (inner != null) {
+                        return inner.copy(
+                            rustType = "Box<${inner.rustType ?: renderRustType(inner.type)}>",
+                        )
+                    }
+                }
+                // Non-dyn Box<T>: fall through to normal handling (will be opaque)
+            }
+
             return when (pathSegment) {
                 "String" -> ResolvedType(KneType.STRING, rustType = pathSegment)
                 "PathBuf", "Path", "OsStr", "OsString" -> ResolvedType(KneType.STRING, rustType = path)
@@ -1029,6 +1075,21 @@ class RustdocJsonParser {
                 if (paramTypes.size != inputs.size()) return null
                 val output = resolveTypeWithBorrow(parenthesized.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                 return ResolvedType(KneType.FUNCTION(paramTypes, output?.type ?: KneType.UNIT), rustType = path)
+            }
+            // Check for known user-defined traits (dyn Trait → INTERFACE)
+            for (traitEntry in traits) {
+                val traitObj = traitEntry.asJsonObject.getAsJsonObject("trait") ?: continue
+                val traitId = traitObj.get("id")?.takeIf { !it.isJsonNull }?.asInt
+                val traitPath = traitObj.get("path")?.asString ?: continue
+                val traitName = if (traitId != null && currentKnownTraits.containsKey(traitId)) {
+                    currentKnownTraits[traitId]!!
+                } else {
+                    val seg = lastPathSegment(traitPath)
+                    if (currentKnownTraits.values.contains(seg)) seg else continue
+                }
+                dynTraitNames.add(traitName)
+                val fqName = "$currentCrateName.$traitName"
+                return ResolvedType(KneType.INTERFACE(fqName, traitName), rustType = "dyn $traitName")
             }
             return null
         }
@@ -1168,6 +1229,17 @@ class RustdocJsonParser {
             return resolveTypeWithBorrow(firstArg.asJsonObject.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
         }
         return null
+    }
+
+    /** Returns the raw JSON type object of the first generic arg without resolving it. */
+    private fun extractFirstGenericArgRaw(args: JsonElement?): JsonObject? {
+        if (args == null || args.isJsonNull) return null
+        val ab = args.asJsonObject.getAsJsonObject("angle_bracketed") ?: return null
+        val argsList = ab.getAsJsonArray("args") ?: return null
+        if (argsList.size() == 0) return null
+        val firstArg = argsList[0]
+        if (!firstArg.isJsonObject) return null
+        return firstArg.asJsonObject.getAsJsonObject("type")
     }
 
     private fun extractTwoGenericArgs(

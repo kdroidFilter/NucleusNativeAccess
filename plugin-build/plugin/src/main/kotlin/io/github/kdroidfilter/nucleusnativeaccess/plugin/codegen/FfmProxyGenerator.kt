@@ -29,6 +29,9 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneType
  */
 class FfmProxyGenerator {
 
+    /** Maps interface fqName → dyn wrapper class simpleName (e.g. "crate.Describable" → "DynDescribable"). */
+    private var dynWrapperLookup: Map<String, String> = emptyMap()
+
     companion object {
         private const val STRING_BUF_SIZE = 8192
         private const val ERR_BUF_SIZE = 8192
@@ -306,6 +309,12 @@ class FfmProxyGenerator {
      */
     fun generate(module: KneModule, jvmPackage: String): Map<String, String> {
         val files = mutableMapOf<String, String>()
+
+        // Build dyn wrapper lookup: interface fqName → Dyn wrapper class simpleName
+        dynWrapperLookup = module.classes
+            .filter { it.isDynTrait }
+            .flatMap { cls -> cls.interfaces.map { ifaceFq -> ifaceFq to cls.simpleName } }
+            .toMap()
 
         // Collect all unique callback signatures used across the module
         val callbackSignatures = collectCallbackSignatures(module)
@@ -4651,7 +4660,10 @@ class FfmProxyGenerator {
             KneType.BOOLEAN -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
             is KneType.ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.entries[$bufExpr.getAtIndex(JAVA_INT, it.toLong())] }")
             is KneType.OBJECT -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
-            is KneType.INTERFACE -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
+            is KneType.INTERFACE -> {
+                val wrapperName = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName
+                appendLine("${indent}val $varName = List($countExpr) { $wrapperName.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
+            }
             is KneType.SEALED_ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
             else -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
         }
@@ -4723,7 +4735,10 @@ class FfmProxyGenerator {
             is KneType.OBJECT, is KneType.INTERFACE -> {
                 val simpleName = when (returnType) {
                     is KneType.OBJECT -> returnType.simpleName
-                    is KneType.INTERFACE -> returnType.simpleName
+                    is KneType.INTERFACE -> {
+                        // Use dyn wrapper class for factory call (e.g. DynDescribable.fromNativeHandle)
+                        dynWrapperLookup[returnType.fqName] ?: returnType.simpleName
+                    }
                     else -> error("unreachable")
                 }
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
@@ -4894,13 +4909,18 @@ class FfmProxyGenerator {
                 appendLine("${indent}KneRuntime.checkError()")
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Double.fromBits(raw)")
             }
-            is KneType.OBJECT -> {
+            is KneType.OBJECT, is KneType.INTERFACE -> {
+                val innerName = when (val inner = type.inner) {
+                    is KneType.INTERFACE -> dynWrapperLookup[inner.fqName] ?: inner.simpleName
+                    is KneType.OBJECT -> inner.simpleName
+                    else -> error("Nullable OBJECT/INTERFACE inner must be OBJECT or INTERFACE, got ${type.inner}")
+                }
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
                 appendLine("${indent}KneRuntime.checkError()")
                 val factory = if (returnsBorrowed) {
-                    "${type.inner.simpleName}.fromBorrowedHandle"
+                    "$innerName.fromBorrowedHandle"
                 } else {
-                    "${type.inner.simpleName}.fromNativeHandle"
+                    "$innerName.fromNativeHandle"
                 }
                 appendLine("${indent}return if (resultHandle == 0L) null else $factory(resultHandle)")
             }
