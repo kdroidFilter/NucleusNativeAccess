@@ -216,7 +216,7 @@ fun main() {
 | `impl Display` / `impl ToString` return | `String` | Materialized via `.to_string()` in bridge |
 | `impl Into<T>` return | `T` | Converted via `.into()` in bridge |
 | `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator) |
-| Trait objects (`dyn Trait`) | **Partially supported** | `Box<dyn Trait>` return types supported via registry; `&dyn Trait` params excluded (fat pointer = 16 bytes, exceeds FFM i64 = 8 bytes) |
+| Trait objects (`dyn Trait`) | **Supported** | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` params via handle + transmute |
 
 ### Current limitations (Rust Import)
 
@@ -227,7 +227,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | Category | Unsupported construct | Impact | Workaround |
 |----------|----------------------|--------|------------|
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
-| **Traits** | Trait objects (`dyn Trait`) | **Partially supported** | Functions returning `Box<dyn Trait>`, `Option<Box<dyn Trait>>`, `Result<Box<dyn Trait>, E>`, `Vec<Box<dyn Trait>>` are supported via registry. Functions taking `&dyn Trait` / `&mut dyn Trait` params are excluded (fat pointer = 16 bytes exceeds FFM i64 = 8 bytes limit) | Use factory functions returning `Box<dyn Trait>` instead of taking `&dyn Trait` params |
+| **Traits** | Trait objects (`dyn Trait`) | **Fully supported** | `Box<dyn Trait>`, `Option<Box<dyn Trait>>`, `Result<Box<dyn Trait>, E>`, `Vec<Box<dyn Trait>>` returns via registry. `&dyn Trait` / `&mut dyn Trait` params pass handle and reconstruct reference via transmute | &mdash; |
 | **Types** | Tuple with `Vec<T>` / collection element | Collections inside tuple elements not yet mapped | Use a struct or return separately |
 | **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
 | **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |

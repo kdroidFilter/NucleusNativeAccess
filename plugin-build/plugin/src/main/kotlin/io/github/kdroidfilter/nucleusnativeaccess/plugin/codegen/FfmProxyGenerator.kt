@@ -3668,7 +3668,15 @@ class FfmProxyGenerator {
 
         fns.forEach { fn ->
             val handleName = "${fn.name.uppercase()}_HANDLE"
-            val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            val params = fn.params.joinToString(", ") { p ->
+                val typeName = if (p.type is KneType.INTERFACE) {
+                    // Use DynWrapper class for &dyn Trait params (has handle property)
+                    dynWrapperLookup[(p.type as KneType.INTERFACE).fqName] ?: p.type.jvmTypeName
+                } else {
+                    p.type.jvmTypeName
+                }
+                "${p.name}: $typeName"
+            }
             appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 
             appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
@@ -3990,6 +3998,7 @@ class FfmProxyGenerator {
         KneType.BYTE_ARRAY -> "${name}Seg"
         KneType.BOOLEAN -> "if ($name) 1 else 0"
         is KneType.OBJECT -> buildOwnedHandleArg(name, isBorrowed)
+        is KneType.INTERFACE -> "$name.handle" // dyn Trait param: pass registry handle
         is KneType.SEALED_ENUM -> buildOwnedHandleArg(name, isBorrowed)
         is KneType.ENUM -> "$name.ordinal"
         is KneType.NULLABLE -> buildNullableJvmInvokeArg(name, type, isBorrowed)
@@ -4523,6 +4532,10 @@ class FfmProxyGenerator {
             }
             is KneType.OBJECT -> {
                 appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+            }
+            is KneType.INTERFACE -> {
+                val wrapperName = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName
+                appendLine("${indent}val _list = List($countExpr) { $wrapperName.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
             }
             KneType.BYTE_ARRAY -> {
                 // ByteArray elements: each is a StableRef handle

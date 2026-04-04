@@ -883,8 +883,10 @@ class RustdocJsonParser {
             val ref = obj.getAsJsonObject("borrowed_ref")
             val innerResolved = resolveType(ref.get("type"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
             val lifetime = ref.get("lifetime").safeString()
+            val isMutable = ref.get("is_mutable")?.takeIf { !it.isJsonNull }?.asBoolean == true
+            val refPrefix = if (isMutable) "&mut " else "&"
             val rustType = innerResolved.rustType?.let {
-                if (lifetime != null) "&$lifetime $it" else "&$it"
+                if (lifetime != null) "$refPrefix$lifetime $it" else "$refPrefix$it"
             }
             return ResolvedType(type = innerResolved.type, isBorrowed = true, rustType = rustType)
         }
