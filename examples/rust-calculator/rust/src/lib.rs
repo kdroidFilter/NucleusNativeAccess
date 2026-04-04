@@ -20,6 +20,18 @@ pub enum CalcResult {
     Nothing,
 }
 
+/// A data container demonstrating sealed enum variants with collection fields.
+pub enum DataPayload {
+    /// A list of integer scores.
+    Scores(Vec<i32>),
+    /// A set of unique integers.
+    UniqueIds(std::collections::HashSet<i32>),
+    /// A key-value map (Int → Int).
+    Mapping(std::collections::HashMap<i32, i32>),
+    /// Empty payload.
+    Empty,
+}
+
 /// Simple 2D point (data class -- all public fields, no complex methods).
 pub struct Point {
     pub x: i32,
@@ -839,6 +851,33 @@ pub fn try_create_describable(initial: i32) -> Result<Box<dyn Describable>, Stri
     } else {
         Ok(Box::new(Calculator::new(initial)))
     }
+}
+
+// ── DataPayload factory functions ──────────────────────────────────────────
+
+/// Creates a Scores payload from a slice of ints.
+pub fn create_scores_payload(values: &[i32]) -> DataPayload {
+    DataPayload::Scores(values.to_vec())
+}
+
+/// Creates a UniqueIds payload from a slice of ints.
+pub fn create_unique_ids_payload(ids: &[i32]) -> DataPayload {
+    DataPayload::UniqueIds(ids.iter().cloned().collect())
+}
+
+/// Creates a Mapping payload from parallel key/value slices.
+pub fn create_mapping_payload(keys: &[i32], values: &[i32]) -> DataPayload {
+    let map: std::collections::HashMap<i32, i32> = keys
+        .iter()
+        .zip(values.iter())
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    DataPayload::Mapping(map)
+}
+
+/// Creates an Empty payload.
+pub fn create_empty_payload() -> DataPayload {
+    DataPayload::Empty
 }
 
 #[cfg(test)]

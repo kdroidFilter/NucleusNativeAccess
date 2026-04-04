@@ -1106,16 +1106,40 @@ class RustBridgeGenerator {
         }
     }
 
+    /** Whether a collection element type can be passed as a flat C slice. */
+    private fun isSupportedCollectionElementForConstructor(elemType: KneType): Boolean = when (elemType) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN -> true
+        else -> false
+    }
+
     private fun StringBuilder.appendSealedVariantConstructor(
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
-        // Skip variants with unsupported field types
-        if (variant.fields.any { it.type is KneType.LIST || it.type is KneType.SET || it.type is KneType.MAP }) return
+        // Skip variants with collection fields containing non-primitive elements (e.g. Object, String)
+        val hasUnsupportedCollectionField = variant.fields.any { f ->
+            val t = f.type
+            when (t) {
+                is KneType.LIST -> !isSupportedCollectionElementForConstructor(t.elementType)
+                is KneType.SET -> !isSupportedCollectionElementForConstructor(t.elementType)
+                is KneType.MAP -> !isSupportedCollectionElementForConstructor(t.keyType) || !isSupportedCollectionElementForConstructor(t.valueType)
+                else -> false
+            }
+        }
+        if (hasUnsupportedCollectionField) return
         val fnName = "${sym}_new_${variant.name}"
         appendLine("#[no_mangle]")
         val params = variant.fields.joinToString(", ") { f ->
             when (f.type) {
-                KneType.BYTE_ARRAY, is KneType.LIST -> "${f.name}_ptr: ${slicePointerType(f.type)}, ${f.name}_len: i32"
+                KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET -> "${f.name}_ptr: ${slicePointerType(f.type)}, ${f.name}_len: i32"
+                is KneType.MAP -> {
+                    val mapType = f.type as KneType.MAP
+                    buildString {
+                        append("${f.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}, ")
+                        append("${f.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}, ")
+                        append("${f.name}_size: i32")
+                    }
+                }
                 else -> "${f.name}: ${rustCType(f.type)}"
             }
         }
@@ -1953,6 +1977,11 @@ class RustBridgeGenerator {
                     appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
                 }
             }
+            is KneType.SET -> {
+                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                // SET always needs owned HashSet (unlike LIST which can stay as slice)
+                appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+            }
             is KneType.MAP -> {
                 val mapType = p.type as KneType.MAP
                 val keyType = mapType.keyType
@@ -1961,8 +1990,8 @@ class RustBridgeGenerator {
                 appendLine("${indent}let ${p.name}_values_slice = unsafe { std::slice::from_raw_parts(${p.name}_values_ptr, ${p.name}_size as usize) };")
                 val keyConv = mapSliceElemReadExpr("${p.name}_keys_slice", "i", keyType)
                 val valueConv = mapSliceElemReadExpr("${p.name}_values_slice", "i", valueType)
-                appendLine("${indent}let ${p.name}_map: std::collections::HashMap<${mapValueRustType(keyType)}, ${mapValueRustType(valueType)}> = std::collections::HashMap::new();")
-                appendLine("${indent}for i in 0..${p.name}_size {")
+                appendLine("${indent}let mut ${p.name}_map: std::collections::HashMap<${mapValueRustType(keyType)}, ${mapValueRustType(valueType)}> = std::collections::HashMap::new();")
+                appendLine("${indent}for i in 0..${p.name}_size as usize {")
                 appendLine("${indent}    ${p.name}_map.insert($keyConv, $valueConv);")
                 appendLine("${indent}}")
             }
@@ -2228,6 +2257,8 @@ class RustBridgeGenerator {
         is KneType.NULLABLE -> "${p.name}_opt"
         KneType.BYTE_ARRAY -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
         is KneType.LIST -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
+        is KneType.SET -> "${p.name}_set"
+        is KneType.MAP -> "${p.name}_map"
         else -> if (primitiveCastType(p.type, p.rustType) != null) "${p.name}_conv" else p.name
     }
 
@@ -2527,6 +2558,13 @@ class RustBridgeGenerator {
     private fun slicePointerType(type: KneType): String = when (type) {
         KneType.BYTE_ARRAY -> "*const u8"
         is KneType.LIST -> when (type.elementType) {
+            KneType.INT -> "*const i32"
+            KneType.LONG -> "*const i64"
+            KneType.DOUBLE -> "*const f64"
+            KneType.FLOAT -> "*const f32"
+            else -> "*const i64"
+        }
+        is KneType.SET -> when ((type as KneType.SET).elementType) {
             KneType.INT -> "*const i32"
             KneType.LONG -> "*const i64"
             KneType.DOUBLE -> "*const f64"

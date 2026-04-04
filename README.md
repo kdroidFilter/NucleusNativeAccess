@@ -231,7 +231,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Types** | Tuple with `Vec<T>` / collection element | `Vec<T>` / `HashSet<T>` in tuple returns supported via pre-allocated buffer + count out-param | &mdash; |
 | **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
 | **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |
-| **Enums** | Tagged enum variants with `Vec<T>` / collection fields | Variant constructors with collection fields skipped | &mdash; |
+| **Enums** | Tagged enum variants with collection fields | Constructors supported for `Vec<T>`, `HashSet<T>`, `HashMap<K,V>` with **primitive** element types. String/Object element types in collection fields are skipped | Use primitive element types |
 | **Constructors** | Generic constructors (`fn new<T: Trait>(...)`) | Skipped if generics can't be resolved | Use concrete types |
 | **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |

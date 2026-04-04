@@ -3425,13 +3425,13 @@ class FfmProxyGenerator {
                     appendLine("            Arena.ofConfined().use { arena ->")
                     appendStringInvokeArgsAlloc("                ", variant.fields)
                     appendCollectionParamAlloc("                ", variant.fields)
-                    val invokeArgs = variant.fields.joinToString(", ") { f -> buildJvmInvokeArg(f) }
+                    val invokeArgs = variant.fields.flatMap { f -> buildExpandedInvokeArgs(f) }.joinToString(", ")
                     appendLine("                val h = NEW_${variant.name.uppercase()}_HANDLE.invoke($invokeArgs) as Long")
                     appendLine("                KneRuntime.checkError()")
                     appendLine("                return ${variant.name}(h)")
                     appendLine("            }")
                 } else {
-                    val invokeArgs = variant.fields.joinToString(", ") { f -> buildJvmInvokeArg(f) }
+                    val invokeArgs = variant.fields.flatMap { f -> buildExpandedInvokeArgs(f) }.joinToString(", ")
                     appendLine("            val h = NEW_${variant.name.uppercase()}_HANDLE.invoke($invokeArgs) as Long")
                     appendLine("            KneRuntime.checkError()")
                     appendLine("            return ${variant.name}(h)")
@@ -3456,14 +3456,25 @@ class FfmProxyGenerator {
                 appendLine("        private val NEW_${variant.name.uppercase()}_HANDLE = KneRuntime.handle(")
                 appendLine("            \"$newSym\", FunctionDescriptor.of(JAVA_LONG))")
             } else {
-                val layouts = variant.fields.joinToString(", ") { f ->
+                val layouts = variant.fields.flatMap { f ->
                     when (f.type) {
-                        KneType.STRING -> "ADDRESS"
-                        else -> f.type.ffmLayout
+                        KneType.STRING -> listOf("ADDRESS")
+                        is KneType.LIST, is KneType.SET -> listOf("ADDRESS", "JAVA_INT")
+                        is KneType.MAP -> {
+                            val mapType = f.type as KneType.MAP
+                            buildList {
+                                add("ADDRESS")
+                                if (mapType.keyType == KneType.STRING) add("JAVA_INT")
+                                add("ADDRESS")
+                                if (mapType.valueType == KneType.STRING) add("JAVA_INT")
+                                add("JAVA_INT")
+                            }
+                        }
+                        else -> listOf(f.type.ffmLayout)
                     }
                 }
                 appendLine("        private val NEW_${variant.name.uppercase()}_HANDLE = KneRuntime.handle(")
-                appendLine("            \"$newSym\", FunctionDescriptor.of(JAVA_LONG, $layouts))")
+                appendLine("            \"$newSym\", FunctionDescriptor.of(JAVA_LONG, ${layouts.joinToString(", ")}))")
             }
             appendLine()
         }
