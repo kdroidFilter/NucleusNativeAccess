@@ -2843,21 +2843,35 @@ class FfmProxyGenerator {
         if (p.type == KneType.BYTE_ARRAY) return listOf("${p.name}Seg", "${p.name}.size")
         val isNullableColl = p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner.let { it is KneType.LIST || it is KneType.SET || it is KneType.MAP }
         if (p.type is KneType.LIST) {
-            return if ((p.type as KneType.LIST).elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
-            else listOf("${p.name}Seg", "${p.name}.size")
+            val elemType = (p.type as KneType.LIST).elementType
+            return when {
+                elemType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
+                elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "${p.name}.size")
+                else -> listOf("${p.name}Seg", "${p.name}.size")
+            }
         }
         if (p.type is KneType.SET) {
-            return if ((p.type as KneType.SET).elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
-            else listOf("${p.name}Seg", "${p.name}.size")
+            val elemType = (p.type as KneType.SET).elementType
+            return when {
+                elemType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
+                elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "${p.name}.size")
+                else -> listOf("${p.name}Seg", "${p.name}.size")
+            }
         }
         if (p.type is KneType.MAP) return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
         if (isNullableColl) {
             val inner = (p.type as KneType.NULLABLE).inner
             return when (inner) {
-                is KneType.LIST -> if (inner.elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
-                    else listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
-                is KneType.SET -> if (inner.elementType is KneType.DATA_CLASS) listOf("${p.name}Handle")
-                    else listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
+                is KneType.LIST -> when {
+                    inner.elementType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
+                    inner.elementType == KneType.STRING || inner.elementType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
+                    else -> listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
+                }
+                is KneType.SET -> when {
+                    inner.elementType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
+                    inner.elementType == KneType.STRING || inner.elementType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
+                    else -> listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
+                }
                 is KneType.MAP -> listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "if (${p.name} == null) -1 else ${p.name}.size")
                 is KneType.TUPLE -> buildTupleInvokeArgs(p.name, inner as KneType.TUPLE, true)
                 else -> listOf(buildJvmInvokeArg(p))
@@ -3344,6 +3358,7 @@ class FfmProxyGenerator {
         appendLine()
         appendLine("import java.lang.foreign.Arena")
         appendLine("import java.lang.foreign.FunctionDescriptor")
+        appendLine("import java.lang.foreign.MemorySegment")
         appendLine("import java.lang.foreign.ValueLayout.*")
         appendLine()
         appendLine("sealed class ${sealed.simpleName}(internal val handle: Long, ownsHandle: Boolean = true) : AutoCloseable {")
@@ -4118,9 +4133,25 @@ class FfmProxyGenerator {
                         add("${p.name}Seg")
                         add("${p.name}.size")
                     }
-                    p.type is KneType.LIST || p.type is KneType.SET -> {
-                        add("${p.name}Seg")
-                        add("${p.name}.size")
+                    p.type is KneType.LIST -> {
+                        val elemType = (p.type as KneType.LIST).elementType
+                        if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) {
+                            add("${p.name}PtrSeg")
+                            add("${p.name}.size")
+                        } else {
+                            add("${p.name}Seg")
+                            add("${p.name}.size")
+                        }
+                    }
+                    p.type is KneType.SET -> {
+                        val elemType = (p.type as KneType.SET).elementType
+                        if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) {
+                            add("${p.name}PtrSeg")
+                            add("${p.name}.size")
+                        } else {
+                            add("${p.name}Seg")
+                            add("${p.name}.size")
+                        }
                     }
                     else -> add(buildJvmInvokeArg(p))
                 }
@@ -4387,11 +4418,15 @@ class FfmProxyGenerator {
     private fun StringBuilder.appendListParamAlloc(indent: String, name: String, elemType: KneType, srcExpr: String = name) {
         when (elemType) {
             KneType.STRING -> {
-                // Pack strings as null-terminated sequence in a single buffer
-                appendLine("${indent}val ${name}TotalBytes = $srcExpr.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 }")
-                appendLine("${indent}val ${name}Seg = arena.allocate(${name}TotalBytes.toLong().coerceAtLeast(1))")
-                appendLine("${indent}var ${name}Off = 0L")
-                appendLine("${indent}for (_s in $srcExpr) { ${name}Seg.setString(${name}Off, _s); ${name}Off += _s.toByteArray(Charsets.UTF_8).size + 1 }")
+                // Allocate array of pointers to null-terminated strings
+                appendLine("${indent}val ${name}PtrSeg = arena.allocate(ADDRESS, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, _s ->")
+                appendLine("${indent}    val _sBytes = _s.toByteArray(Charsets.UTF_8)")
+                appendLine("${indent}    val _sSeg = arena.allocate(_sBytes.size.toLong() + 1)")
+                appendLine("${indent}    MemorySegment.copy(_sBytes, 0, _sSeg, JAVA_BYTE, 0, _sBytes.size)")
+                appendLine("${indent}    _sSeg.set(JAVA_BYTE, _sBytes.size.toLong(), 0)")
+                appendLine("${indent}    ${name}PtrSeg.set(ADDRESS, (i * 8).toLong(), _sSeg)")
+                appendLine("${indent}}")
             }
             KneType.BOOLEAN -> {
                 appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_INT, $srcExpr.size.toLong())")

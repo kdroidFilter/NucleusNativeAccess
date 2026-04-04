@@ -101,6 +101,85 @@ class DataPayloadTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Tags variant (LIST<String> field)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `factory Tags creates variant with LIST field`() {
+        DataPayload.tags(listOf("hello", "world")).use { result ->
+            assertTrue(result is DataPayload.Tags)
+            assertEquals(listOf("hello", "world"), result.value)
+            assertEquals(DataPayload.Tag.Tags, result.tag)
+        }
+    }
+
+    @Test fun `factory Tags with empty list`() {
+        DataPayload.tags(emptyList()).use { result ->
+            assertTrue(result is DataPayload.Tags)
+            assertEquals(emptyList(), result.value)
+        }
+    }
+
+    @Test fun `factory Tags with single element`() {
+        DataPayload.tags(listOf("only")).use { result ->
+            assertEquals(listOf("only"), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `str - Tags with empty string`() {
+        DataPayload.tags(listOf("")).use { result ->
+            assertEquals(listOf(""), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `str - Tags with unicode emoji`() {
+        DataPayload.tags(listOf("hello 👋 world", "🎉")).use { result ->
+            assertEquals(listOf("hello 👋 world", "🎉"), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `str - Tags with international characters`() {
+        DataPayload.tags(listOf("日本語", "中文", "한국어", "Ελληνικά")).use { result ->
+            assertEquals(listOf("日本語", "中文", "한국어", "Ελληνικά"), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `str - Tags with special characters`() {
+        DataPayload.tags(listOf("a\rb\nc", "with spaces", "tabs\there")).use { result ->
+            assertEquals(listOf("a\rb\nc", "with spaces", "tabs\there"), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `str - Tags with long string`() {
+        val longString = "x".repeat(1000)
+        DataPayload.tags(listOf(longString)).use { result ->
+            assertEquals(listOf(longString), (result as DataPayload.Tags).value)
+        }
+    }
+
+    @Test fun `create_tags_payload returns Tags`() {
+        val tags = listOf("rust", "kotlin", "java")
+        Rustcalc.create_tags_payload(tags, tags.size).use { result ->
+            assertTrue(result is DataPayload.Tags)
+            assertEquals(listOf("rust", "kotlin", "java"), result.value)
+        }
+    }
+
+    @Test fun `create_tags_payload with empty list`() {
+        val tags = emptyList<String>()
+        Rustcalc.create_tags_payload(tags, 0).use { result ->
+            assertTrue(result is DataPayload.Tags)
+            assertEquals(emptyList(), result.value)
+        }
+    }
+
+    @Test fun `str - create_tags_payload with unicode`() {
+        val tags = listOf("🚀", "🎯", "💻")
+        Rustcalc.create_tags_payload(tags, tags.size).use { result ->
+            assertEquals(listOf("🚀", "🎯", "💻"), (result as DataPayload.Tags).value)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Empty variant
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -218,6 +297,23 @@ class DataPayloadTest {
         }
     }
 
+    @Test fun `load - 100K Tags factory calls`() {
+        repeat(100_000) {
+            DataPayload.tags(listOf("a", "b", "c")).use { result ->
+                assertEquals(3, (result as DataPayload.Tags).value.size)
+            }
+        }
+    }
+
+    @Test fun `load - 1K create_tags_payload calls`() {
+        repeat(1_000) {
+            val tags = listOf("x", "y")
+            Rustcalc.create_tags_payload(tags, tags.size).use { result ->
+                assertEquals(2, (result as DataPayload.Tags).value.size)
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Concurrency tests
     // ═══════════════════════════════════════════════════════════════════════════
@@ -256,6 +352,37 @@ class DataPayloadTest {
                 repeat(10_000) {
                     DataPayload.mapping(mapOf(tid to tid * 10)).use { result ->
                         assertEquals(tid * 10, (result as DataPayload.Mapping).value[tid])
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 1K Tags factory`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                repeat(1_000) {
+                    DataPayload.tags(listOf("tag$tid-1", "tag$tid-2")).use { result ->
+                        val tags = (result as DataPayload.Tags).value
+                        assertTrue(tags.contains("tag$tid-1"))
+                        assertTrue(tags.contains("tag$tid-2"))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 5 threads x 200 create_tags_payload`() {
+        val threads = (1..5).map { tid ->
+            Thread {
+                repeat(200) {
+                    val tags = listOf("thread$tid")
+                    Rustcalc.create_tags_payload(tags, tags.size).use { result ->
+                        assertEquals("thread$tid", (result as DataPayload.Tags).value.first())
                     }
                 }
             }

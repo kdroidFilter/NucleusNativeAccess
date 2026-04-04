@@ -229,13 +229,13 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Generics** | Generic types with lifetime parameters in args | Lifetime args in generic position are skipped | &mdash; |
 | **Traits** | Trait objects (`dyn Trait`) | **Fully supported** | `Box<dyn Trait>`, `Option<Box<dyn Trait>>`, `Result<Box<dyn Trait>, E>`, `Vec<Box<dyn Trait>>` returns via registry. `&dyn Trait` / `&mut dyn Trait` params pass handle and reconstruct reference via transmute | &mdash; |
 | **Types** | Tuple with `Vec<T>` / collection element | `Vec<T>` / `HashSet<T>` in tuple returns supported via pre-allocated buffer + count out-param | &mdash; |
-| **Types** | Function pointer types (`fn(A) -> B`) as return | Not mapped | &mdash; |
-| **Types** | `&[T]` return (borrowed slices) | Not possible to return borrowed data across FFI | Return `Vec<T>` instead |
+| **Types** | Function pointer types (`fn(A) -> B`) as return | Skipped with log message | &mdash; |
+| **Types** | Tuple parameters on standalone `pub fn` | Tuples as parameters are not supported (tuples as return types are fully supported) | Expand tuple fields into individual parameters |
 | **Enums** | Tagged enum variants with collection fields | Constructors supported for `Vec<T>`, `HashSet<T>`, `HashMap<K,V>` with **primitive** element types. String/Object element types in collection fields are skipped | Use primitive element types |
 | **Constructors** | Generic constructors (`fn new<T: Trait>(...)`) | Skipped if generics can't be resolved | Use concrete types |
 | **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |
-| **Lifetimes** | Explicit lifetime parameters on structs | Struct skipped if lifetimes can't be resolved | &mdash; |
+| **Lifetimes** | Explicit lifetime parameters on structs (`struct Ref<'a>`) | Entire struct skipped with log message | Remove lifetime parameters or use owned types |
 | **Mutability** | `&mut T` parameters on standalone `pub fn` | Treated as `&T` (immutable borrow) | Wrap `T` in a newtype with `UnsafeCell` for interior mutability, or use `impl` methods with `&mut self` instead |
 
 **Supported but with caveats:**
@@ -254,6 +254,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | `impl Iterator<Item=T>` return | Mapped to `List<T>` | Collected via `.collect::<Vec<_>>()` in bridge; also supports `ExactSizeIterator`, `DoubleEndedIterator`, `IntoIterator` |
 | `impl Display` / `impl ToString` return | Mapped to `String` | Materialized via `.to_string()` in bridge |
 | `impl AsRef<str>` return | Mapped to `String` | Materialized via `.as_ref().to_string()` in bridge |
+| `&[T]` return (borrowed slices) | Materialized to `List<T>` | Borrowed slice is copied into a `Vec<T>` in the bridge; safe but allocates |
 | `impl Into<T>` return | Mapped to `T` | Converted via `.into()` in bridge |
 | `Result<impl Trait, E>` return | Combined with above | Result unwrapped first, then impl Trait conversion applied |
 

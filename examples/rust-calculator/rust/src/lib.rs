@@ -28,6 +28,8 @@ pub enum DataPayload {
     UniqueIds(std::collections::HashSet<i32>),
     /// A key-value map (Int → Int).
     Mapping(std::collections::HashMap<i32, i32>),
+    /// A list of string tags.
+    Tags(Vec<String>),
     /// Empty payload.
     Empty,
 }
@@ -873,6 +875,24 @@ pub fn create_mapping_payload(keys: &[i32], values: &[i32]) -> DataPayload {
         .map(|(k, v)| (*k, *v))
         .collect();
     DataPayload::Mapping(map)
+}
+
+/// Creates a Tags payload from an array of C string pointers.
+pub fn create_tags_payload(tags_ptr: *const *const std::ffi::c_char, tags_len: i32) -> DataPayload {
+    let tags_slice = unsafe { std::slice::from_raw_parts(tags_ptr, tags_len as usize) };
+    let tags: Vec<String> = tags_slice
+        .iter()
+        .map(|&p| {
+            if p.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(p) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+        .collect();
+    DataPayload::Tags(tags)
 }
 
 /// Creates an Empty payload.

@@ -1034,6 +1034,40 @@ class RustdocJsonParser {
             else ResolvedType(KneType.LIST(elem.type), rustType = rustType)
         }
 
+        // Handle raw pointers: *const *const c_char represents LIST<String> (array of C strings)
+        if (obj.has("raw_pointer")) {
+            val ptrObj = obj.getAsJsonObject("raw_pointer")
+            val innerType = ptrObj.get("type") ?: return null
+            val innerObj = innerType.asJsonObject
+
+            fun isCChar(typeObj: JsonObject): Boolean {
+                // Check if primitive c_char
+                if (typeObj.has("primitive") && typeObj.get("primitive").asString == "c_char") return true
+                // Check if resolved_path to c_char or ffi::c_char
+                if (typeObj.has("resolved_path")) {
+                    val rp = typeObj.getAsJsonObject("resolved_path")
+                    val path = rp.get("path").asString
+                    return path == "c_char" || path.endsWith("::c_char")
+                }
+                return false
+            }
+
+            // Check for double pointer: *const *const c_char
+            if (innerObj.has("raw_pointer")) {
+                val innerPtrObj = innerObj.getAsJsonObject("raw_pointer")
+                val innermostType = innerPtrObj.get("type")
+                if (innermostType != null && isCChar(innermostType.asJsonObject)) {
+                    return ResolvedType(KneType.LIST(KneType.STRING), rustType = "*const *const c_char")
+                }
+            }
+            // Single pointer to c_char could be treated as STRING
+            if (isCChar(innerObj)) {
+                return ResolvedType(KneType.STRING, rustType = "*const c_char")
+            }
+            // For other raw pointers, return null (unsupported)
+            return null
+        }
+
         if (obj.has("tuple")) {
             val elems = obj.getAsJsonArray("tuple")
             if (elems.size() == 0) return ResolvedType(KneType.UNIT, rustType = "()")

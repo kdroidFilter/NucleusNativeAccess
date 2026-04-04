@@ -1109,7 +1109,8 @@ class RustBridgeGenerator {
     /** Whether a collection element type can be passed as a flat C slice. */
     private fun isSupportedCollectionElementForConstructor(elemType: KneType): Boolean = when (elemType) {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
-        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN -> true
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN,
+        KneType.STRING -> true
         else -> false
     }
 
@@ -1972,15 +1973,35 @@ class RustBridgeGenerator {
                 }
             }
             is KneType.LIST -> {
-                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
-                if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
-                    appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                val elemType = (p.type as KneType.LIST).elementType
+                val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+                if (isStringLike) {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    if (elemType == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_vec: Vec<String> = ${p.name}_slice.iter().map(|&p| cstr_to_string(p)).collect();")
+                    } else {
+                        appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                    }
+                } else {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
+                        appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                    }
                 }
             }
             is KneType.SET -> {
+                val elemType = (p.type as KneType.SET).elementType
+                val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
                 appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
-                // SET always needs owned HashSet (unlike LIST which can stay as slice)
-                appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+                if (isStringLike) {
+                    if (elemType == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_set: std::collections::HashSet<String> = ${p.name}_slice.iter().map(|&p| cstr_to_string(p)).collect();")
+                    } else {
+                        appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+                    }
+                } else {
+                    appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+                }
             }
             is KneType.MAP -> {
                 val mapType = p.type as KneType.MAP
@@ -2256,14 +2277,35 @@ class RustBridgeGenerator {
         is KneType.TUPLE -> "${p.name}_tuple"
         is KneType.NULLABLE -> "${p.name}_opt"
         KneType.BYTE_ARRAY -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
-        is KneType.LIST -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
-        is KneType.SET -> "${p.name}_set"
+        is KneType.LIST -> {
+            val elemType = (p.type as KneType.LIST).elementType
+            val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+            when {
+                isStringLike -> "${p.name}_ptr"
+                expectsOwnedVecLike(p.rustType, p.isBorrowed) -> "${p.name}_vec"
+                else -> "${p.name}_slice"
+            }
+        }
+        is KneType.SET -> {
+            val elemType = (p.type as KneType.SET).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_ptr" else "${p.name}_set"
+        }
         is KneType.MAP -> "${p.name}_map"
         else -> if (primitiveCastType(p.type, p.rustType) != null) "${p.name}_conv" else p.name
     }
 
-    /** Param name for constructor calls — String passes owned String. */
-    private fun convertedCallArg(p: KneParam): String = convertedParamName(p)
+    /** Param name for sealed enum constructor calls — uses the Vec name for LIST/SET with String. */
+    private fun convertedCallArg(p: KneParam): String = when (p.type) {
+        is KneType.LIST -> {
+            val elemType = (p.type as KneType.LIST).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_vec" else convertedParamName(p)
+        }
+        is KneType.SET -> {
+            val elemType = (p.type as KneType.SET).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_set" else convertedParamName(p)
+        }
+        else -> convertedParamName(p)
+    }
 
     private fun StringBuilder.appendNullableReturn(
         nullableType: KneType.NULLABLE,
@@ -2562,6 +2604,7 @@ class RustBridgeGenerator {
             KneType.LONG -> "*const i64"
             KneType.DOUBLE -> "*const f64"
             KneType.FLOAT -> "*const f32"
+            KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
             else -> "*const i64"
         }
         is KneType.SET -> when ((type as KneType.SET).elementType) {
@@ -2569,13 +2612,14 @@ class RustBridgeGenerator {
             KneType.LONG -> "*const i64"
             KneType.DOUBLE -> "*const f64"
             KneType.FLOAT -> "*const f32"
+            KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
             else -> "*const i64"
         }
         else -> "*const u8"
     }
 
     private fun mapSlicePointerType(elemType: KneType): String = when (elemType) {
-        KneType.STRING -> "*const u8"
+        KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
         KneType.INT, KneType.BOOLEAN -> "*const i32"
         KneType.LONG -> "*const i64"
         KneType.DOUBLE -> "*const f64"
@@ -2583,7 +2627,6 @@ class RustBridgeGenerator {
         KneType.SHORT -> "*const i16"
         KneType.BYTE -> "*const i8"
         is KneType.ENUM -> "*const i32"
-        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const i64"
         else -> "*const i64"
     }
 
