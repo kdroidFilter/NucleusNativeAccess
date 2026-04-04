@@ -205,7 +205,7 @@ fun main() {
 | All primitives (`i32`, `i64`, `f64`, `f32`, `bool`, `i8`, `i16`) | Int, Long, Double, Float, Boolean, Byte, Short | Direct mapping |
 | `String` / `&str` | String | Borrowed vs owned auto-detected |
 | `Option<T>` return | `T?` | Sentinel-based null encoding |
-| `Vec<T>` / `&[T]` return | `List<T>` / `ByteArray` | Buffer pattern |
+| `Vec<T>` / `&[T]` return | `List<T>` / `ByteArray` | Buffer pattern; supports `i32`, `i64`, `f64`, `f32`, `bool`, `String` element types |
 | `&[u8]` / `&[i32]` params | `ByteArray` / `List<Int>` | Pointer + length expansion |
 | `HashMap<K,V>` | `Map<K,V>` | Parallel arrays |
 | Error propagation | `KotlinNativeException` | `catch_unwind` + thread-local error |

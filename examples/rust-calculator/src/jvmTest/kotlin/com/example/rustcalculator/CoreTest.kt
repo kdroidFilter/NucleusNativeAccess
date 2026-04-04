@@ -222,4 +222,182 @@ class CoreTest {
             assertTrue(calc.enabled)
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `edge prim - Int MAX_VALUE`() {
+        Calculator(Int.MAX_VALUE).use { calc -> assertEquals(Int.MAX_VALUE, calc.current) }
+    }
+
+    @Test fun `edge prim - Int MIN_VALUE`() {
+        Calculator(Int.MIN_VALUE).use { calc -> assertEquals(Int.MIN_VALUE, calc.current) }
+    }
+
+    @Test fun `edge str - very long string`() {
+        Calculator(0).use { calc ->
+            val long = "A".repeat(10_000)
+            assertEquals(long, calc.echo(long))
+        }
+    }
+
+    @Test fun `edge str - emoji string`() {
+        Calculator(0).use { calc ->
+            assertEquals("🔥💯🚀🎉", calc.echo("🔥💯🚀🎉"))
+        }
+    }
+
+    @Test fun `edge str - null char in string`() {
+        Calculator(0).use { calc ->
+            calc.label = "before"
+            assertEquals("before", calc.label)
+        }
+    }
+
+    @Test fun `edge prim - Long MAX_VALUE`() {
+        Calculator(0).use { calc ->
+            assertEquals(Long.MAX_VALUE, calc.add_long(Long.MAX_VALUE))
+        }
+    }
+
+    @Test fun `edge prim - Double NaN`() {
+        Calculator(0).use { calc ->
+            val result = calc.add_double(Double.NaN)
+            assertTrue(result.isNaN())
+        }
+    }
+
+    @Test fun `edge prim - Double Infinity`() {
+        Calculator(0).use { calc ->
+            val result = calc.add_double(Double.POSITIVE_INFINITY)
+            assertEquals(Double.POSITIVE_INFINITY, result)
+        }
+    }
+
+    @Test fun `edge exc - fail_always throws`() {
+        Calculator(0).use { calc ->
+            val ex = assertFailsWith<KotlinNativeException> { calc.fail_always() }
+            assertTrue(ex.message!!.contains("Intentional error"))
+        }
+    }
+
+    @Test fun `edge exc - panic_always throws`() {
+        Calculator(0).use { calc ->
+            assertFailsWith<RuntimeException> { calc.panic_always() }
+        }
+    }
+
+    @Test fun `edge obj - lifecycle create use close`() {
+        repeat(100) { i ->
+            Calculator(i).use { calc ->
+                assertEquals(i, calc.current)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Load tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `load - 100K add calls single instance`() {
+        Calculator(0).use { calc ->
+            repeat(100_000) { calc.add(1) }
+            assertEquals(100_000, calc.current)
+        }
+    }
+
+    @Test fun `load - 100K describe calls`() {
+        Calculator(42).use { calc ->
+            repeat(100_000) {
+                assertEquals("Calculator(current=42)", calc.describe())
+            }
+        }
+    }
+
+    @Test fun `load - 100K echo calls`() {
+        Calculator(0).use { calc ->
+            repeat(100_000) {
+                assertEquals("test", calc.echo("test"))
+            }
+        }
+    }
+
+    @Test fun `load - 100K property reads`() {
+        Calculator(42).use { calc ->
+            repeat(100_000) {
+                assertEquals(42, calc.current)
+            }
+        }
+    }
+
+    @Test fun `load - 100K label set and get`() {
+        Calculator(0).use { calc ->
+            repeat(100_000) {
+                calc.label = "x"
+                assertEquals("x", calc.label)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Concurrency tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `concurrent - 10 threads x 10K add on separate instances`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    repeat(10_000) { calc.add(1) }
+                    assertEquals(10_000, calc.current)
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K describe`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(10_000) {
+                        val desc = calc.describe()
+                        assertTrue(desc.contains("$tid"))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K echo`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    repeat(10_000) {
+                        assertEquals("t$tid", calc.echo("t$tid"))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K property set and get`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    repeat(10_000) {
+                        calc.label = "t$tid"
+                        assertEquals("t$tid", calc.label)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }

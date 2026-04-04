@@ -371,6 +371,31 @@ impl Calculator {
         vec![self.accumulator, self.accumulator * 2, self.accumulator * 3]
     }
 
+    /// Returns score names as a list of strings.
+    pub fn get_score_names(&self) -> Vec<String> {
+        (1..=3)
+            .map(|i| format!("score_{}", self.accumulator * i))
+            .collect()
+    }
+
+    /// Returns ratios as a list of doubles.
+    pub fn get_ratios(&self) -> Vec<f64> {
+        vec![
+            self.accumulator as f64,
+            self.accumulator as f64 / 2.0,
+            self.accumulator as f64 / 3.0,
+        ]
+    }
+
+    /// Returns flags as a list of booleans.
+    pub fn get_flags(&self) -> Vec<bool> {
+        vec![
+            self.accumulator > 0,
+            self.accumulator > 10,
+            self.accumulator > 100,
+        ]
+    }
+
     // ── Optional collection support ────────────────────────────────────────
 
     /// Returns optional scores — Some if accumulator > 0, None otherwise.

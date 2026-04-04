@@ -94,4 +94,125 @@ class DataClassTest {
             assertEquals(99, got.value)
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `edge dc - Point with MAX_VALUE`() {
+        Calculator(Int.MAX_VALUE).use { calc ->
+            val p = calc.get_point()
+            assertEquals(Int.MAX_VALUE, p.x)
+        }
+    }
+
+    @Test fun `edge dc - Point with MIN_VALUE`() {
+        Calculator(Int.MIN_VALUE).use { calc ->
+            val p = calc.get_point()
+            assertEquals(Int.MIN_VALUE, p.x)
+        }
+    }
+
+    @Test fun `edge dc - add_point with zero point`() {
+        Calculator(42).use { calc ->
+            val result = calc.add_point(Point(0, 0))
+            assertEquals(42, result)
+        }
+    }
+
+    @Test fun `edge dc - NamedValue with unicode name`() {
+        Calculator(0).use { calc ->
+            calc.set_from_named(NamedValue("日本語テスト 🚀", 7))
+            val got = calc.get_named_value()
+            assertEquals("日本語テスト 🚀", got.name)
+            assertEquals(7, got.value)
+        }
+    }
+
+    @Test fun `edge dc - NamedValue with empty name`() {
+        Calculator(0).use { calc ->
+            calc.set_from_named(NamedValue("", 0))
+            val got = calc.get_named_value()
+            // empty label returns "default"
+            assertEquals("default", got.name)
+            assertEquals(0, got.value)
+        }
+    }
+
+    @Test fun `edge dc - lifecycle create use close`() {
+        repeat(50) { i ->
+            Calculator(i).use { calc ->
+                val p = calc.get_point()
+                assertEquals(i, p.x)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Load tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `load - 100K get_point calls`() {
+        Calculator(7).use { calc ->
+            repeat(100_000) {
+                val p = calc.get_point()
+                assertEquals(7, p.x)
+                assertEquals(14, p.y)
+            }
+        }
+    }
+
+    @Test fun `load - 100K add_point calls`() {
+        Calculator(0).use { calc ->
+            repeat(100_000) {
+                calc.add_point(Point(0, 0))
+            }
+            assertEquals(0, calc.current)
+        }
+    }
+
+    @Test fun `load - 100K get_named_value calls`() {
+        Calculator(1).use { calc ->
+            calc.label = "load"
+            repeat(100_000) {
+                val nv = calc.get_named_value()
+                assertEquals("load", nv.name)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Concurrency tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `concurrent - 10 threads x 10K get_point`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(10_000) {
+                        val p = calc.get_point()
+                        assertEquals(tid, p.x)
+                        assertEquals(tid * 2, p.y)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K set_from_named`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    repeat(10_000) {
+                        calc.set_from_named(NamedValue("t$tid", tid))
+                        assertEquals(tid, calc.current)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }
