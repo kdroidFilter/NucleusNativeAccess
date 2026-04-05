@@ -28,10 +28,13 @@ NNA must infer everything from the rustdoc JSON.
 
 > **Necessaire** — `NokhwaError` a 14 variants dont certains avec 2-3 champs.
 
-- [ ] **Tuple variants a N champs** — `OpenDeviceError(String, String)`,
+- [x] **Tuple variants a N champs** — `OpenDeviceError(String, String)`,
       `SetPropertyError(property, value, error)` : le parsing existe deja
       (`value0`, `value1`, ...) mais verifier que le bridge Rust + FFM proxy
       generent correctement les constructeurs et getters pour N > 1
+      ✓ Verifie end-to-end avec `ErrorInfo` enum (DeviceError(String,String),
+        PropertyError(String,i32,String), CodedMessage(i32,String)) — 25 tests
+        incluant edge cases, load 100K, concurrency 10 threads
 - [ ] **Struct variants** — `ProcessFrameError { src, destination, error }` :
       le parsing existe, verifier la generation de bout en bout
       (constructeur avec champs nommes, getters individuels)

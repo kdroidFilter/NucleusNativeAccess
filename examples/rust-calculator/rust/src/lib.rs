@@ -34,6 +34,20 @@ pub enum DataPayload {
     Empty,
 }
 
+/// Demonstrates sealed enum with multi-field TUPLE variants (N > 1).
+pub enum ErrorInfo {
+    /// Two-string tuple variant, like OpenDeviceError(String, String).
+    DeviceError(String, String),
+    /// Three-field mixed-type tuple variant.
+    PropertyError(String, i32, String),
+    /// Two-field tuple: int + string.
+    CodedMessage(i32, String),
+    /// Single-field tuple for reference.
+    Simple(String),
+    /// Unit variant.
+    None,
+}
+
 /// Simple 2D point (data class -- all public fields, no complex methods).
 pub struct Point {
     pub x: i32,
@@ -309,6 +323,30 @@ impl Calculator {
             CalcResult::Nothing
         } else {
             CalcResult::Error(format!("Negative value: {}", self.accumulator))
+        }
+    }
+
+    // ── ErrorInfo sealed enum support ────────────────────────────────
+
+    /// Returns an ErrorInfo based on the current state.
+    pub fn get_error_info(&self) -> ErrorInfo {
+        if self.accumulator == 0 {
+            ErrorInfo::None
+        } else if self.accumulator < 0 {
+            ErrorInfo::DeviceError(
+                "calculator".to_string(),
+                format!("negative value: {}", self.accumulator),
+            )
+        } else if self.accumulator > 1000 {
+            ErrorInfo::PropertyError(
+                "accumulator".to_string(),
+                self.accumulator,
+                "value too large".to_string(),
+            )
+        } else if self.accumulator > 100 {
+            ErrorInfo::CodedMessage(self.accumulator, format!("code_{}", self.accumulator))
+        } else {
+            ErrorInfo::Simple(format!("ok: {}", self.accumulator))
         }
     }
 
