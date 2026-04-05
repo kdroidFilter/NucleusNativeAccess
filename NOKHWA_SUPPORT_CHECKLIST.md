@@ -51,9 +51,13 @@ NNA must infer everything from the rustdoc JSON.
 
 > **Necessaire** — nokhwa reexporte des types de `nokhwa-core` et `nokhwa-types`.
 
-- [ ] **Resolution des types reexportes** — quand rustdoc JSON reference un type
+- [x] **Resolution des types reexportes** — quand rustdoc JSON reference un type
       defini dans un sous-crate (`nokhwa_core::types::Resolution`), le parser
       doit suivre le chemin et creer le `KneClass`/`KneDataClass` correspondant
+      ✓ Lazy cross-crate type resolution in RustdocJsonParser.tryLazyResolve():
+        when resolveType encounters an unknown ID, looks up the index and discovers
+        structs (→ data class if all fields are primitive/String), enums (simple or
+        sealed). Tested with cross-crate-reexport.json fixture (8 tests).
 - [ ] **Structs de sous-crates comme data classes** — `Resolution { width: u32, height: u32 }`
       et `CameraFormat { resolution, format, frame_rate }` doivent etre detectes
       comme data classes (tous champs publics, pas de methodes complexes)

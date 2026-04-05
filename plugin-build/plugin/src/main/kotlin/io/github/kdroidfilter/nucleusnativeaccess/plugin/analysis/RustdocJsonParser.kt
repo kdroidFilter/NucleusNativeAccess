@@ -40,6 +40,19 @@ class RustdocJsonParser {
      *  Set during method building to enable monomorphisation. */
     private var currentUnresolvedBounds: Map<String, List<GenericBound>> = emptyMap()
 
+    // -- Lazy cross-crate type resolution state --
+
+    /** Set during [parse]; the full rustdoc JSON index for lazy type lookups. */
+    private var currentIndex: JsonObject? = null
+
+    /** Mutable aliases set during [parse]; lazy-discovered types are registered here. */
+    private var currentKnownStructs: MutableMap<Int, String> = mutableMapOf()
+    private var currentKnownDataClasses: MutableMap<Int, KneDataClass> = mutableMapOf()
+    private var currentKnownEnums: MutableMap<Int, String> = mutableMapOf()
+
+    /** Recursion guard: IDs currently being lazily resolved (prevents infinite loops). */
+    private val lazyResolutionInProgress: MutableSet<Int> = mutableSetOf()
+
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
         if (!this.isJsonPrimitive) return null
@@ -79,9 +92,11 @@ class RustdocJsonParser {
         encounteredOpaqueClasses = linkedMapOf()
         reservedTopLevelTypeNames = emptySet()
         dynTraitNames.clear()
+        lazyResolutionInProgress.clear()
 
         val root = JsonParser.parseString(json).asJsonObject
         val index = root.getAsJsonObject("index")
+        currentIndex = index
         val rootModuleId = root.get("root").asInt
 
         val rootModule = index.get(rootModuleId.toString())?.asJsonObject
@@ -132,6 +147,10 @@ class RustdocJsonParser {
             }
         }
         currentKnownTraits = knownTraits
+        // Wire up mutable map aliases for lazy cross-crate type resolution.
+        // Must be set before impl-scanning so lazy resolution can register types.
+        currentKnownStructs = knownStructs
+        currentKnownEnums = knownEnums
 
         val sealedEnumIds = mutableSetOf<Int>()
         for ((id, _) in knownEnums) {
@@ -273,6 +292,8 @@ class RustdocJsonParser {
                 fields = fields,
             )
         }
+
+        currentKnownDataClasses = knownDataClasses
 
         val classes = mutableListOf<KneClass>()
         for ((id, name) in knownStructs) {
@@ -533,6 +554,10 @@ class RustdocJsonParser {
             )
             renamedClasses.add(dynClass)
         }
+
+        // Clean up lazy resolution state
+        currentIndex = null
+        lazyResolutionInProgress.clear()
 
         val pkg = crateName.replace('-', '.').replace('_', '.')
         return KneModule(
@@ -1330,6 +1355,25 @@ class RustdocJsonParser {
                         }
 
                         else -> {
+                            // Try lazy cross-crate resolution before falling back to opaque
+                            if (id != null) {
+                                when (val lazy = tryLazyResolve(id)) {
+                                    is LazyResolveResult.AsDataClass -> {
+                                        val dc = lazy.dc
+                                        return ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = dc.simpleName)
+                                    }
+                                    is LazyResolveResult.AsEnum -> {
+                                        val fq = "$currentCrateName.${lazy.name}"
+                                        return if (lazy.isSealed) ResolvedType(KneType.SEALED_ENUM(fq, lazy.name), rustType = lazy.name)
+                                        else ResolvedType(KneType.ENUM(fq, lazy.name), rustType = lazy.name)
+                                    }
+                                    is LazyResolveResult.AsStruct -> {
+                                        val fq = "$currentCrateName.${lazy.name}"
+                                        return ResolvedType(KneType.OBJECT(fq, lazy.name), rustType = lazy.name)
+                                    }
+                                    null -> { /* fall through to opaque */ }
+                                }
+                            }
                             val simpleName = pathSegment
                             val fqName = path.replace("::", ".")
                             val rustType = renderResolvedPathType(path, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
@@ -1686,6 +1730,67 @@ class RustdocJsonParser {
         is KneType.ENUM -> type.fqName
         is KneType.SEALED_ENUM -> type.fqName
         else -> type.toString()
+    }
+
+    // -- Lazy cross-crate type resolution --
+
+    private sealed class LazyResolveResult {
+        data class AsDataClass(val dc: KneDataClass) : LazyResolveResult()
+        data class AsStruct(val name: String) : LazyResolveResult()
+        data class AsEnum(val name: String, val isSealed: Boolean) : LazyResolveResult()
+    }
+
+    /**
+     * Attempts to lazily discover a type from the rustdoc JSON index when it's not in the
+     * known maps. This handles cross-crate re-exported types whose full definition is
+     * available in the index but wasn't traversed during the initial root-exported scan.
+     */
+    private fun tryLazyResolve(id: Int): LazyResolveResult? {
+        val index = currentIndex ?: return null
+        if (id in lazyResolutionInProgress) return null
+        lazyResolutionInProgress.add(id)
+        try {
+            val item = index.get(id.toString())?.asJsonObject ?: return null
+            val name = item.get("name").safeString() ?: return null
+            val inner = item.getAsJsonObject("inner") ?: return null
+
+            when {
+                inner.has("struct") -> {
+                    // Register in knownStructs before field resolution (breaks cycles)
+                    currentKnownStructs[id] = name
+
+                    val fields = extractStructFields(item, index, currentKnownStructs, currentKnownEnums)
+                    if (fields != null && fields.isNotEmpty() && fields.all { isDataClassFieldSupported(it.type) }) {
+                        val dc = KneDataClass(
+                            simpleName = name,
+                            fqName = "$currentCrateName.$name",
+                            fields = fields,
+                        )
+                        currentKnownDataClasses[id] = dc
+                        return LazyResolveResult.AsDataClass(dc)
+                    }
+                    return LazyResolveResult.AsStruct(name)
+                }
+                inner.has("enum") -> {
+                    currentKnownEnums[id] = name
+                    val enumData = inner.getAsJsonObject("enum")
+                    val variantIds = enumData?.getAsJsonArray("variants")
+                    val isSealed = variantIds?.any { vid ->
+                        val vi = index.get(vid.asInt.toString())?.asJsonObject
+                        val vInner = vi?.getAsJsonObject("inner")?.getAsJsonObject("variant")
+                        val kind = vInner?.get("kind")
+                        kind != null && kind.isJsonObject
+                    } ?: false
+                    if (isSealed) {
+                        currentSealedEnumIds = currentSealedEnumIds + id
+                    }
+                    return LazyResolveResult.AsEnum(name, isSealed)
+                }
+                else -> return null
+            }
+        } finally {
+            lazyResolutionInProgress.remove(id)
+        }
     }
 
     private fun recordOpaqueClass(simpleName: String, fqName: String, rustTypeName: String): KneClass {
