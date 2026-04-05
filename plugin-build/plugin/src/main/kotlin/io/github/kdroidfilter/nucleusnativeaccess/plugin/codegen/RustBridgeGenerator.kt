@@ -2445,7 +2445,7 @@ class RustBridgeGenerator {
         KneType.BYTE -> "$binding as i8"
         KneType.SHORT -> "$binding as i16"
         KneType.BOOLEAN -> "if $binding { 1 } else { 0 }"
-        is KneType.ENUM -> "$binding as i32"
+        is KneType.ENUM -> if (returnsBorrowed) "(unsafe { *($binding as *const _ as *const u8) }) as i32" else "$binding as i32"
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
             if (returnsBorrowed) "$binding as *const _ as i64" else "Box::into_raw(Box::new($binding)) as i64"
         else -> binding
@@ -2580,7 +2580,7 @@ class RustBridgeGenerator {
         rustType?.contains("'static str") == true
 
     private fun sealedGetterReturnsBorrowed(type: KneType): Boolean = when (type) {
-        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> true
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> true
         is KneType.NULLABLE -> sealedGetterReturnsBorrowed(type.inner)
         else -> false
     }
@@ -2588,6 +2588,7 @@ class RustBridgeGenerator {
     private fun sealedGetterBindingExpr(field: KneParam, valueExpr: String): String = when (field.type) {
         KneType.STRING, KneType.BYTE_ARRAY,
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM,
+        is KneType.ENUM,
         is KneType.NULLABLE, is KneType.LIST, is KneType.SET, is KneType.MAP -> valueExpr
         else -> "*$valueExpr"
     }

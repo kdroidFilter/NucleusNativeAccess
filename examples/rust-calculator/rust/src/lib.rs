@@ -48,6 +48,18 @@ pub enum ErrorInfo {
     None,
 }
 
+/// Demonstrates sealed enum with STRUCT variants (named fields) and enum-typed fields.
+pub enum ProcessingStatus {
+    /// Struct variant with three String fields — like ProcessFrameError { src, destination, error }.
+    FrameError { src: String, destination: String, error: String },
+    /// Struct variant with an enum field — tests enum-inside-sealed-variant.
+    OperationFailed { operation: Operation, code: i32, message: String },
+    /// Struct variant with mixed primitives and string.
+    Progress { step: i32, total: i32, label: String, done: bool },
+    /// Unit variant.
+    Idle,
+}
+
 /// Simple 2D point (data class -- all public fields, no complex methods).
 pub struct Point {
     pub x: i32,
@@ -226,6 +238,11 @@ impl Calculator {
     // ── Enum support ────────────────────────────────────────────────────
 
     pub fn apply_op(&mut self, op: &Operation, value: i32) -> i32 {
+        self.last_operation = match op {
+            Operation::Add => Operation::Add,
+            Operation::Subtract => Operation::Subtract,
+            Operation::Multiply => Operation::Multiply,
+        };
         match op {
             Operation::Add => self.add(value),
             Operation::Subtract => self.subtract(value),
@@ -347,6 +364,38 @@ impl Calculator {
             ErrorInfo::CodedMessage(self.accumulator, format!("code_{}", self.accumulator))
         } else {
             ErrorInfo::Simple(format!("ok: {}", self.accumulator))
+        }
+    }
+
+    // ── ProcessingStatus sealed enum support ────────────────────────
+
+    /// Returns a ProcessingStatus based on the current state.
+    pub fn get_processing_status(&self) -> ProcessingStatus {
+        if self.accumulator == 0 {
+            ProcessingStatus::Idle
+        } else if self.accumulator < 0 {
+            ProcessingStatus::FrameError {
+                src: format!("input_{}", self.accumulator.abs()),
+                destination: "output".to_string(),
+                error: format!("negative value: {}", self.accumulator),
+            }
+        } else if self.accumulator > 100 {
+            ProcessingStatus::OperationFailed {
+                operation: match self.last_operation {
+                    Operation::Add => Operation::Add,
+                    Operation::Subtract => Operation::Subtract,
+                    Operation::Multiply => Operation::Multiply,
+                },
+                code: self.accumulator,
+                message: "overflow".to_string(),
+            }
+        } else {
+            ProcessingStatus::Progress {
+                step: self.accumulator,
+                total: 100,
+                label: self.label.clone(),
+                done: self.accumulator >= 100,
+            }
         }
     }
 

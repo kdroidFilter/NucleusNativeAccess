@@ -235,6 +235,8 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Types** | Tuple parameters on standalone `pub fn` | Tuples as parameters are not supported (tuples as return types are fully supported) | Expand tuple fields into individual parameters |
 | **Enums** | Tagged enum variants with collection fields | Constructors supported for `Vec<T>`, `HashSet<T>`, `HashMap<K,V>` with **primitive** element types. String/Object element types in collection fields are skipped | Use primitive element types |
 | **Enums** | Multi-field tuple variants (`Variant(T1, T2, ...)`) | **Fully supported**: constructors, getters (`value0`, `value1`, ...), tag dispatch. Tested with 2- and 3-field variants mixing String/Int types | &mdash; |
+| **Enums** | Struct variants (`Variant { field: T, ... }`) | **Fully supported**: constructors with named params, named field getters. Supports String, primitive, Bool, and enum-typed fields | &mdash; |
+| **Enums** | Enum-typed fields inside sealed variants | **Fully supported**: enum fields pass as ordinal (i32), getter reads via ptr-cast. Factory methods accept Kotlin enum values | &mdash; |
 | **Constructors** | Generic constructors (`fn new<T: Trait>(...)`) on standalone structs | Skipped if generics can't be resolved | Use concrete types or non-generic factory methods |
 | **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |

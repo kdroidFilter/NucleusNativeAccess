@@ -35,12 +35,17 @@ NNA must infer everything from the rustdoc JSON.
       ✓ Verifie end-to-end avec `ErrorInfo` enum (DeviceError(String,String),
         PropertyError(String,i32,String), CodedMessage(i32,String)) — 25 tests
         incluant edge cases, load 100K, concurrency 10 threads
-- [ ] **Struct variants** — `ProcessFrameError { src, destination, error }` :
+- [x] **Struct variants** — `ProcessFrameError { src, destination, error }` :
       le parsing existe, verifier la generation de bout en bout
       (constructeur avec champs nommes, getters individuels)
-- [ ] **Variants avec types complexes dans les champs** — certains champs de
+      ✓ Verifie avec `ProcessingStatus::FrameError { src, destination, error }`
+        et `ProcessingStatus::Progress { step, total, label, done }` — 29 tests
+- [x] **Variants avec types complexes dans les champs** — certains champs de
       `NokhwaError` referencent `ApiBackend` (enum), `FrameFormat` (enum),
       etc. Verifier le support des enums imbriques dans les variants
+      ✓ Verifie avec `ProcessingStatus::OperationFailed { operation: Operation, code, message }`
+        — fix: enum fields behind `ref` binding need ptr-cast to read ordinal
+        (RustBridgeGenerator: sealedGetterBindingExpr + rustReturnExpr)
 
 ## 3. Types opaques cross-crate
 
