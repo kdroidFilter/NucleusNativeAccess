@@ -392,10 +392,16 @@ class RustdocJsonParser {
                 )
             }
 
-            val (methods, properties) = extractProperties(allMethods)
+            // Deduplicate methods by signature — same trait may be impl'd multiple times
+            // for different type params (e.g., AsAudioBufferRef for AudioBuffer<T>)
+            val deduplicatedMethods = allMethods.distinctBy { fn ->
+                fn.name + "(" + fn.params.joinToString(",") { it.type.toString() } + ")"
+            }
+            val (methods, properties) = extractProperties(deduplicatedMethods)
             // Only add traits that are known (exported at root level) as Kotlin interfaces
             val traitNames = structTraitImpls[id]
                 ?.filter { it in knownTraits.values }
+                ?.distinct()
                 ?.map { "$crateName.$it" }
                 ?: emptyList()
             val hasLifetimeParams = structHasLifetimeParams(structItem)

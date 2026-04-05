@@ -527,14 +527,20 @@ class NativeBridgeGenerator {
         when (elemType) {
             KneType.STRING -> {
                 appendLine("    var _offset = 0")
+                appendLine("    var _overflow = false")
+                appendLine("    var _totalNeeded = 0")
                 appendLine("    for (_s in $listExpr) {")
                 appendLine("        val _bytes = _s.encodeToByteArray()")
-                appendLine("        if (_offset + _bytes.size + 1 > outBufLen) break")
-                appendLine("        _bytes.forEachIndexed { i, b -> outBuf?.set(_offset + i, b) }")
-                appendLine("        outBuf?.set(_offset + _bytes.size, 0)")
-                appendLine("        _offset += _bytes.size + 1")
+                appendLine("        _totalNeeded += _bytes.size + 1")
+                appendLine("        if (!_overflow && _offset + _bytes.size + 1 <= outBufLen) {")
+                appendLine("            _bytes.forEachIndexed { i, b -> outBuf?.set(_offset + i, b) }")
+                appendLine("            outBuf?.set(_offset + _bytes.size, 0)")
+                appendLine("            _offset += _bytes.size + 1")
+                appendLine("        } else {")
+                appendLine("            _overflow = true")
+                appendLine("        }")
                 appendLine("    }")
-                appendLine("    return $listExpr.size")
+                appendLine("    return if (_overflow) -_totalNeeded else $listExpr.size")
             }
             KneType.BOOLEAN -> {
                 appendLine("    val _writeLen = minOf($listExpr.size, outLen)")

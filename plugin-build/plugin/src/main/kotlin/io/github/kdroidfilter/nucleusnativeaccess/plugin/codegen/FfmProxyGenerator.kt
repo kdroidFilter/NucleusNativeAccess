@@ -49,6 +49,10 @@ class FfmProxyGenerator {
         is KneType.SET -> isBridgeableCollectionElement(type.elementType)
         is KneType.MAP -> isBridgeableCollectionElement(type.keyType) && isBridgeableCollectionElement(type.valueType)
         is KneType.TUPLE -> type.elementTypes.all { isKnownType(it) }
+        is KneType.FUNCTION -> type.paramTypes.all { isKnownType(it) } && isKnownType(type.returnType) &&
+            // Exclude callbacks returning interface/sealed enum types (upcall stubs can't handle them yet)
+            type.returnType !is KneType.INTERFACE && type.returnType !is KneType.SEALED_ENUM
+        is KneType.FLOW -> isKnownType(type.elementType)
         else -> true
     }
 
@@ -392,16 +396,26 @@ class FfmProxyGenerator {
 
         module.classes.filter { !it.isCommon }.forEach { cls ->
             // Filter out methods/properties referencing external types not in the module
+            // Disable constructor if any param has unknown types or is an interface (no .handle access)
+            val ctorHasUnknownTypes = cls.constructor.params.any {
+                !isKnownType(it.type) || it.type is KneType.INTERFACE
+            }
             val filteredCls = cls.copy(
                 methods = cls.methods.filter { hasOnlyKnownTypes(it) },
                 companionMethods = cls.companionMethods.filter { hasOnlyKnownTypes(it) },
                 properties = cls.properties.filter { isKnownType(it.type) },
+                constructor = if (ctorHasUnknownTypes) cls.constructor.copy(kind = KneConstructorKind.NONE) else cls.constructor,
             )
             files["${filteredCls.simpleName}.kt"] = generateClassProxy(filteredCls, module, jvmPackage)
         }
 
         module.interfaces.filter { !it.isCommon }.forEach { iface ->
-            files["${iface.simpleName}.kt"] = generateInterfaceProxy(iface, module, jvmPackage)
+            // Filter out interface methods referencing unknown types
+            val filteredIface = iface.copy(
+                methods = iface.methods.filter { hasOnlyKnownTypes(it) },
+                properties = iface.properties.filter { isKnownType(it.type) },
+            )
+            files["${filteredIface.simpleName}.kt"] = generateInterfaceProxy(filteredIface, module, jvmPackage)
         }
 
         module.enums.forEach { enum ->
@@ -583,16 +597,25 @@ class FfmProxyGenerator {
         val signatures = mutableSetOf<KneType.FUNCTION>()
         fun scanParams(params: List<KneParam>) {
             params.forEach { p ->
-                if (p.type is KneType.FUNCTION) signatures.add(p.type)
-                else if (p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner is KneType.FUNCTION)
-                    signatures.add((p.type as KneType.NULLABLE).inner as KneType.FUNCTION)
+                val fnType = when {
+                    p.type is KneType.FUNCTION -> p.type
+                    p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner is KneType.FUNCTION ->
+                        (p.type as KneType.NULLABLE).inner as KneType.FUNCTION
+                    else -> null
+                }
+                // Only include callback signatures whose types are all known
+                if (fnType != null && isKnownType(fnType)) signatures.add(fnType)
             }
         }
         module.classes.forEach { cls ->
-            cls.methods.forEach { scanParams(it.params) }
-            cls.companionMethods.forEach { scanParams(it.params) }
+            cls.methods.filter { hasOnlyKnownTypes(it) }.forEach { scanParams(it.params) }
+            cls.companionMethods.filter { hasOnlyKnownTypes(it) }.forEach { scanParams(it.params) }
+            // Scan constructor params for callback signatures
+            if (cls.constructor.params.all { isKnownType(it.type) }) {
+                scanParams(cls.constructor.params)
+            }
         }
-        module.functions.forEach { scanParams(it.params) }
+        module.functions.filter { hasOnlyKnownTypes(it) }.forEach { scanParams(it.params) }
         return signatures
     }
 
@@ -1209,6 +1232,8 @@ class FfmProxyGenerator {
         KneType.NEVER -> "Nothing"
         KneType.BYTE_ARRAY -> "MemorySegment" // packed buffer for return; expanded to ADDRESS+INT for params
         is KneType.OBJECT -> "Long" // opaque StableRef handle
+        is KneType.INTERFACE -> "Long" // opaque handle (dyn trait)
+        is KneType.SEALED_ENUM -> "Long" // opaque handle
         is KneType.DATA_CLASS -> "MemorySegment" // returns struct pointer
         is KneType.TUPLE -> "MemorySegment" // returns tuple pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "MemorySegment" // packed buffer
@@ -1222,6 +1247,8 @@ class FfmProxyGenerator {
         KneType.STRING -> "java.lang.foreign.MemorySegment::class.java"
         KneType.BYTE_ARRAY -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.OBJECT -> "Long::class.javaPrimitiveType"
+        is KneType.INTERFACE -> "Long::class.javaPrimitiveType"
+        is KneType.SEALED_ENUM -> "Long::class.javaPrimitiveType"
         is KneType.DATA_CLASS -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.TUPLE -> "java.lang.foreign.MemorySegment::class.java"
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "java.lang.foreign.MemorySegment::class.java"
@@ -1240,6 +1267,8 @@ class FfmProxyGenerator {
         KneType.STRING -> "ADDRESS"
         KneType.BYTE_ARRAY -> "ADDRESS" // packed buffer for return; expanded for params
         is KneType.OBJECT -> "JAVA_LONG" // opaque handle
+        is KneType.INTERFACE -> "JAVA_LONG" // opaque handle (dyn trait)
+        is KneType.SEALED_ENUM -> "JAVA_LONG" // opaque handle
         is KneType.DATA_CLASS -> "ADDRESS" // struct pointer
         is KneType.TUPLE -> "ADDRESS" // tuple pointer
         is KneType.LIST, is KneType.SET, is KneType.MAP -> "ADDRESS" // packed buffer
@@ -1320,12 +1349,39 @@ class FfmProxyGenerator {
         } else {
             superParts.add("AutoCloseable")
         }
-        cls.interfaces.forEach { ifaceFq ->
+        val classMethodNames = cls.methods.map { it.name }.toSet()
+        val classPropertyNames = cls.properties.map { it.name }.toSet()
+        cls.interfaces.distinct().forEach { ifaceFq ->
             val ifaceSimple = ifaceFq.substringAfterLast(".")
-            // Only add interfaces that are actually generated in the module
-            if (ifaceSimple in knownTypes) superParts.add(ifaceSimple)
+            if (ifaceSimple !in knownTypes || ifaceSimple in superParts) return@forEach
+            // Only add interface if the class implements all its abstract methods/properties
+            val iface = module.interfaces.find { it.fqName == ifaceFq }
+            if (iface != null) {
+                val missingMethods = iface.methods.any { it.name !in classMethodNames }
+                val missingProps = iface.properties.any { it.name !in classPropertyNames }
+                if (missingMethods || missingProps) return@forEach
+            }
+            superParts.add(ifaceSimple)
         }
         val superClause = superParts.joinToString(", ")
+
+        // Collect method/property names from implemented interfaces AND superclass.
+        // Methods marked isOverride whose name is not in any kept interface/parent should lose the flag.
+        val keptInterfaces = superParts.drop(1) // drop AutoCloseable / parent class
+        val interfaceMethodNames = buildSet {
+            module.interfaces
+                .filter { it.simpleName in keptInterfaces }
+                .forEach { iface -> iface.methods.forEach { add(it.name) }; iface.properties.forEach { add(it.name) } }
+            // Also include superclass methods (walk full hierarchy)
+            var current = cls.superClass
+            while (current != null) {
+                val parentSimple = current.substringAfterLast(".")
+                val parent = module.classes.find { it.simpleName == parentSimple }
+                parent?.methods?.forEach { add(it.name) }
+                parent?.properties?.forEach { add(it.name) }
+                current = parent?.superClass
+            }
+        }
 
         // Handle declaration: only on root class. Preserve original visibility for flat classes.
         val handleDecl = when {
@@ -1386,13 +1442,16 @@ class FfmProxyGenerator {
             appendLine("        }")
         }
 
+        val emittedHandles = mutableSetOf<String>()
         cls.methods.forEach { method ->
             val handleName = "${method.name.uppercase()}_HANDLE"
-            val descriptor = buildMethodDescriptor(method)
-            appendLine("        private val $handleName: MethodHandle by lazy {")
-            appendLine("            KneRuntime.handle(\"${p}_${n}_${method.name}\",")
-            appendLine("                $descriptor)")
-            appendLine("        }")
+            if (emittedHandles.add(handleName)) {
+                val descriptor = buildMethodDescriptor(method)
+                appendLine("        private val $handleName: MethodHandle by lazy {")
+                appendLine("            KneRuntime.handle(\"${p}_${n}_${method.name}\",")
+                appendLine("                $descriptor)")
+                appendLine("        }")
+            }
         }
 
         cls.properties.forEach { prop ->
@@ -1509,10 +1568,9 @@ class FfmProxyGenerator {
             }
         }
         // Scan DC params for collection fields + mutable collection properties + collection params with ByteArray/nested elements
-        cls.methods.forEach { m ->
-            m.params.forEach { pp ->
+        fun scanCollectionParams(params: List<KneParam>) {
+            params.forEach { pp ->
                 extractDataClass(pp.type)?.let { scanDcFieldColls(it) }
-                // Scan collection params for ByteArray/nested collection element wrapping
                 val inner = pp.type.unwrapCollection()
                 when (inner) {
                     is KneType.LIST -> if (inner.elementType == KneType.BYTE_ARRAY || inner.elementType is KneType.LIST || inner.elementType is KneType.SET || inner.elementType is KneType.MAP) dcFieldCollKeys.add(suspendCollElemKey(inner.elementType))
@@ -1521,6 +1579,9 @@ class FfmProxyGenerator {
                 }
             }
         }
+        cls.methods.forEach { m -> scanCollectionParams(m.params) }
+        // Also scan constructor params for collection element wrapping
+        scanCollectionParams(cls.constructor.params)
         cls.properties.filter { it.mutable && it.type.isCollection() }.forEach { prop ->
             val inner = prop.type.unwrapCollection()
             when (inner) {
@@ -1789,12 +1850,19 @@ class FfmProxyGenerator {
         }
 
         // Methods (dispatch suspend / flow / regular)
+        // Fix override flags: strip isOverride for methods not actually in any implemented interface
         cls.methods.forEach { method ->
-            if (method.isSuspend) appendSuspendMethodProxy(method, cls, p)
-            else if (method.returnType is KneType.FLOW) appendFlowMethodProxy(method, cls, p)
-            else appendMethodProxy(method, cls, p)
+            val fixedMethod = if (method.isOverride && method.name !in interfaceMethodNames)
+                method.copy(isOverride = false) else method
+            if (fixedMethod.isSuspend) appendSuspendMethodProxy(fixedMethod, cls, p)
+            else if (fixedMethod.returnType is KneType.FLOW) appendFlowMethodProxy(fixedMethod, cls, p)
+            else appendMethodProxy(fixedMethod, cls, p)
         }
-        cls.properties.forEach { prop -> appendPropertyProxy(prop, cls) }
+        cls.properties.forEach { prop ->
+            val fixedProp = if (prop.isOverride && prop.name !in interfaceMethodNames)
+                prop.copy(isOverride = false) else prop
+            appendPropertyProxy(fixedProp, cls)
+        }
 
         // close() — idempotent, thread-safe, waits for in-flight suspend calls
         if (isRoot) {
@@ -2024,9 +2092,11 @@ class FfmProxyGenerator {
     private fun StringBuilder.appendCtorInvokeBody(indent: String, params: List<KneParam>, handleName: String) {
         val hasDc = params.any { extractDataClass(it.type) != null }
         val hasCollection = params.any { it.type.isCollection() }
-        val needsArena = params.any { it.type.isStringLike() || it.type.isByteArrayType() || it.type.isFunctionType() } || hasDc || hasCollection
+        val hasCallbacks = params.any { it.type.isFunctionType() }
+        val needsArena = params.any { it.type.isStringLike() || it.type.isByteArrayType() } || hasDc || hasCollection || hasCallbacks
         if (needsArena) {
             appendLine("${indent}Arena.ofConfined().use { arena ->")
+            if (hasCallbacks) appendCallbackStubAlloc("$indent    ", params, "arena")
             appendStringInvokeArgsAlloc("$indent    ", params)
             appendCollectionParamAlloc("$indent    ", params)
             val args = buildList { params.forEach { p -> addAll(buildExpandedInvokeArgs(p)) } }.joinToString(", ")
@@ -2180,8 +2250,14 @@ class FfmProxyGenerator {
             val key = suspendCollElemKey(innerElem)
             appendLine("${indent}Arena.ofConfined().use { _collArena ->")
             if (innerElem == KneType.STRING) {
-                appendLine("${indent}    val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
-                appendLine("${indent}    val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, $STRING_BUF_SIZE) as Int")
+                appendLine("${indent}    var _bufSize = $STRING_BUF_SIZE")
+                appendLine("${indent}    var _outBuf = _collArena.allocate(_bufSize.toLong())")
+                appendLine("${indent}    var _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, _bufSize) as Int")
+                appendLine("${indent}    if (_count < 0) {")
+                appendLine("${indent}        _bufSize = -_count")
+                appendLine("${indent}        _outBuf = _collArena.allocate(_bufSize.toLong())")
+                appendLine("${indent}        _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, _bufSize) as Int")
+                appendLine("${indent}    }")
                 appendLine("${indent}    val _list = mutableListOf<String>()")
                 appendLine("${indent}    var _off = 0L")
                 appendLine("${indent}    repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -2406,8 +2482,14 @@ class FfmProxyGenerator {
             val key = suspendCollElemKey(elemType)
             appendLine("${indent}Arena.ofConfined().use { _collArena ->")
             if (elemType == KneType.STRING) {
-                appendLine("${indent}    val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
-                appendLine("${indent}    val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, $STRING_BUF_SIZE) as Int")
+                appendLine("${indent}    var _bufSize = $STRING_BUF_SIZE")
+                appendLine("${indent}    var _outBuf = _collArena.allocate(_bufSize.toLong())")
+                appendLine("${indent}    var _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, _bufSize) as Int")
+                appendLine("${indent}    if (_count < 0) {")
+                appendLine("${indent}        _bufSize = -_count")
+                appendLine("${indent}        _outBuf = _collArena.allocate(_bufSize.toLong())")
+                appendLine("${indent}        _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_value, _outBuf, _bufSize) as Int")
+                appendLine("${indent}    }")
                 appendLine("${indent}    val _list = mutableListOf<String>()")
                 appendLine("${indent}    var _off = 0L")
                 appendLine("${indent}    repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -2849,8 +2931,14 @@ class FfmProxyGenerator {
         appendLine("${indent}val ${name}_collVal = run {")
         appendLine("${indent}    Arena.ofConfined().use { _collArena ->")
         if (elemType == KneType.STRING) {
-            appendLine("${indent}        val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
-            appendLine("${indent}        val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke($handle, _outBuf, $STRING_BUF_SIZE) as Int")
+            appendLine("${indent}        var _bufSize = $STRING_BUF_SIZE")
+            appendLine("${indent}        var _outBuf = _collArena.allocate(_bufSize.toLong())")
+            appendLine("${indent}        var _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke($handle, _outBuf, _bufSize) as Int")
+            appendLine("${indent}        if (_count < 0) {")
+            appendLine("${indent}            _bufSize = -_count")
+            appendLine("${indent}            _outBuf = _collArena.allocate(_bufSize.toLong())")
+            appendLine("${indent}            _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke($handle, _outBuf, _bufSize) as Int")
+            appendLine("${indent}        }")
             appendLine("${indent}        val _list = mutableListOf<String>()")
             appendLine("${indent}        var _off = 0L")
             appendLine("${indent}        repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -3047,8 +3135,14 @@ class FfmProxyGenerator {
                         val key = suspendCollElemKey(inner.elementType)
                         appendLine("            Arena.ofConfined().use { _collArena ->")
                         if (inner.elementType == KneType.STRING) {
-                            appendLine("                val _outBuf = _collArena.allocate($STRING_BUF_SIZE.toLong())")
-                            appendLine("                val _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, $STRING_BUF_SIZE) as Int")
+                            appendLine("                var _bufSize = $STRING_BUF_SIZE")
+                            appendLine("                var _outBuf = _collArena.allocate(_bufSize.toLong())")
+                            appendLine("                var _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, _bufSize) as Int")
+                            appendLine("                if (_count < 0) {")
+                            appendLine("                    _bufSize = -_count")
+                            appendLine("                    _outBuf = _collArena.allocate(_bufSize.toLong())")
+                            appendLine("                    _count = SUSPEND_READCOLL_${key.uppercase()}_HANDLE.invoke(_handle, _outBuf, _bufSize) as Int")
+                            appendLine("                }")
                             appendLine("                val _list = mutableListOf<String>()")
                             appendLine("                var _off = 0L")
                             appendLine("                repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -3336,11 +3430,20 @@ class FfmProxyGenerator {
         }
         when (elemType) {
             KneType.STRING -> {
-                appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                val invokeArgs = buildTopLevelInvokeArgs(fn).let { if (it.isEmpty()) "_outBuf, $STRING_BUF_SIZE" else "$it, _outBuf, $STRING_BUF_SIZE" }
-                appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+                val topArgs = buildTopLevelInvokeArgs(fn)
+                appendLine("${indent}var _bufSize = $STRING_BUF_SIZE")
+                appendLine("${indent}var _outBuf = arena.allocate(_bufSize.toLong())")
+                val invokeArgs = if (topArgs.isEmpty()) "_outBuf, _bufSize" else "$topArgs, _outBuf, _bufSize"
+                appendLine("${indent}var _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
-                if (nullable) appendLine("${indent}if (_count < 0) return null")
+                if (nullable) appendLine("${indent}if (_count == -1) return null")
+                appendLine("${indent}if (_count < 0) {")
+                appendLine("${indent}    _bufSize = -_count")
+                appendLine("${indent}    _outBuf = arena.allocate(_bufSize.toLong())")
+                val retryArgs = if (topArgs.isEmpty()) "_outBuf, _bufSize" else "$topArgs, _outBuf, _bufSize"
+                appendLine("${indent}    _count = $handleName.invoke($retryArgs) as Int")
+                appendLine("${indent}    KneRuntime.checkError()")
+                appendLine("${indent}}")
                 appendLine("${indent}val _list = mutableListOf<String>()")
                 appendLine("${indent}var _off = 0L")
                 appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -3513,8 +3616,8 @@ class FfmProxyGenerator {
         appendLine("        internal fun fromBorrowedHandle(handle: Long): ${sealed.simpleName} = create(handle, ownsHandle = false)")
         appendLine()
 
-        // Factory methods for creating variants (skip those with tuple-typed fields)
-        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE } }) {
+        // Factory methods for creating variants (skip those with tuple-typed or function-typed fields)
+        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE || it.type is KneType.FUNCTION } }) {
             if (variant.fields.isEmpty()) {
                 appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}(): ${escapeSealedVariantName(variant.name)} {")
                 appendLine("            val h = NEW_${variant.name.uppercase()}_HANDLE.invoke() as Long")
@@ -3658,9 +3761,16 @@ class FfmProxyGenerator {
                 appendLine("${indent}        Arena.ofConfined().use { arena ->")
                 when (collType.elementType) {
                     KneType.STRING -> {
-                        appendLine("${indent}            val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                        appendLine("${indent}            val _count = $getterHandle.invoke(handle, _outBuf, $STRING_BUF_SIZE) as Int")
+                        appendLine("${indent}            var _bufSize = $STRING_BUF_SIZE")
+                        appendLine("${indent}            var _outBuf = arena.allocate(_bufSize.toLong())")
+                        appendLine("${indent}            var _count = $getterHandle.invoke(handle, _outBuf, _bufSize) as Int")
                         appendLine("${indent}            KneRuntime.checkError()")
+                        appendLine("${indent}            if (_count < 0) {")
+                        appendLine("${indent}                _bufSize = -_count")
+                        appendLine("${indent}                _outBuf = arena.allocate(_bufSize.toLong())")
+                        appendLine("${indent}                _count = $getterHandle.invoke(handle, _outBuf, _bufSize) as Int")
+                        appendLine("${indent}                KneRuntime.checkError()")
+                        appendLine("${indent}            }")
                         appendLine("${indent}            val _list = mutableListOf<String>()")
                         appendLine("${indent}            var _off = 0L")
                         appendLine("${indent}            repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -4687,11 +4797,19 @@ class FfmProxyGenerator {
         val baseArgs = baseInvokeArgs ?: buildClassInvokeArgsExpanded(fn)
         when (elemType) {
             KneType.STRING -> {
-                appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                val invokeArgs = if (baseArgs.isEmpty()) "_outBuf, $STRING_BUF_SIZE" else "$baseArgs, _outBuf, $STRING_BUF_SIZE"
-                appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
+                appendLine("${indent}var _bufSize = $STRING_BUF_SIZE")
+                appendLine("${indent}var _outBuf = arena.allocate(_bufSize.toLong())")
+                val invokeArgs = if (baseArgs.isEmpty()) "_outBuf, _bufSize" else "$baseArgs, _outBuf, _bufSize"
+                appendLine("${indent}var _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
-                if (nullable) appendLine("${indent}if (_count < 0) return null")
+                if (nullable) appendLine("${indent}if (_count == -1) return null")
+                appendLine("${indent}if (_count < 0) {")
+                appendLine("${indent}    _bufSize = -_count")
+                appendLine("${indent}    _outBuf = arena.allocate(_bufSize.toLong())")
+                val retryArgs = if (baseArgs.isEmpty()) "_outBuf, _bufSize" else "$baseArgs, _outBuf, _bufSize"
+                appendLine("${indent}    _count = $handleName.invoke($retryArgs) as Int")
+                appendLine("${indent}    KneRuntime.checkError()")
+                appendLine("${indent}}")
                 appendLine("${indent}val _list = mutableListOf<String>()")
                 appendLine("${indent}var _off = 0L")
                 appendLine("${indent}repeat(_count) { _list.add(_outBuf.getString(_off)); _off += _list.last().toByteArray(Charsets.UTF_8).size + 1 }")
@@ -4948,32 +5066,46 @@ class FfmProxyGenerator {
                 appendLine("${indent}return _r")
             }
             is KneType.OBJECT, is KneType.INTERFACE -> {
-                val simpleName = when (returnType) {
-                    is KneType.OBJECT -> returnType.simpleName
-                    is KneType.INTERFACE -> {
-                        // Use dyn wrapper class for factory call (e.g. DynDescribable.fromNativeHandle)
-                        dynWrapperLookup[returnType.fqName] ?: returnType.simpleName
-                    }
-                    else -> error("unreachable")
-                }
-                appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
-                appendLine("${indent}KneRuntime.checkError()")
-                val factory = if (returnType is KneType.OBJECT && returnsBorrowed) {
-                    "$simpleName.fromBorrowedHandle"
+                // Redirect OBJECT types that are actually enums to the enum codegen path
+                if (returnType is KneType.OBJECT && returnType.simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    appendLine("${indent}return ${returnType.simpleName}.entries[_r]")
                 } else {
-                    "$simpleName.fromNativeHandle"
+                    val simpleName = when (returnType) {
+                        is KneType.OBJECT -> returnType.simpleName
+                        is KneType.INTERFACE -> {
+                            // Use dyn wrapper class for factory call (e.g. DynDescribable.fromNativeHandle)
+                            dynWrapperLookup[returnType.fqName] ?: returnType.simpleName
+                        }
+                        else -> error("unreachable")
+                    }
+                    appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    val factory = if (returnType is KneType.OBJECT && returnsBorrowed) {
+                        "$simpleName.fromBorrowedHandle"
+                    } else {
+                        "$simpleName.fromNativeHandle"
+                    }
+                    appendLine("${indent}return $factory(resultHandle)")
                 }
-                appendLine("${indent}return $factory(resultHandle)")
             }
             is KneType.SEALED_ENUM -> {
-                appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
-                appendLine("${indent}KneRuntime.checkError()")
-                val factory = if (returnsBorrowed) {
-                    "${returnType.simpleName}.fromBorrowedHandle"
+                // If the sealed enum is actually a simple enum (type mismatch), use ordinal pattern
+                if (returnType.simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    appendLine("${indent}return ${returnType.simpleName}.entries[_r]")
                 } else {
-                    "${returnType.simpleName}.fromHandle"
+                    appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    val factory = if (returnsBorrowed) {
+                        "${returnType.simpleName}.fromBorrowedHandle"
+                    } else {
+                        "${returnType.simpleName}.fromHandle"
+                    }
+                    appendLine("${indent}return $factory(resultHandle)")
                 }
-                appendLine("${indent}return $factory(resultHandle)")
             }
             is KneType.ENUM -> {
                 appendLine("${indent}val _r = $handleName.invoke($invokeArgs) as Int")
