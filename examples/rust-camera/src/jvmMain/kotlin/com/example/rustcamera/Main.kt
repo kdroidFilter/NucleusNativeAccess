@@ -23,7 +23,7 @@ import kotlinx.coroutines.*
 fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
-        title = "Rust Camera (nokhwa)",
+        title = "Rust Camera (nokhwa via NNA — zero Rust code)",
         state = rememberWindowState(width = 800.dp, height = 600.dp)
     ) {
         MaterialTheme {
@@ -42,12 +42,20 @@ fun CameraApp() {
     LaunchedEffect(Unit) {
         try {
             val cam = withContext(Dispatchers.IO) {
-                Camera(0, 0)
+                val format = RequestedFormatType.absoluteHighestFrameRate()
+                val requested = RequestedFormat.new_rgb_format(format)
+                val index = CameraIndex.index(0)
+                val c = Camera(index, requested)
+                c.open_stream()
+                c
             }
+
             camera = cam
-            statusMessage = "${cam.width}x${cam.height}"
+            val res = cam.resolution()
+            statusMessage = "${res.width()}x${res.height()}"
+            res.close()
         } catch (e: Throwable) {
-            statusMessage = "Failed to open camera: ${e.message}"
+            statusMessage = "Failed: ${e.message}"
         }
     }
 
@@ -56,18 +64,22 @@ fun CameraApp() {
         LaunchedEffect(cam) {
             var frameCount = 0
             var lastFpsTime = System.currentTimeMillis()
+            val camRes = cam.resolution()
+            val w = camRes.width()
+            val h = camRes.height()
+            camRes.close()
 
-            while (isActive && cam.is_streaming) {
+            while (isActive && cam.is_stream_open()) {
                 try {
-                    val bytes = withContext(Dispatchers.Default) {
+                    val buf = withContext(Dispatchers.Default) {
                         cam.frame()
                     }
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val w = cam.width
-                        val h = cam.height
+                    val bytes = buf.buffer()
+                    buf.close()
+
+                    if (bytes.isNotEmpty()) {
                         val img = BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR)
-                        val buffer = img.raster.dataBuffer as DataBufferByte
-                        val data = buffer.data
+                        val data = (img.raster.dataBuffer as DataBufferByte).data
                         val pixelCount = minOf(bytes.size / 3, data.size / 3)
                         for (i in 0 until pixelCount) {
                             data[i * 3] = bytes[i * 3 + 2]     // B
@@ -93,7 +105,10 @@ fun CameraApp() {
         }
 
         DisposableEffect(cam) {
-            onDispose { cam.close() }
+            onDispose {
+                cam.stop_stream()
+                cam.close()
+            }
         }
     }
 

@@ -22,7 +22,50 @@ class RustBridgeGenerator {
         return "$base$turbo"
     }
 
+    private var knownTypeNames: Set<String> = emptySet()
+
+    private fun isKnownType(type: KneType): Boolean = when (type) {
+        is KneType.OBJECT -> type.simpleName in knownTypeNames
+        is KneType.INTERFACE -> type.simpleName in knownTypeNames
+        is KneType.NULLABLE -> isKnownType(type.inner)
+        is KneType.LIST -> isSupportedCollectionElementForBridge(type.elementType)
+        is KneType.SET -> isSupportedCollectionElementForBridge(type.elementType)
+        is KneType.MAP -> isSupportedCollectionElementForBridge(type.keyType) && isSupportedCollectionElementForBridge(type.valueType)
+        else -> true
+    }
+
+    private fun isSupportedCollectionElementForBridge(elemType: KneType): Boolean = when (elemType) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING,
+        KneType.BYTE_ARRAY -> true
+        else -> false
+    }
+
+    private var enumTypeNames: Set<String> = emptySet()
+
+    private fun hasOnlyKnownTypes(fn: KneFunction): Boolean =
+        isKnownType(fn.returnType) && fn.params.all { isKnownType(it.type) } &&
+        !hasTypeMismatch(fn)
+
+    private fun hasTypeMismatch(fn: KneFunction): Boolean {
+        val allTypes = fn.params.map { it.type } + fn.returnType
+        return allTypes.any { type ->
+            type is KneType.OBJECT && type.simpleName in enumTypeNames
+        }
+    }
+
     fun generate(module: KneModule): String {
+        knownTypeNames = buildSet {
+            module.classes.forEach { add(it.simpleName) }
+            module.dataClasses.forEach { add(it.simpleName) }
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+            module.interfaces.forEach { add(it.simpleName) }
+        }
+        enumTypeNames = buildSet {
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+        }
         val sb = StringBuilder()
         val prefix = module.libName
 
@@ -174,7 +217,7 @@ class RustBridgeGenerator {
         val rustTypeName = cls.rustTypeName
         val sym = "${prefix}_${className}"
 
-        if (cls.constructor.kind != KneConstructorKind.NONE) {
+        if (cls.constructor.kind != KneConstructorKind.NONE && cls.constructor.params.all { isKnownType(it.type) }) {
             appendConstructor(cls, prefix)
         }
 
@@ -191,17 +234,17 @@ class RustBridgeGenerator {
         appendLine("}")
         appendLine()
 
-        // Methods
-        for (method in cls.methods) {
+        // Methods (skip those referencing external unknown types)
+        for (method in cls.methods.filter { hasOnlyKnownTypes(it) }) {
             appendMethod(method, cls, prefix)
         }
 
-        for (method in cls.companionMethods) {
+        for (method in cls.companionMethods.filter { hasOnlyKnownTypes(it) }) {
             appendCompanionMethod(method, cls, prefix)
         }
 
-        // Properties
-        for (prop in cls.properties) {
+        // Properties (skip those with unknown types)
+        for (prop in cls.properties.filter { isKnownType(it.type) }) {
             appendPropertyBridges(prop, cls, prefix)
         }
     }
@@ -212,7 +255,16 @@ class RustBridgeGenerator {
         val sym = "${prefix}_${className}"
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn ${sym}_new(")
-        append(cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${rustCType(p.type)}" })
+        append(cls.constructor.params.joinToString(", ") { p ->
+            when (p.type) {
+                KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET -> "${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32"
+                is KneType.MAP -> {
+                    val mapType = p.type as KneType.MAP
+                    "${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}, ${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}, ${p.name}_size: i32"
+                }
+                else -> "${p.name}: ${rustCType(p.type)}"
+            }
+        })
         appendLine(") -> i64 {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")

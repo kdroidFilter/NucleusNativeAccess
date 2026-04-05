@@ -15,6 +15,21 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
  */
 class RustdocJsonParser {
 
+    companion object {
+        /** Standard Rust traits that should not be bridged to Kotlin. */
+        private val SKIPPED_RUST_TRAITS = setOf(
+            "Drop", "Clone", "Copy", "Send", "Sync", "Unpin", "Sized",
+            "Debug", "Display", "Default", "Hash", "Eq", "PartialEq", "Ord", "PartialOrd",
+            "From", "Into", "TryFrom", "TryInto", "AsRef", "AsMut",
+            "Borrow", "BorrowMut", "ToOwned", "ToString",
+            "Any", "Freeze", "RefUnwindSafe", "UnwindSafe",
+            "StructuralPartialEq", "CloneToUninit",
+            "Serialize", "Deserialize",
+            "Iterator", "IntoIterator", "ExactSizeIterator", "DoubleEndedIterator",
+            "FormatDecoder", // nokhwa-specific: complex trait with associated types, not bridgeable as interface
+        )
+    }
+
     /** Set during [parse]; used by [resolveType] to build fqNames for struct/enum references. */
     private var currentCrateName: String = ""
 
@@ -49,6 +64,9 @@ class RustdocJsonParser {
     private var currentKnownStructs: MutableMap<Int, String> = mutableMapOf()
     private var currentKnownDataClasses: MutableMap<Int, KneDataClass> = mutableMapOf()
     private var currentKnownEnums: MutableMap<Int, String> = mutableMapOf()
+
+    /** The `paths` field from rustdoc JSON — maps IDs to {crate_id, path, kind} for all referenced types. */
+    private var currentPaths: JsonObject? = null
 
     /** Recursion guard: IDs currently being lazily resolved (prevents infinite loops). */
     private val lazyResolutionInProgress: MutableSet<Int> = mutableSetOf()
@@ -97,6 +115,7 @@ class RustdocJsonParser {
         val root = JsonParser.parseString(json).asJsonObject
         val index = root.getAsJsonObject("index")
         currentIndex = index
+        currentPaths = root.getAsJsonObject("paths")
         val rootModuleId = root.get("root").asInt
 
         val rootModule = index.get(rootModuleId.toString())?.asJsonObject
@@ -153,7 +172,7 @@ class RustdocJsonParser {
         currentKnownEnums = knownEnums
 
         val sealedEnumIds = mutableSetOf<Int>()
-        for ((id, _) in knownEnums) {
+        for ((id, _) in knownEnums.toMap()) {
             val enumItem = index.get(id.toString())?.asJsonObject ?: continue
             val innerEnum = enumItem.getAsJsonObject("inner")?.getAsJsonObject("enum") ?: continue
             val variantIds = innerEnum.getAsJsonArray("variants") ?: continue
@@ -181,6 +200,8 @@ class RustdocJsonParser {
         val implConstructors = mutableMapOf<Int, JsonObject?>()
         val implCompanionMethods = mutableMapOf<Int, MutableList<JsonObject>>()
         val structTraitImpls = mutableMapOf<Int, MutableList<String>>()
+        /** Trait impls from skipped traits — used only for monomorphisation, not interface generation. */
+        val allTraitImpls = mutableMapOf<String, MutableList<KneType.OBJECT>>()
         /** Impl-block-level generics per struct type ID (for `impl<T: Trait> Struct<T>`). */
         val implGenerics = mutableMapOf<Int, JsonObject>()
 
@@ -207,7 +228,12 @@ class RustdocJsonParser {
 
             if (isTraitImpl) {
                 val traitName = traitField.asJsonObject.get("path")?.asString ?: continue
-                if (!knownTraits.values.contains(traitName)) continue
+                if (traitName in SKIPPED_RUST_TRAITS) {
+                    // Still register for monomorphisation, but don't add as interface impl
+                    val structName = knownStructs[typeId] ?: continue
+                    allTraitImpls.getOrPut(traitName) { mutableListOf() }.add(KneType.OBJECT("$crateName.$structName", structName))
+                    continue
+                }
                 structTraitImpls.getOrPut(typeId) { mutableListOf() }.add(traitName)
                 val items = implObj.getAsJsonArray("items") ?: continue
                 for (methodIdElem in items) {
@@ -247,6 +273,20 @@ class RustdocJsonParser {
                         onUnsupported("Skipped constructor '${methodName}' for ${typeDisplayName(selfType)}: unsupported generic signature")
                         continue
                     }
+                    // Constructors with unresolved generic bounds (e.g., fn new<T: Trait>)
+                    // where the struct itself is NOT generic: treat as companion methods for expansion.
+                    // If the struct IS generic (like Processor<T>), the struct-level expansion handles it.
+                    if (genericResolution.unresolvedBounds.isNotEmpty() && !hasSelfParam(inputs)) {
+                        val structGenericObj = implObj.getAsJsonObject("generics")
+                        val structHasTypeParams = structGenericObj?.getAsJsonArray("params")?.any { p ->
+                            val kind = p.asJsonObject.getAsJsonObject("kind")
+                            kind != null && kind.has("type")
+                        } == true
+                        if (!structHasTypeParams) {
+                            implCompanionMethods.getOrPut(typeId) { mutableListOf() }.add(methodItem)
+                            continue
+                        }
+                    }
                     val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, emptyMap(), genericResolution.resolvedTypes, selfType)
                     val isConstructor = methodName == "new" && !hasSelfParam(inputs) && returnType?.type == selfType
 
@@ -274,6 +314,10 @@ class RustdocJsonParser {
                 traitToImplTypes.getOrPut(fqTraitName) { mutableListOf() }.add(implementingType)
             }
         }
+        // Merge skipped-trait impls into the registry for monomorphisation
+        for ((traitName, impls) in allTraitImpls) {
+            traitToImplTypes.getOrPut(traitName) { mutableListOf() }.addAll(impls)
+        }
         traitImpls = traitToImplTypes
 
         val knownDataClasses = mutableMapOf<Int, KneDataClass>()
@@ -299,7 +343,7 @@ class RustdocJsonParser {
         currentKnownDataClasses = knownDataClasses
 
         val classes = mutableListOf<KneClass>()
-        for ((id, name) in knownStructs) {
+        for ((id, name) in knownStructs.toMap()) {
             if (knownDataClasses.containsKey(id)) continue
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
             val selfType = KneType.OBJECT("$crateName.$name", name)
@@ -345,7 +389,11 @@ class RustdocJsonParser {
             }
 
             val (methods, properties) = extractProperties(allMethods)
-            val traitNames = structTraitImpls[id]?.map { "$crateName.$it" } ?: emptyList()
+            // Only add traits that are known (exported at root level) as Kotlin interfaces
+            val traitNames = structTraitImpls[id]
+                ?.filter { it in knownTraits.values }
+                ?.map { "$crateName.$it" }
+                ?: emptyList()
             val klass = KneClass(
                 simpleName = name,
                 fqName = "$crateName.$name",
@@ -361,7 +409,7 @@ class RustdocJsonParser {
 
         val enums = mutableListOf<KneEnum>()
         val sealedEnums = mutableListOf<KneSealedEnum>()
-        for ((id, name) in knownEnums) {
+        for ((id, name) in knownEnums.toMap()) {
             val enumItem = index.get(id.toString())?.asJsonObject ?: continue
             val inner = enumItem.getAsJsonObject("inner")?.getAsJsonObject("enum") ?: continue
             val variantIds = inner.getAsJsonArray("variants") ?: continue
@@ -560,6 +608,7 @@ class RustdocJsonParser {
 
         // Clean up lazy resolution state
         currentIndex = null
+        currentPaths = null
         lazyResolutionInProgress.clear()
 
         val pkg = crateName.replace('-', '.').replace('_', '.')
@@ -1004,9 +1053,10 @@ class RustdocJsonParser {
     private fun lookupTraitImpls(traitFqName: String): List<KneType.OBJECT> {
         traitImpls[traitFqName]?.let { return it }
         // Rustdoc may emit bare trait names (e.g. "ValueTransformer") while the registry
-        // uses crate-prefixed keys (e.g. "rustcalc.ValueTransformer"). Try prefixing.
-        val prefixed = "$currentCrateName.$traitFqName"
-        traitImpls[prefixed]?.let { return it }
+        // uses crate-prefixed keys (e.g. "rustcalc.ValueTransformer"). Try all prefixes.
+        for (key in traitImpls.keys) {
+            if (key.endsWith(".$traitFqName")) return traitImpls[key]!!
+        }
         return emptyList()
     }
 
@@ -1308,6 +1358,12 @@ class RustdocJsonParser {
             return when (pathSegment) {
                 "String" -> ResolvedType(KneType.STRING, rustType = pathSegment)
                 "PathBuf", "Path", "OsStr", "OsString" -> ResolvedType(KneType.STRING, rustType = path)
+
+                // Cow<[u8]> → BYTE_ARRAY, Cow<str> → STRING, others → unwrap inner
+                "Cow" -> {
+                    val inner = extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
+                    inner?.copy(rustType = "Cow<${inner.rustType ?: renderRustType(inner.type)}>")
+                }
 
                 "Result" -> extractFirstGenericArg(args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
 
@@ -1755,7 +1811,11 @@ class RustdocJsonParser {
         if (id in lazyResolutionInProgress) return null
         lazyResolutionInProgress.add(id)
         try {
-            val item = index.get(id.toString())?.asJsonObject ?: return null
+            val item = index.get(id.toString())?.asJsonObject
+            if (item == null) {
+                // Item not in index — check paths for basic type info (kind: enum/struct)
+                return tryLazyResolveFromPaths(id)
+            }
             val name = item.get("name").safeString() ?: return null
             val inner = item.getAsJsonObject("inner") ?: return null
 
@@ -1795,6 +1855,31 @@ class RustdocJsonParser {
             }
         } finally {
             lazyResolutionInProgress.remove(id)
+        }
+    }
+
+    /**
+     * Fallback when type ID is not in the index: use the `paths` field to determine
+     * if it's an enum or struct. This provides basic type identity (enum ordinal vs
+     * opaque handle) even without the full definition.
+     */
+    private fun tryLazyResolveFromPaths(id: Int): LazyResolveResult? {
+        val paths = currentPaths ?: return null
+        val pathEntry = paths.get(id.toString())?.asJsonObject ?: return null
+        val kind = pathEntry.get("kind")?.asString ?: return null
+        val pathSegments = pathEntry.getAsJsonArray("path") ?: return null
+        val name = pathSegments.last().asString
+
+        return when (kind) {
+            // Without the full definition in the index, we can't determine if an enum is
+            // unit-only (simple) or has data variants (sealed). Default to opaque struct
+            // which is always safe (passed as handle). The actual type from the dependency's
+            // JSON will override this during module merging.
+            "enum", "struct" -> {
+                currentKnownStructs[id] = name
+                LazyResolveResult.AsStruct(name)
+            }
+            else -> null
         }
     }
 

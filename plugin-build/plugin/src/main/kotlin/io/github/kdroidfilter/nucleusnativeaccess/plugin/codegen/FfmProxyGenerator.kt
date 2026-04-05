@@ -32,6 +32,46 @@ class FfmProxyGenerator {
     /** Maps interface fqName → dyn wrapper class simpleName (e.g. "crate.Describable" → "DynDescribable"). */
     private var dynWrapperLookup: Map<String, String> = emptyMap()
 
+    /** Set of all type names in the current module — used to skip methods referencing unknown types. */
+    private var knownTypes: Set<String> = emptySet()
+    private var enumTypeNames: Set<String> = emptySet()
+
+    /** Returns true if the given type (and all nested types) are known in the module. */
+    private fun isKnownType(type: KneType): Boolean = when (type) {
+        is KneType.OBJECT -> type.simpleName in knownTypes
+        is KneType.INTERFACE -> type.simpleName in knownTypes
+        is KneType.ENUM -> type.simpleName in knownTypes
+        is KneType.SEALED_ENUM -> type.simpleName in knownTypes
+        is KneType.DATA_CLASS -> type.simpleName in knownTypes
+        is KneType.NULLABLE -> isKnownType(type.inner)
+        is KneType.LIST -> isBridgeableCollectionElement(type.elementType)
+        is KneType.SET -> isBridgeableCollectionElement(type.elementType)
+        is KneType.MAP -> isBridgeableCollectionElement(type.keyType) && isBridgeableCollectionElement(type.valueType)
+        is KneType.TUPLE -> type.elementTypes.all { isKnownType(it) }
+        else -> true
+    }
+
+    private fun isBridgeableCollectionElement(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING,
+        KneType.BYTE_ARRAY -> true
+        else -> false
+    }
+
+    /** Returns true if a function only references types known in the module
+     *  AND no type has a representation mismatch (e.g., referenced as OBJECT but generated as ENUM). */
+    private fun hasOnlyKnownTypes(fn: KneFunction): Boolean =
+        isKnownType(fn.returnType) && fn.params.all { isKnownType(it.type) } &&
+        !hasTypeMismatch(fn)
+
+    /** Detects when a param/return type is OBJECT but the module has it as an enum or sealed enum. */
+    private fun hasTypeMismatch(fn: KneFunction): Boolean {
+        val allTypes = fn.params.map { it.type } + fn.returnType
+        return allTypes.any { type ->
+            type is KneType.OBJECT && type.simpleName in enumTypeNames
+        }
+    }
+
     companion object {
         private const val STRING_BUF_SIZE = 8192
         private const val ERR_BUF_SIZE = 8192
@@ -310,6 +350,21 @@ class FfmProxyGenerator {
     fun generate(module: KneModule, jvmPackage: String): Map<String, String> {
         val files = mutableMapOf<String, String>()
 
+        // Build set of all known type names in the module — used to filter out
+        // methods referencing external types not in the module (e.g. bytes::Bytes)
+        val knownTypeNames = buildSet {
+            module.classes.forEach { add(it.simpleName) }
+            module.dataClasses.forEach { add(it.simpleName) }
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+            module.interfaces.forEach { add(it.simpleName) }
+        }
+        knownTypes = knownTypeNames
+        enumTypeNames = buildSet {
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+        }
+
         // Build dyn wrapper lookup: interface fqName → Dyn wrapper class simpleName
         dynWrapperLookup = module.classes
             .filter { it.isDynTrait }
@@ -330,7 +385,13 @@ class FfmProxyGenerator {
         }
 
         module.classes.filter { !it.isCommon }.forEach { cls ->
-            files["${cls.simpleName}.kt"] = generateClassProxy(cls, module, jvmPackage)
+            // Filter out methods/properties referencing external types not in the module
+            val filteredCls = cls.copy(
+                methods = cls.methods.filter { hasOnlyKnownTypes(it) },
+                companionMethods = cls.companionMethods.filter { hasOnlyKnownTypes(it) },
+                properties = cls.properties.filter { isKnownType(it.type) },
+            )
+            files["${filteredCls.simpleName}.kt"] = generateClassProxy(filteredCls, module, jvmPackage)
         }
 
         module.interfaces.filter { !it.isCommon }.forEach { iface ->
@@ -1255,7 +1316,8 @@ class FfmProxyGenerator {
         }
         cls.interfaces.forEach { ifaceFq ->
             val ifaceSimple = ifaceFq.substringAfterLast(".")
-            superParts.add(ifaceSimple)
+            // Only add interfaces that are actually generated in the module
+            if (ifaceSimple in knownTypes) superParts.add(ifaceSimple)
         }
         val superClause = superParts.joinToString(", ")
 
@@ -3349,6 +3411,17 @@ class FfmProxyGenerator {
 
     // ── Sealed enum (tagged enum with data variants) ─────────────────────────
 
+    // Only types that cause real shadowing issues inside sealed class bodies.
+    // String/Boolean/Int etc. are commonly used as return types in getters,
+    // so inner classes with these names cause "expected X, found SealedClass.X" errors.
+    private val KOTLIN_BUILTIN_NAMES = setOf(
+        "String", "Boolean", "Int", "Long", "Double", "Float", "Byte", "Short", "Char",
+        "Unit", "Array", "List", "Set", "Map",
+    )
+
+    private fun escapeSealedVariantName(name: String): String =
+        if (name in KOTLIN_BUILTIN_NAMES) "${name}Value" else name
+
     private fun generateSealedEnumProxy(sealed: KneSealedEnum, module: KneModule, pkg: String): String = buildString {
         val lib = module.libName
         val sym = "${lib}_${sealed.simpleName}"
@@ -3367,7 +3440,7 @@ class FfmProxyGenerator {
         appendLine()
 
         // Tag constants
-        appendLine("    enum class Tag { ${sealed.variants.joinToString(", ") { it.name }}; }")
+        appendLine("    enum class Tag { ${sealed.variants.joinToString(", ") { escapeSealedVariantName(it.name) }}; }")
         appendLine()
         appendLine("    val tag: Tag get() = Tag.entries[TAG_HANDLE.invoke(handle) as Int]")
         appendLine()
@@ -3375,10 +3448,11 @@ class FfmProxyGenerator {
         // Variant subclasses
         for (variant in sealed.variants) {
             if (variant.fields.isEmpty()) {
-                appendLine("    class ${variant.name}(handle: Long, ownsHandle: Boolean = true) : ${sealed.simpleName}(handle, ownsHandle)")
+                appendLine("    class ${escapeSealedVariantName(variant.name)}(handle: Long, ownsHandle: Boolean = true) : ${sealed.simpleName}(handle, ownsHandle)")
             } else {
-                appendLine("    class ${variant.name}(handle: Long, ownsHandle: Boolean = true) : ${sealed.simpleName}(handle, ownsHandle) {")
+                appendLine("    class ${escapeSealedVariantName(variant.name)}(handle: Long, ownsHandle: Boolean = true) : ${sealed.simpleName}(handle, ownsHandle) {")
                 for (f in variant.fields) {
+                    if (f.type is KneType.TUPLE) continue // Skip tuple fields (not yet bridgeable)
                     val getterHandle = "${variant.name.uppercase()}_GET_${f.name.uppercase()}_HANDLE"
                     appendSealedEnumFieldGetter("        ", f, getterHandle, pkg)
                 }
@@ -3412,7 +3486,7 @@ class FfmProxyGenerator {
         appendLine("            val tag = TAG_HANDLE.invoke(handle) as Int")
         appendLine("            return when (tag) {")
         for ((i, variant) in sealed.variants.withIndex()) {
-            appendLine("                $i -> ${variant.name}(handle, ownsHandle)")
+            appendLine("                $i -> ${escapeSealedVariantName(variant.name)}(handle, ownsHandle)")
         }
         appendLine("                else -> error(\"Unknown ${sealed.simpleName} tag: \$tag\")")
         appendLine("            }")
@@ -3423,17 +3497,17 @@ class FfmProxyGenerator {
         appendLine("        internal fun fromBorrowedHandle(handle: Long): ${sealed.simpleName} = create(handle, ownsHandle = false)")
         appendLine()
 
-        // Factory methods for creating variants
-        for (variant in sealed.variants) {
+        // Factory methods for creating variants (skip those with tuple-typed fields)
+        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE } }) {
             if (variant.fields.isEmpty()) {
-                appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}(): ${variant.name} {")
+                appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}(): ${escapeSealedVariantName(variant.name)} {")
                 appendLine("            val h = NEW_${variant.name.uppercase()}_HANDLE.invoke() as Long")
                 appendLine("            KneRuntime.checkError()")
-                appendLine("            return ${variant.name}(h)")
+                appendLine("            return ${escapeSealedVariantName(variant.name)}(h)")
                 appendLine("        }")
             } else {
                 val params = variant.fields.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
-                appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}($params): ${variant.name} {")
+                appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}($params): ${escapeSealedVariantName(variant.name)} {")
                 val needsArena = needsConfinedArena(variant.fields, KneType.UNIT) ||
                     variant.fields.any { it.type == KneType.BYTE_ARRAY || it.type.isCollection() }
                 if (needsArena) {
@@ -3443,13 +3517,13 @@ class FfmProxyGenerator {
                     val invokeArgs = variant.fields.flatMap { f -> buildExpandedInvokeArgs(f) }.joinToString(", ")
                     appendLine("                val h = NEW_${variant.name.uppercase()}_HANDLE.invoke($invokeArgs) as Long")
                     appendLine("                KneRuntime.checkError()")
-                    appendLine("                return ${variant.name}(h)")
+                    appendLine("                return ${escapeSealedVariantName(variant.name)}(h)")
                     appendLine("            }")
                 } else {
                     val invokeArgs = variant.fields.flatMap { f -> buildExpandedInvokeArgs(f) }.joinToString(", ")
                     appendLine("            val h = NEW_${variant.name.uppercase()}_HANDLE.invoke($invokeArgs) as Long")
                     appendLine("            KneRuntime.checkError()")
-                    appendLine("            return ${variant.name}(h)")
+                    appendLine("            return ${escapeSealedVariantName(variant.name)}(h)")
                 }
                 appendLine("        }")
             }
@@ -3464,8 +3538,8 @@ class FfmProxyGenerator {
         appendLine("            \"${sym}_dispose\", FunctionDescriptor.ofVoid(JAVA_LONG))")
         appendLine()
 
-        // Constructor handles
-        for (variant in sealed.variants) {
+        // Constructor handles (skip variants with tuple fields)
+        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE } }) {
             val newSym = "${sym}_new_${variant.name}"
             if (variant.fields.isEmpty()) {
                 appendLine("        private val NEW_${variant.name.uppercase()}_HANDLE = KneRuntime.handle(")
