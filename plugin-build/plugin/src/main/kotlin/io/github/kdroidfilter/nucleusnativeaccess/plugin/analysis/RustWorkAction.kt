@@ -5,6 +5,7 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.CrateDependency
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.findCargo
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.FfmProxyGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.RustBridgeGenerator
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneConstructorKind
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneType
 import java.io.File
@@ -56,23 +57,52 @@ object RustWorkAction {
         val isWrapper = crates.isNotEmpty() && crates.none { it.path != null }
 
         val module = if (isWrapper) {
-            // For wrapper crates, parse all dependency JSONs and merge them.
-            // The main crate JSON has Camera etc., but sub-crates (nokhwa_core)
-            // have Buffer, FormatDecoder impls, Resolution, FrameFormat, etc.
+            // For wrapper crates, parse the main crate JSON + only sub-crates that are
+            // publicly re-exported. Parsing internal sub-crates (like symphonia_codec_pcm)
+            // would pull in types that are not accessible from the wrapper scope.
             val docDir = rustdocProjectDir.resolve("target/doc")
-            val depJsons = crates.flatMap { crate ->
-                val baseName = crate.name.replace('-', '_')
-                // Parse main crate + _core and _types sub-crates (not platform bindings)
-                docDir.listFiles()
-                    ?.filter { f ->
-                        f.extension == "json" &&
-                        f.nameWithoutExtension.startsWith(baseName) &&
-                        !f.nameWithoutExtension.contains("bindings")
+            val primaryCrateName = crates.first().name.replace('-', '_')
+            val mainJsonFile = docDir.resolve("$primaryCrateName.json")
+
+            // Detect which sub-crates are re-exported by the main crate via `pub use`
+            val reExportedSubCrates = mutableSetOf<String>()
+            if (mainJsonFile.exists()) {
+                val mainDoc = com.google.gson.JsonParser.parseString(mainJsonFile.readText()).asJsonObject
+                val mainIndex = mainDoc.getAsJsonObject("index")
+                val rootId = mainDoc.get("root")?.asInt?.toString()
+                val rootItems = rootId?.let { mainIndex?.get(it)?.asJsonObject }
+                    ?.getAsJsonObject("inner")?.getAsJsonObject("module")?.getAsJsonArray("items")
+                if (rootItems != null) {
+                    for (itemId in rootItems) {
+                        val item = mainIndex.get(itemId.asInt.toString())?.asJsonObject ?: continue
+                        val inner = item.getAsJsonObject("inner") ?: continue
+                        if (inner.has("use")) {
+                            val sourceElem = inner.getAsJsonObject("use").get("source")
+                            if (sourceElem != null && !sourceElem.isJsonNull) {
+                                // Extract crate name from source path (e.g. "nokhwa_core::pixel_format::FormatDecoder" → "nokhwa_core")
+                                val source = sourceElem.asString.replace('-', '_')
+                                val crateName = source.substringBefore("::")
+                                reExportedSubCrates.add(crateName)
+                            }
+                        }
                     }
-                    ?: emptyList()
-            }.distinct()
-            // Parse main crate first, then sub-crates for supplementary types
-            val mainJson = depJsons.find { it.nameWithoutExtension == crates.first().name.replace('-', '_') }
+                }
+            }
+
+            // Collect JSONs to parse: main crate + referenced sub-crates + additional crates.
+            // Only sub-crates that are referenced by the main crate (via pub use) are included.
+            val depJsons = mutableListOf<java.io.File>()
+            if (mainJsonFile.exists()) depJsons.add(mainJsonFile)
+            for (subCrate in reExportedSubCrates) {
+                val subJson = docDir.resolve("$subCrate.json")
+                if (subJson.exists() && subJson !in depJsons) depJsons.add(subJson)
+            }
+            for (crate in crates.drop(1)) {
+                val additionalJson = docDir.resolve("${crate.name.replace('-', '_')}.json")
+                if (additionalJson.exists() && additionalJson !in depJsons) depJsons.add(additionalJson)
+            }
+
+            val mainJson = depJsons.find { it.nameWithoutExtension == primaryCrateName }
             val subJsons = depJsons.filter { it != mainJson }
             logger.lifecycle("kne-rust: Parsing main: ${mainJson?.name}, sub: ${subJsons.map { it.name }}")
 
@@ -97,7 +127,8 @@ object RustWorkAction {
 
         // Step 4b: For wrapper crates, rewrite lib.rs with proper imports based on rustdoc analysis
         if (isWrapper) {
-            rewriteWrapperLibRs(crateSrcDir, crates, rustdocJson, logger)
+            val docDir = rustdocProjectDir.resolve("target/doc")
+            rewriteWrapperLibRs(crateSrcDir, crates, docDir, logger)
         }
 
         // Step 5: Generate Rust bridges (into Gradle build dir, NOT into crate src)
@@ -246,6 +277,26 @@ object RustWorkAction {
         val enumNames = modules.flatMap { it.enums }.map { it.simpleName }.toSet()
         val richTypeNames = sealedEnumNames + dataClassNames + enumNames
 
+        // Detect type names that appear in multiple crates (different fqName prefixes)
+        data class TypeNameInfo(val simpleName: String, val fqName: String)
+        val allTypeInfos = mutableListOf<TypeNameInfo>()
+        modules.forEach { m ->
+            m.classes.forEach { allTypeInfos.add(TypeNameInfo(it.simpleName, it.fqName)) }
+            m.enums.forEach { allTypeInfos.add(TypeNameInfo(it.simpleName, it.fqName)) }
+            m.sealedEnums.forEach { allTypeInfos.add(TypeNameInfo(it.simpleName, it.fqName)) }
+            m.dataClasses.forEach { allTypeInfos.add(TypeNameInfo(it.simpleName, it.fqName)) }
+        }
+        // Only flag types as ambiguous if they come from truly independent crate families.
+        // Sub-crate re-exports (e.g. nokhwa re-exporting nokhwa_core types) are not ambiguous
+        // because they are the same type — only flag when the root crate names differ
+        // (e.g. "symphonia_core" vs "cpal" are different families, but "nokhwa" vs "nokhwa_core" are the same).
+        val ambiguousNames = allTypeInfos.groupBy { it.simpleName }
+            .filter { (_, infos) ->
+                val crateRoots = infos.map { it.fqName.substringBefore('.').substringBefore('_') }.toSet()
+                crateRoots.size > 1
+            }
+            .keys
+
         val seenClasses = mutableSetOf<String>()
         val seenDataClasses = mutableSetOf<String>()
         val seenEnums = mutableSetOf<String>()
@@ -255,10 +306,26 @@ object RustWorkAction {
         return KneModule(
             libName = libName,
             packages = modules.flatMap { it.packages }.toSet(),
-            // Skip opaque classes that have a richer representation as sealed enum / data class / enum
+            // Skip opaque classes that have a richer representation as sealed enum / data class / enum.
+            // When the same class name appears from multiple crates, prefer the version with the
+            // most methods (e.g. nokhwa_core's Resolution with new/width/height over nokhwa's opaque).
             classes = modules.flatMap { it.classes }
                 .filter { it.simpleName !in richTypeNames }
-                .filter { seenClasses.add(it.simpleName) },
+                .groupBy { it.simpleName }
+                .values.map { variants ->
+                    if (variants.size == 1) variants.single()
+                    else {
+                        // Pick the richest variant (most methods/properties/constructor)
+                        val richest = variants.maxByOrNull {
+                            it.methods.size + it.companionMethods.size + it.properties.size +
+                                if (it.constructor.kind != KneConstructorKind.NONE) 1 else 0
+                        }!!
+                        // Merge interfaces from all variants so trait impls aren't lost
+                        val allInterfaces = variants.flatMap { it.interfaces }.distinct()
+                        if (allInterfaces != richest.interfaces) richest.copy(interfaces = allInterfaces)
+                        else richest
+                    }
+                },
             dataClasses = modules.flatMap { it.dataClasses }.filter { seenDataClasses.add(it.simpleName) },
             enums = modules.flatMap { it.enums }.filter { seenEnums.add(it.simpleName) },
             functions = modules.flatMap { it.functions }.filter { seenFunctions.add(it.name) },
@@ -268,6 +335,7 @@ object RustWorkAction {
                 m.traitImpls.forEach { (k, v) -> acc.getOrPut(k) { mutableListOf() }.addAll(v) }
                 acc
             },
+            ambiguousTypeNames = ambiguousNames,
         )
     }
 
@@ -278,38 +346,116 @@ object RustWorkAction {
     private fun rewriteWrapperLibRs(
         srcDir: File,
         crates: List<CrateDependency>,
-        rustdocJson: File,
+        docDir: File,
         logger: org.gradle.api.logging.Logger,
     ) {
-        val json = com.google.gson.JsonParser.parseString(rustdocJson.readText()).asJsonObject
-        val index = json.getAsJsonObject("index")
-        val rootId = json.get("root").asInt.toString()
-        val rootModule = index.get(rootId)?.asJsonObject ?: return
-        val rootItems = rootModule.getAsJsonObject("inner")
-            ?.getAsJsonObject("module")
-            ?.getAsJsonArray("items") ?: return
+        // Helper: recursively collect all module paths from a rustdoc JSON index
+        fun collectModulePaths(index: com.google.gson.JsonObject, items: com.google.gson.JsonArray, parentPath: String): List<String> {
+            val paths = mutableListOf<String>()
+            for (itemId in items) {
+                val item = index.get(itemId.asInt.toString())?.asJsonObject ?: continue
+                val inner = item.getAsJsonObject("inner") ?: continue
+                if (inner.has("module")) {
+                    val name = item.get("name")?.asString ?: continue
+                    val path = if (parentPath.isEmpty()) name else "$parentPath::$name"
+                    paths.add(path)
+                    val subItems = inner.getAsJsonObject("module")?.getAsJsonArray("items")
+                    if (subItems != null) {
+                        paths.addAll(collectModulePaths(index, subItems, path))
+                    }
+                }
+            }
+            return paths
+        }
 
-        val crateName = crates.first().name.replace('-', '_')
-        val subModules = mutableListOf<String>()
-        for (itemId in rootItems) {
-            val item = index.get(itemId.asInt.toString())?.asJsonObject ?: continue
-            val inner = item.getAsJsonObject("inner") ?: continue
-            if (inner.has("module")) {
-                val name = item.get("name")?.asString ?: continue
-                subModules.add(name)
+        // Helper: extract root module items from a rustdoc JSON file
+        fun parseModuleTree(jsonFile: File): List<String> {
+            val json = com.google.gson.JsonParser.parseString(jsonFile.readText()).asJsonObject
+            val index = json.getAsJsonObject("index") ?: return emptyList()
+            val rootId = json.get("root")?.asInt?.toString() ?: return emptyList()
+            val rootModule = index.get(rootId)?.asJsonObject ?: return emptyList()
+            val rootItems = rootModule.getAsJsonObject("inner")
+                ?.getAsJsonObject("module")
+                ?.getAsJsonArray("items") ?: return emptyList()
+            return collectModulePaths(index, rootItems, "")
+        }
+
+        val primaryCrateName = crates.first().name.replace('-', '_')
+
+        // Collect pub use statements
+        val useStatements = mutableListOf<String>()
+
+        // 1. Parse main crate JSON: discover direct sub-modules AND re-exported crates
+        val mainJsonFile = docDir.resolve("$primaryCrateName.json")
+        val reExportedCrates = mutableMapOf<String, String>() // sub-crate name → re-export alias
+
+        if (mainJsonFile.exists()) {
+            useStatements.add("pub use ${primaryCrateName}::*;")
+            for (modPath in parseModuleTree(mainJsonFile)) {
+                useStatements.add("pub use ${primaryCrateName}::${modPath}::*;")
+            }
+
+            // Detect re-exported sub-crates (e.g. `pub use symphonia_core;` → accessible as ::core)
+            val mainJson = com.google.gson.JsonParser.parseString(mainJsonFile.readText()).asJsonObject
+            val mainIndex = mainJson.getAsJsonObject("index")
+            val rootId = mainJson.get("root")?.asInt?.toString()
+            val rootItems = rootId?.let { mainIndex?.get(it)?.asJsonObject }
+                ?.getAsJsonObject("inner")?.getAsJsonObject("module")?.getAsJsonArray("items")
+            if (rootItems != null) {
+                for (itemId in rootItems) {
+                    val item = mainIndex.get(itemId.asInt.toString())?.asJsonObject ?: continue
+                    val inner = item.getAsJsonObject("inner") ?: continue
+                    if (inner.has("use")) {
+                        val useItem = inner.getAsJsonObject("use")
+                        val sourceElem = useItem.get("source")
+                        if (sourceElem == null || sourceElem.isJsonNull) continue
+                        val source = sourceElem.asString
+                        // Re-exported crate: source is the crate name (e.g. "symphonia_core")
+                        // The alias in the parent crate is derived from the crate name
+                        // e.g. symphonia_core is accessible as symphonia::core
+                        val nameElem = item.get("name")
+                        val alias = if (nameElem != null && !nameElem.isJsonNull) nameElem.asString
+                            else source.removePrefix("${primaryCrateName}_")
+                        reExportedCrates[source.replace('-', '_')] = alias
+                    }
+                }
             }
         }
 
+        // 2. For re-exported sub-crates, parse their modules and map to the correct path
+        //    e.g. symphonia_core is re-exported → symphonia::core::io::*, symphonia::core::audio::*
+        for ((subCrateName, alias) in reExportedCrates) {
+            val subJson = docDir.resolve("$subCrateName.json")
+            if (!subJson.exists()) continue
+            val reExportPath = "${primaryCrateName}::${alias}"
+            useStatements.add("pub use ${reExportPath}::*;")
+            for (modPath in parseModuleTree(subJson)) {
+                useStatements.add("pub use ${reExportPath}::${modPath}::*;")
+            }
+        }
+
+        // 3. Parse additional crate JSONs (separate dependencies like cpal)
+        for (crate in crates.drop(1)) {
+            val additionalCrateName = crate.name.replace('-', '_')
+            val additionalJson = docDir.resolve("$additionalCrateName.json")
+            if (additionalJson.exists()) {
+                useStatements.add("pub use ${additionalCrateName}::*;")
+                for (modPath in parseModuleTree(additionalJson)) {
+                    useStatements.add("pub use ${additionalCrateName}::${modPath}::*;")
+                }
+            }
+        }
+
+        val uniqueStatements = useStatements.distinct()
         val libRs = buildString {
-            appendLine("pub use ${crateName}::*;")
-            for (mod in subModules) {
-                appendLine("pub use ${crateName}::${mod}::*;")
+            for (stmt in uniqueStatements) {
+                appendLine(stmt)
             }
             appendLine()
             appendLine("include!(concat!(env!(\"OUT_DIR\"), \"/kne_bridges.rs\"));")
         }
         srcDir.resolve("lib.rs").writeText(libRs)
-        logger.lifecycle("kne-rust: Rewrote wrapper lib.rs with ${subModules.size} sub-module imports")
+        logger.lifecycle("kne-rust: Rewrote wrapper lib.rs with ${uniqueStatements.size} use statements (recursive, multi-crate)")
     }
 
     private fun ensureLibRsInclude(srcDir: File, logger: org.gradle.api.logging.Logger) {

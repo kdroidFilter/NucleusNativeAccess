@@ -15,6 +15,14 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
  */
 class RustBridgeGenerator {
 
+    companion object {
+        private val RUST_PRIMITIVE_TYPES = setOf(
+            "u8", "u16", "u32", "u64", "u128", "usize",
+            "i8", "i16", "i32", "i64", "i128", "isize",
+            "f32", "f64", "bool", "String", "str",
+        )
+    }
+
     /** Returns the Rust call name for a function, using rustMethodName + turbofish if available. */
     private fun rustCallName(fn: KneFunction): String {
         val base = fn.rustMethodName ?: fn.name
@@ -22,7 +30,23 @@ class RustBridgeGenerator {
         return "$base$turbo"
     }
 
+    /** Tracks emitted bridge symbol names to detect and resolve overload collisions. */
+    private val emittedSymbols = mutableMapOf<String, Int>()
+
+    /** Returns a unique symbol name, appending a numeric suffix on collision. */
+    private fun uniqueSym(base: String): String {
+        val count = emittedSymbols.getOrDefault(base, 0)
+        emittedSymbols[base] = count + 1
+        return if (count == 0) base else "${base}_${count}"
+    }
+
     private var knownTypeNames: Set<String> = emptySet()
+    private var genericOrLifetimeClassNames: Set<String> = emptySet()
+    private var unbridgeableTemplateNames: Set<String> = emptySet()
+    /** Type simple names that appear in multiple crates (e.g. SampleFormat from both symphonia and cpal). */
+    private var ambiguousTypeNames: Set<String> = emptySet()
+    /** Maps fqName -> Rust path for all types, used to resolve ambiguous names. */
+    private var fqNameToRustPath: Map<String, String> = emptyMap()
 
     private fun isKnownType(type: KneType): Boolean = when (type) {
         is KneType.OBJECT -> type.simpleName in knownTypeNames
@@ -38,23 +62,119 @@ class RustBridgeGenerator {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
         KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING,
         KneType.BYTE_ARRAY -> true
+        is KneType.OBJECT -> elemType.simpleName in knownTypeNames
+        is KneType.INTERFACE -> elemType.simpleName in knownTypeNames
+        is KneType.SEALED_ENUM -> elemType.simpleName in knownTypeNames
+        is KneType.ENUM -> true
         else -> false
     }
 
     private var enumTypeNames: Set<String> = emptySet()
+    private var simpleEnumTypeNames: Set<String> = emptySet()
 
     private fun hasOnlyKnownTypes(fn: KneFunction): Boolean =
         isKnownType(fn.returnType) && fn.params.all { isKnownType(it.type) } &&
-        !hasTypeMismatch(fn)
+        !hasTypeMismatch(fn) &&
+        fn.params.none { hasUnbridgeableParam(it) } &&
+        !hasAmbiguousType(fn)
+
+    /** Returns true if a param has a type that cannot cross the C ABI boundary:
+     *  - `&'static [&str]`, `&'static [&[u8]]` (static slices of non-primitives)
+     *  - Function pointer types with non-primitive params (e.g. `fn(&[u8]) -> u8`)
+     *  - FUNCTION type params where the function's param types include OBJECT/INTERFACE/etc.
+     */
+    private fun hasUnbridgeableParam(p: KneParam): Boolean {
+        val rt = p.rustType ?: ""
+        // Static slices of references or slices: &'static [&str], &'static [&[u8]], etc.
+        if (rt.contains("&'static [") || rt.contains("&[&")) return true
+        // Function pointer with non-primitive parameters (contains & or complex types)
+        if (p.type is KneType.FUNCTION) {
+            val fnType = p.type as KneType.FUNCTION
+            if (fnType.paramTypes.any { !isCAbiFriendlyType(it) } ||
+                !isCAbiFriendlyType(fnType.returnType)) {
+                return true
+            }
+        }
+        // fn(...) in rustType with complex arg types
+        if (rt.startsWith("fn(") && (rt.contains("&[") || rt.contains("&mut ") || rt.contains("dyn "))) return true
+        // Box<dyn T> fields (fat pointers, cannot be passed as i64 handle)
+        if (rt.contains("Box<dyn ")) return true
+        // Bare Box without type params (missing generic info)
+        if (rt == "Box" || rt.endsWith("::Box")) return true
+        return false
+    }
+
+    /** Returns true if a type can be safely passed through the C ABI. */
+    private fun isCAbiFriendlyType(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.BOOLEAN, KneType.BYTE, KneType.SHORT,
+        KneType.STRING, KneType.UNIT, KneType.NEVER -> true
+        is KneType.ENUM -> true
+        else -> false
+    }
+
+    /** Returns true if any param or return type uses a type name that's ambiguous
+     *  across crates and the rustType doesn't carry a qualified Rust path. */
+    private fun hasAmbiguousType(fn: KneFunction): Boolean {
+        if (ambiguousTypeNames.isEmpty()) return false
+        return fn.params.any { p -> isAmbiguousParam(p) } || isAmbiguousReturnType(fn.returnType, fn.returnRustType)
+    }
+
+    private fun isAmbiguousParam(p: KneParam): Boolean {
+        val simpleName = typeSimpleName(p.type) ?: return false
+        if (simpleName !in ambiguousTypeNames) return false
+        // If the rustType carries a qualified path (contains ::), the bridge can use it correctly
+        val rt = unwrapRustWrapperType(p.rustType) ?: return true
+        return !rt.contains("::")
+    }
+
+    private fun isAmbiguousReturnType(type: KneType, rustType: String?): Boolean {
+        val simpleName = typeSimpleName(type) ?: return false
+        if (simpleName !in ambiguousTypeNames) return false
+        val rt = unwrapRustWrapperType(rustType) ?: return true
+        return !rt.contains("::")
+    }
+
+    private fun typeSimpleName(type: KneType): String? = when (type) {
+        is KneType.OBJECT -> type.simpleName
+        is KneType.ENUM -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        is KneType.DATA_CLASS -> type.simpleName
+        is KneType.NULLABLE -> typeSimpleName(type.inner)
+        else -> null
+    }
 
     private fun hasTypeMismatch(fn: KneFunction): Boolean {
         val allTypes = fn.params.map { it.type } + fn.returnType
-        return allTypes.any { type ->
-            type is KneType.OBJECT && type.simpleName in enumTypeNames
+        if (allTypes.any { type -> type is KneType.OBJECT && type.simpleName in enumTypeNames }) return true
+        // Detect params where the resolved KneType is primitive but the rustType suggests
+        // a complex struct type (e.g. Duration resolved as u64 but actual Rust type is
+        // std::time::Duration). These cannot be safely bridged.
+        return fn.params.any { p -> hasPrimitiveTypeAmbiguity(p) }
+    }
+
+    /** Returns true if a param's KneType was resolved as a primitive but its rustType
+     *  suggests a different complex type that happens to share the same name. */
+    private fun hasPrimitiveTypeAmbiguity(p: KneParam): Boolean {
+        val rt = p.rustType ?: return false
+        val normalized = normalizeRustType(rt) ?: return false
+        // If the KneType is a primitive but the rustType is a qualified path to a struct,
+        // there's a type alias collision (e.g. symphonia Duration = u64 vs std::time::Duration)
+        if (p.type is KneType.LONG || p.type is KneType.INT || p.type is KneType.DOUBLE || p.type is KneType.FLOAT) {
+            // Qualified type path suggests a struct, not a primitive alias
+            if (normalized.contains("::") && !normalized.startsWith("std::") &&
+                !RUST_PRIMITIVE_TYPES.contains(normalized)) {
+                // The normalized type is a crate-qualified struct — that's fine, it's a type alias.
+                // But check if the original type has a std:: prefix (meaning it's std::time::Duration etc.)
+            }
+            // std::time::Duration or similar standard lib types mistakenly resolved as primitive
+            if (rt.contains("std::time::") || rt.contains("core::time::")) return true
         }
+        return false
     }
 
     fun generate(module: KneModule): String {
+        emittedSymbols.clear()
         knownTypeNames = buildSet {
             module.classes.forEach { add(it.simpleName) }
             module.dataClasses.forEach { add(it.simpleName) }
@@ -66,6 +186,40 @@ class RustBridgeGenerator {
             module.enums.forEach { add(it.simpleName) }
             module.sealedEnums.forEach { add(it.simpleName) }
         }
+        simpleEnumTypeNames = module.enums.map { it.simpleName }.toSet()
+        // Use pre-computed ambiguous type names from module merge (detects names that
+        // appeared in multiple crates before deduplication, e.g. SampleFormat from both
+        // symphonia_core and cpal).
+        ambiguousTypeNames = module.ambiguousTypeNames
+        // Track class names whose rustTypeName contains generics or lifetimes,
+        // or whose Rust struct definition has lifetime params (e.g. BufReader<'a>)
+        // — these classes cannot be safely used as type args in other generic classes.
+        genericOrLifetimeClassNames = buildSet {
+            module.classes.forEach { cls ->
+                if (cls.rustTypeName.contains("<") || cls.rustTypeName.contains("'")) {
+                    add(cls.simpleName)
+                }
+                if (cls.hasLifetimeParams || cls.hasUnresolvedGenericTypeParams) {
+                    add(cls.simpleName)
+                }
+            }
+        }
+        // Detect generic template classes whose concrete type uses the class name with <...>.
+        // These templates (e.g. Processor with rustTypeName="Processor") are not directly
+        // bridgeable — only their monomorphisations (Processor_Doubler) are.
+        // Also detect structs that require type params but weren't monomorphised.
+        val monomorphisedBaseNames = module.classes
+            .filter { it.rustTypeName.contains("<") }
+            .map { it.rustTypeName.substringBefore('<') }
+            .toSet()
+        unbridgeableTemplateNames = module.classes
+            .filter { cls ->
+                !cls.rustTypeName.contains("<") &&
+                cls.simpleName in monomorphisedBaseNames
+            }
+            .map { it.simpleName }
+            .toSet()
+
         val sb = StringBuilder()
         val prefix = module.libName
 
@@ -111,6 +265,10 @@ class RustBridgeGenerator {
         appendLine("use std::collections::HashMap;")
         appendLine("use std::os::raw::c_char;")
         appendLine("use std::panic::catch_unwind;")
+        appendLine("use std::ops::{Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor, Not, Shl, Shr};")
+        appendLine("use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, BitAndAssign, BitOrAssign, BitXorAssign};")
+        appendLine("use std::io::Read;")
+        appendLine("use std::io::Seek;")
         appendLine()
         appendLine("// dyn Trait registry: stores fat pointer components as [usize; 2]")
         appendLine("// Box<dyn Trait> is a fat pointer (data + vtable). We transmute it to [usize; 2] for storage.")
@@ -215,15 +373,56 @@ class RustBridgeGenerator {
     private fun StringBuilder.appendClass(cls: KneClass, prefix: String) {
         val className = cls.simpleName
         val rustTypeName = cls.rustTypeName
-        val sym = "${prefix}_${className}"
 
-        if (cls.constructor.kind != KneConstructorKind.NONE && cls.constructor.params.all { isKnownType(it.type) }) {
+        // Skip classes whose Rust type cannot be correctly bridged:
+        // 1. Types with lifetime params (e.g. BufReader<'_>)
+        if (rustTypeName.contains("'")) {
+            return
+        }
+        // 2. Generic templates that have monomorphised variants — the template itself
+        //    can't be bridged (e.g. Processor with template, vs Processor<Doubler>)
+        if (cls.genericParams.isNotEmpty() && !rustTypeName.contains("<")) {
+            return
+        }
+        // 3. Templates detected by name analysis (for structs where genericParams wasn't set)
+        if (className in unbridgeableTemplateNames) {
+            return
+        }
+        // 4. Structs with unresolved generic type params that weren't monomorphised
+        //    (e.g. ReadOnlySource<R> where no concrete R was found)
+        if (cls.hasUnresolvedGenericTypeParams && !rustTypeName.contains("<")) {
+            return
+        }
+        // 2. Generics: skip multi-param, or single-param with unknown/problematic type arg
+        if (rustTypeName.contains("<")) {
+            val genericContent = rustTypeName.substringAfter('<').substringBeforeLast('>')
+            val argTypes = genericContent.split(",").map { it.trim() }
+            // Multi-param generics: trait bounds make these unreliable
+            if (argTypes.size > 1) return
+            val argType = argTypes.first().removePrefix("&").removePrefix("mut ").trim()
+            // Unknown type arg
+            if (argType.isNotEmpty() && argType !in knownTypeNames && argType !in RUST_PRIMITIVE_TYPES) {
+                return
+            }
+            // Type arg is itself a class with generics/lifetimes in its own definition
+            // (e.g. BufReader which is BufReader<'a> in Rust — the bridge loses the lifetime)
+            if (argType in genericOrLifetimeClassNames) {
+                return
+            }
+        }
+
+        val baseSym = "${prefix}_${className}"
+
+        if (cls.constructor.kind != KneConstructorKind.NONE &&
+            cls.constructor.params.all { isKnownType(it.type) } &&
+            cls.constructor.params.none { hasUnbridgeableParam(it) } &&
+            cls.constructor.params.none { isAmbiguousParam(it) }) {
             appendConstructor(cls, prefix)
         }
 
         // Dispose
         appendLine("#[no_mangle]")
-        appendLine("pub extern \"C\" fn ${sym}_dispose(handle: i64) {")
+        appendLine("pub extern \"C\" fn ${baseSym}_dispose(handle: i64) {")
         if (cls.isOpaque) {
             appendLine("    let _ = handle;")
         } else {
@@ -307,7 +506,14 @@ class RustBridgeGenerator {
             return
         }
         if (!isSupportedReturnType(fn.returnType)) return
-        val sym = "${prefix}_${cls.simpleName}_${fn.name}"
+        // Skip methods with turbofish on generic classes: the turbofish is a
+        // monomorphisation artifact. The method either doesn't take generics (E0107)
+        // or the class already provides the type.
+        val turbo = fn.turbofish
+        if (turbo != null && cls.rustTypeName.contains("<")) {
+            return
+        }
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
         val needsBufOutput = needsOutputBuffer(fn.returnType)
 
         appendLine("#[no_mangle]")
@@ -406,7 +612,9 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe)
+            val expr = wrapExprWithMutObjectSliceWriteback(
+                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params, "    "
+            )
             appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
             appendLine("        $expr")
             appendLine("    })) {")
@@ -420,7 +628,9 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe)
+            val expr = wrapExprWithMutObjectSliceWriteback(
+                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+            )
             if (fn.canFail) {
                 appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
             } else {
@@ -441,7 +651,7 @@ class RustBridgeGenerator {
 
     private fun StringBuilder.appendCompanionMethod(fn: KneFunction, cls: KneClass, prefix: String) {
         if (!isSupportedReturnType(fn.returnType)) return
-        val sym = "${prefix}_${cls.simpleName}_companion_${fn.name}"
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_companion_${fn.name}")
         val needsBuf = needsOutputBuffer(fn.returnType)
 
         appendLine("#[no_mangle]")
@@ -502,7 +712,9 @@ class RustBridgeGenerator {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        val expr = wrapCallForSafety("${cls.simpleName}::${rustCallName(fn)}($callArgs)", fn.isUnsafe)
+        val expr = wrapExprWithMutObjectSliceWriteback(
+            wrapCallForSafety("${cls.simpleName}::${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+        )
         if (fn.canFail) {
             appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
@@ -867,14 +1079,25 @@ class RustBridgeGenerator {
         val elemType = listType.elementType
         when (elemType) {
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
-                // Return borrowed pointers - ownership remains with parent
-                appendLine("${indent}let len = $binding.len() as i32;")
-                appendLine("${indent}if len <= out_buf_len {")
-                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
-                appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = v as *const _ as i64; }")
-                appendLine("${indent}    }")
-                appendLine("${indent}}")
-                appendLine("${indent}len")
+                // Check if this OBJECT is actually an enum (cross-crate mis-resolution)
+                if (elemType is KneType.OBJECT && elemType.simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}let len = $binding.len() as i32;")
+                    appendLine("${indent}if len <= out_buf_len {")
+                    appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                    appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = *v as i32; }")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                    appendLine("${indent}len")
+                } else {
+                    // Return borrowed pointers - ownership remains with parent
+                    appendLine("${indent}let len = $binding.len() as i32;")
+                    appendLine("${indent}if len <= out_buf_len {")
+                    appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                    appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = v as *const _ as i64; }")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                    appendLine("${indent}len")
+                }
             }
             KneType.STRING -> {
                 // Serialize strings as null-terminated, concatenated in buffer
@@ -1195,17 +1418,17 @@ class RustBridgeGenerator {
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
         // Skip variants with unsupported field types
-        val hasUnsupportedCollectionField = variant.fields.any { f ->
+        val hasUnsupportedField = variant.fields.any { f ->
             val t = f.type
             when (t) {
                 is KneType.TUPLE -> true  // Tuple fields in struct variants not yet supported
                 is KneType.LIST -> !isSupportedCollectionElementForConstructor(t.elementType)
                 is KneType.SET -> !isSupportedCollectionElementForConstructor(t.elementType)
                 is KneType.MAP -> !isSupportedCollectionElementForConstructor(t.keyType) || !isSupportedCollectionElementForConstructor(t.valueType)
-                else -> false
+                else -> hasUnbridgeableParam(f)
             }
         }
-        if (hasUnsupportedCollectionField) return
+        if (hasUnsupportedField) return
         val fnName = "${sym}_new_${variant.name}"
         appendLine("#[no_mangle]")
         val params = variant.fields.joinToString(", ") { f ->
@@ -1272,6 +1495,8 @@ class RustBridgeGenerator {
         for (f in variant.fields) {
             // Skip tuple-typed fields (not yet supported in sealed variant getters)
             if (f.type is KneType.TUPLE) continue
+            // Skip fields with unbridgeable types (fn pointers with complex params, etc.)
+            if (hasUnbridgeableParam(f)) continue
             // Handle MAP fields specially with dual buffers
             if (f.type is KneType.MAP) {
                 appendSealedMapVariantFieldGetter(sym, rustName, variant, f)
@@ -1307,7 +1532,8 @@ class RustBridgeGenerator {
             }
 
             appendLine("    match obj {")
-            if (needsBuf) {
+            if (needsBuf || f.type is KneType.NULLABLE) {
+                // NULLABLE and buffer types need block-style handling via appendValueReturnFromBinding
                 appendLine("        $fieldPattern => {")
                 appendValueReturnFromBinding(
                     sealedGetterBindingExpr(f, valExpr),
@@ -1394,7 +1620,7 @@ class RustBridgeGenerator {
             return
         }
 
-        val sym = "${prefix}_${fn.name}"
+        val sym = uniqueSym("${prefix}_${fn.name}")
         val needsBuf = needsOutputBuffer(fn.returnType)
 
         appendLine("#[no_mangle]")
@@ -1478,7 +1704,9 @@ class RustBridgeGenerator {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        val expr = wrapCallForSafety("${rustCallName(fn)}($callArgs)", fn.isUnsafe)
+        val expr = wrapExprWithMutObjectSliceWriteback(
+            wrapCallForSafety("${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+        )
         if (fn.canFail) {
             appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
@@ -1536,7 +1764,7 @@ class RustBridgeGenerator {
      * and referenced by u64 handles across the FFM boundary.
      */
     private fun StringBuilder.appendDynTraitTopLevelFunction(fn: KneFunction, prefix: String) {
-        val sym = "${prefix}_${fn.name}"
+        val sym = uniqueSym("${prefix}_${fn.name}")
         val returnType = fn.returnType
         val params = fn.params
         val rustRetType = fn.returnRustType ?: ""
@@ -1777,7 +2005,7 @@ class RustBridgeGenerator {
     }
 
     private fun StringBuilder.appendFlowMethod(fn: KneFunction, cls: KneClass, prefix: String) {
-        val sym = "${prefix}_${cls.simpleName}_${fn.name}"
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
         val className = cls.simpleName
         val flowType = fn.returnType as KneType.FLOW
         val elemType = flowType.elementType
@@ -1864,7 +2092,7 @@ class RustBridgeGenerator {
     }
 
     private fun StringBuilder.appendSuspendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
-        val sym = "${prefix}_${cls.simpleName}_${fn.name}"
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
         val className = cls.simpleName
 
         appendLine("#[no_mangle]")
@@ -2011,17 +2239,20 @@ class RustBridgeGenerator {
                 appendLine("${indent}let ${p.name}_conv = ${p.name} != 0;")
             }
             is KneType.ENUM -> {
-                val enumName = (p.type as KneType.ENUM).simpleName
+                // Use the qualified rustType if available to avoid ambiguity when
+                // multiple crates export the same enum name (e.g. cpal::SampleFormat
+                // vs symphonia_core::SampleFormat)
+                val enumName = unwrapRustWrapperType(p.rustType) ?: (p.type as KneType.ENUM).simpleName
                 appendLine("${indent}let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
             }
             is KneType.OBJECT -> {
-                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
             }
             is KneType.INTERFACE -> {
-                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
             }
             is KneType.SEALED_ENUM -> {
-                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent)
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
             }
             is KneType.DATA_CLASS -> {
                 appendDataClassParamConversion(p, p.type as KneType.DATA_CLASS, indent)
@@ -2066,6 +2297,29 @@ class RustBridgeGenerator {
                         appendLine("${indent}let ${p.name}_vec: Vec<String> = ${p.name}_slice.iter().map(|&p| cstr_to_string(p)).collect();")
                     } else {
                         appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                    }
+                } else if (elemType is KneType.ENUM) {
+                    // List of enum ordinals: each i64 is an ordinal, transmute to the enum type
+                    val enumName = unwrapRustWrapperType(extractSliceElementRustType(p.rustType))
+                        ?: (elemType as KneType.ENUM).simpleName
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    val mutPrefix = if (isBorrowedSlice && p.rustType?.contains("&mut ") == true) "mut " else ""
+                    appendLine("${indent}let ${mutPrefix}${p.name}_vec: Vec<$enumName> = ${p.name}_slice.iter().map(|&v| unsafe { std::mem::transmute(v as u8) }).collect();")
+                } else if (elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM) {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    if (isBorrowedSlice) {
+                        // Borrowed slice param (&[T] or &mut [T]): copy values from handles without consuming ownership
+                        val rustElemType = rustHandleTypeName(elemType, extractSliceElementRustType(p.rustType))
+                        val isMutSlice = p.rustType?.contains("&mut ") == true
+                        appendLine("${indent}let ${p.name}_handles = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                        val mutPrefix = if (isMutSlice) "mut " else ""
+                        appendLine("${indent}let ${mutPrefix}${p.name}_vec: Vec<$rustElemType> = ${p.name}_handles.iter().map(|&h| unsafe { std::ptr::read(h as *const $rustElemType) }).collect();")
+                    } else {
+                        // Owned Vec<T> field: consume boxes to transfer ownership
+                        val rustElemType = rustHandleTypeName(elemType, null)
+                        appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                        appendLine("${indent}let ${p.name}_vec: Vec<$rustElemType> = ${p.name}_slice.iter().map(|&h| unsafe { *Box::from_raw(h as *mut $rustElemType) }).collect();")
                     }
                 } else {
                     appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
@@ -2114,10 +2368,21 @@ class RustBridgeGenerator {
         rustTypeName: String,
         borrowed: Boolean,
         indent: String,
+        originalRustType: String? = null,
     ) {
         val useInferredCast = requiresInferredObjectCast(rustTypeName)
         if (borrowed) {
-            if (useInferredCast) {
+            // Check mutability from the ORIGINAL rustType (before unwrapping stripped &mut)
+            val isMutRef = originalRustType?.contains("&mut") == true ||
+                rustTypeName.startsWith("&mut ") || rustTypeName.contains("&mut")
+            if (isMutRef) {
+                if (useInferredCast) {
+                    appendLine("${indent}let ${name}_borrowed = unsafe { &mut *(${name} as *mut _) };")
+                } else {
+                    val cleanType = rustTypeName.removePrefix("&mut ").trim()
+                    appendLine("${indent}let ${name}_borrowed = unsafe { &mut *(${name} as *mut $cleanType) };")
+                }
+            } else if (useInferredCast) {
                 appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const _) };")
             } else {
                 appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const $rustTypeName) };")
@@ -2365,8 +2630,26 @@ class RustBridgeGenerator {
         is KneType.LIST -> {
             val elemType = (p.type as KneType.LIST).elementType
             val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+            val isObjectLike = elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM
+            val isEnumLike = elemType is KneType.ENUM
             when {
                 isStringLike -> "${p.name}_ptr"
+                isEnumLike -> {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    when {
+                        p.rustType?.contains("&mut ") == true -> "&mut ${p.name}_vec"
+                        isBorrowedSlice -> "&${p.name}_vec"
+                        else -> "${p.name}_vec"
+                    }
+                }
+                isObjectLike -> {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    when {
+                        p.rustType?.contains("&mut ") == true -> "&mut ${p.name}_vec"
+                        isBorrowedSlice -> "&${p.name}_vec"
+                        else -> "${p.name}_vec" // owned Vec<T>
+                    }
+                }
                 expectsOwnedVecLike(p.rustType, p.isBorrowed) -> "${p.name}_vec"
                 else -> "${p.name}_slice"
             }
@@ -2654,6 +2937,39 @@ class RustBridgeGenerator {
     private fun requiresStaticStr(rustType: String?): Boolean =
         rustType?.contains("'static str") == true
 
+    /** Extract the element type from a Rust slice type, e.g. "&[Complex]" → "Complex", "&mut [Complex]" → "Complex" */
+    private fun extractSliceElementRustType(rustType: String?): String? {
+        val rt = rustType?.trim() ?: return null
+        val bracketStart = rt.indexOf('[')
+        val bracketEnd = rt.lastIndexOf(']')
+        if (bracketStart < 0 || bracketEnd <= bracketStart) return null
+        return rt.substring(bracketStart + 1, bracketEnd).trim().ifBlank { null }
+    }
+
+    /** Wrap a call expression with writeback code for &mut [Object] slice parameters.
+     *  After the call, modified values in the local Vec are written back to the original Box handles. */
+    private fun wrapExprWithMutObjectSliceWriteback(expr: String, params: List<KneParam>, indent: String = "        "): String {
+        val mutObjectSliceParams = params.filter { p ->
+            val elemType = (p.type as? KneType.LIST)?.elementType
+            (elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM) &&
+                p.rustType?.contains("&mut ") == true
+        }
+        if (mutObjectSliceParams.isEmpty()) return expr
+
+        val sb = StringBuilder()
+        sb.appendLine("{")
+        sb.appendLine("${indent}    let _kne_call_result = $expr;")
+        for (p in mutObjectSliceParams) {
+            val elemType = (p.type as KneType.LIST).elementType
+            val rustElemType = rustHandleTypeName(elemType, extractSliceElementRustType(p.rustType))
+            sb.appendLine("${indent}    for (_kne_i, &_kne_h) in ${p.name}_handles.iter().enumerate() {")
+            sb.appendLine("${indent}        unsafe { std::ptr::write(_kne_h as *mut $rustElemType, ${p.name}_vec[_kne_i]); }")
+            sb.appendLine("${indent}    }")
+        }
+        sb.append("${indent}    _kne_call_result\n${indent}}")
+        return sb.toString()
+    }
+
     private fun sealedGetterReturnsBorrowed(type: KneType): Boolean = when (type) {
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> true
         is KneType.NULLABLE -> sealedGetterReturnsBorrowed(type.inner)
@@ -2664,7 +2980,9 @@ class RustBridgeGenerator {
         KneType.STRING, KneType.BYTE_ARRAY,
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM,
         is KneType.ENUM,
-        is KneType.NULLABLE, is KneType.LIST, is KneType.SET, is KneType.MAP -> valueExpr
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> valueExpr
+        // NULLABLE: the ref binding gives &Option<T>, we need to clone to get an owned Option
+        is KneType.NULLABLE -> "$valueExpr.clone()"
         else -> "*$valueExpr"
     }
 
@@ -2690,7 +3008,8 @@ class RustBridgeGenerator {
             KneType.LONG -> "*const i64"
             KneType.DOUBLE -> "*const f64"
             KneType.FLOAT -> "*const f32"
-            KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
+            KneType.STRING -> "*const *const c_char"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> "*const i64"
             else -> "*const i64"
         }
         is KneType.SET -> when ((type as KneType.SET).elementType) {
@@ -2698,7 +3017,8 @@ class RustBridgeGenerator {
             KneType.LONG -> "*const i64"
             KneType.DOUBLE -> "*const f64"
             KneType.FLOAT -> "*const f32"
-            KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
+            KneType.STRING -> "*const *const c_char"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> "*const i64"
             else -> "*const i64"
         }
         else -> "*const u8"

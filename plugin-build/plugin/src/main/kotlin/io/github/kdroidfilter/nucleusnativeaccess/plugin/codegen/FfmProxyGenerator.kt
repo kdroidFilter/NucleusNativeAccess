@@ -35,6 +35,7 @@ class FfmProxyGenerator {
     /** Set of all type names in the current module — used to skip methods referencing unknown types. */
     private var knownTypes: Set<String> = emptySet()
     private var enumTypeNames: Set<String> = emptySet()
+    private var simpleEnumTypeNames: Set<String> = emptySet()
 
     /** Returns true if the given type (and all nested types) are known in the module. */
     private fun isKnownType(type: KneType): Boolean = when (type) {
@@ -55,6 +56,10 @@ class FfmProxyGenerator {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
         KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING,
         KneType.BYTE_ARRAY -> true
+        is KneType.OBJECT -> type.simpleName in knownTypes
+        is KneType.INTERFACE -> type.simpleName in knownTypes
+        is KneType.SEALED_ENUM -> type.simpleName in knownTypes
+        is KneType.ENUM -> true
         else -> false
     }
 
@@ -364,6 +369,7 @@ class FfmProxyGenerator {
             module.enums.forEach { add(it.simpleName) }
             module.sealedEnums.forEach { add(it.simpleName) }
         }
+        simpleEnumTypeNames = module.enums.map { it.simpleName }.toSet()
 
         // Build dyn wrapper lookup: interface fqName → Dyn wrapper class simpleName
         dynWrapperLookup = module.classes
@@ -2909,7 +2915,7 @@ class FfmProxyGenerator {
             val elemType = (p.type as KneType.LIST).elementType
             return when {
                 elemType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
-                elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "${p.name}.size")
+                elemType == KneType.STRING -> listOf("${p.name}PtrSeg", "${p.name}.size")
                 else -> listOf("${p.name}Seg", "${p.name}.size")
             }
         }
@@ -2917,25 +2923,34 @@ class FfmProxyGenerator {
             val elemType = (p.type as KneType.SET).elementType
             return when {
                 elemType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
-                elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "${p.name}.size")
+                elemType == KneType.STRING -> listOf("${p.name}PtrSeg", "${p.name}.size")
                 else -> listOf("${p.name}Seg", "${p.name}.size")
             }
         }
-        if (p.type is KneType.MAP) return listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "${p.name}.size")
+        if (p.type is KneType.MAP) {
+            val mapType = p.type as KneType.MAP
+            val keySuffix = if (mapType.keyType == KneType.STRING) "PtrSeg" else "Seg"
+            val valueSuffix = if (mapType.valueType == KneType.STRING) "PtrSeg" else "Seg"
+            return listOf("${p.name}_keys${keySuffix}", "${p.name}_values${valueSuffix}", "${p.name}.size")
+        }
         if (isNullableColl) {
             val inner = (p.type as KneType.NULLABLE).inner
             return when (inner) {
                 is KneType.LIST -> when {
                     inner.elementType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
-                    inner.elementType == KneType.STRING || inner.elementType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
+                    inner.elementType == KneType.STRING -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
                     else -> listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
                 }
                 is KneType.SET -> when {
                     inner.elementType is KneType.DATA_CLASS -> listOf("${p.name}Handle")
-                    inner.elementType == KneType.STRING || inner.elementType == KneType.BYTE_ARRAY -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
+                    inner.elementType == KneType.STRING -> listOf("${p.name}PtrSeg", "if (${p.name} == null) -1 else ${p.name}.size")
                     else -> listOf("${p.name}Seg", "if (${p.name} == null) -1 else ${p.name}.size")
                 }
-                is KneType.MAP -> listOf("${p.name}_keysSeg", "${p.name}_valuesSeg", "if (${p.name} == null) -1 else ${p.name}.size")
+                is KneType.MAP -> {
+                    val keySuffix = if (inner.keyType == KneType.STRING) "PtrSeg" else "Seg"
+                    val valueSuffix = if (inner.valueType == KneType.STRING) "PtrSeg" else "Seg"
+                    listOf("${p.name}_keys${keySuffix}", "${p.name}_values${valueSuffix}", "if (${p.name} == null) -1 else ${p.name}.size")
+                }
                 is KneType.TUPLE -> buildTupleInvokeArgs(p.name, inner as KneType.TUPLE, true)
                 else -> listOf(buildJvmInvokeArg(p))
             }
@@ -4712,7 +4727,13 @@ class FfmProxyGenerator {
                 appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
             }
             is KneType.OBJECT -> {
-                appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                // Check if this OBJECT is actually an enum that was mis-resolved during
+                // cross-crate parsing (e.g. FrameFormat from nokhwa_core resolved as OBJECT in nokhwa)
+                if (elemType.simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.entries[_outBuf.getAtIndex(JAVA_INT, it.toLong())] }")
+                } else {
+                    appendLine("${indent}val _list = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle(_outBuf.getAtIndex(JAVA_LONG, it.toLong()) as Long) }")
+                }
             }
             is KneType.INTERFACE -> {
                 val wrapperName = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName

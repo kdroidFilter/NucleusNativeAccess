@@ -346,6 +346,10 @@ class RustdocJsonParser {
         for ((id, name) in knownStructs.toMap()) {
             if (knownDataClasses.containsKey(id)) continue
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
+
+            // Note: structs with generic type params (e.g. Processor<T>, ReadOnlySource<R>)
+            // are NOT skipped here — the monomorphisation step below may produce concrete
+            // variants. The bridge generator handles unresolved generics at code gen time.
             val selfType = KneType.OBJECT("$crateName.$name", name)
             val constructor = buildConstructor(
                 newFn = implConstructors[id],
@@ -394,14 +398,23 @@ class RustdocJsonParser {
                 ?.filter { it in knownTraits.values }
                 ?.map { "$crateName.$it" }
                 ?: emptyList()
+            val hasLifetimeParams = structHasLifetimeParams(structItem)
+            val hasTypeParams = structHasTypeParams(structItem)
+            // If any methods are marked as overrides but no interfaces are known,
+            // clear the override flag (the trait wasn't resolved in this crate's scope)
+            val cleanedMethods = if (traitNames.isEmpty() && methods.any { it.isOverride }) {
+                methods.map { if (it.isOverride) it.copy(isOverride = false) else it }
+            } else methods
             val klass = KneClass(
                 simpleName = name,
                 fqName = "$crateName.$name",
                 constructor = constructor,
-                methods = methods,
+                methods = cleanedMethods,
                 properties = properties,
                 companionMethods = companionMethods,
                 interfaces = traitNames,
+                hasLifetimeParams = hasLifetimeParams,
+                hasUnresolvedGenericTypeParams = hasTypeParams,
             )
             val expandedClasses = expandClassWithGenerics(klass, structItem, crateName)
             classes.addAll(expandedClasses)
@@ -1135,6 +1148,28 @@ class RustdocJsonParser {
     private fun substituteRustType(rustType: String?, paramName: String, concreteRustName: String): String? =
         rustType?.replace(Regex("\\b${Regex.escape(paramName)}\\b"), concreteRustName)
 
+    /** Returns true if the struct has any lifetime parameters (e.g. `BufReader<'a>`). */
+    private fun structHasLifetimeParams(structItem: JsonObject): Boolean {
+        val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return false
+        val generics = structData.getAsJsonObject("generics") ?: return false
+        val params = generics.getAsJsonArray("params") ?: return false
+        return params.any { param ->
+            val kind = param.asJsonObject.getAsJsonObject("kind")
+            kind != null && kind.has("lifetime")
+        }
+    }
+
+    /** Returns true if the struct has type parameters that are NOT resolved to concrete types. */
+    private fun structHasTypeParams(structItem: JsonObject): Boolean {
+        val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return false
+        val generics = structData.getAsJsonObject("generics") ?: return false
+        val params = generics.getAsJsonArray("params") ?: return false
+        return params.any { param ->
+            val kind = param.asJsonObject.getAsJsonObject("kind")
+            kind != null && kind.has("type")
+        }
+    }
+
     private fun extractStructGenerics(structItem: JsonObject): List<GenericParamInfo> {
         val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return emptyList()
         val generics = structData.getAsJsonObject("generics") ?: return emptyList()
@@ -1240,10 +1275,16 @@ class RustdocJsonParser {
         onUnsupported: (String) -> Unit = {},
     ): List<KneParam>? {
         val params = mutableListOf<KneParam>()
+        val usedNames = mutableMapOf<String, Int>()
         for (input in inputs) {
             val arr = input.asJsonArray
-            val paramName = arr[0].asString
+            var paramName = arr[0].asString
             if (skipSelf && paramName == "self") continue
+            // Disambiguate duplicate or anonymous parameter names (e.g. Rust's `_`)
+            val count = usedNames.getOrDefault(paramName, 0)
+            usedNames[paramName] = count + 1
+            if (paramName == "_") paramName = "_arg$count"
+            else if (count > 0) paramName = "${paramName}_$count"
             val resolved = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
             if (resolved == null) {
                 onUnsupported("$context has unsupported param '$paramName'")
@@ -1394,24 +1435,30 @@ class RustdocJsonParser {
                 }
 
                 else -> {
+                    // Use a qualified Rust path as rustType only for standard library types
+                    // (std::io::Error, std::time::Duration, etc.) to avoid ambiguity.
+                    // For all other types, use the simple name — they are accessible via
+                    // pub use re-exports in the wrapper lib.rs.
+                    val qualifiedRustType = if (id != null) lookupFullPath(id) ?: pathSegment
+                        else pathSegment
                     when {
                         id != null && knownEnums.containsKey(id) -> {
                             val name = knownEnums[id]!!
                             if (id in currentSealedEnumIds) {
-                                ResolvedType(KneType.SEALED_ENUM("$currentCrateName.$name", name), rustType = name)
+                                ResolvedType(KneType.SEALED_ENUM("$currentCrateName.$name", name), rustType = qualifiedRustType)
                             } else {
-                                ResolvedType(KneType.ENUM("$currentCrateName.$name", name), rustType = name)
+                                ResolvedType(KneType.ENUM("$currentCrateName.$name", name), rustType = qualifiedRustType)
                             }
                         }
 
                         id != null && knownDataClasses.containsKey(id) -> {
                             val dc = knownDataClasses[id]!!
-                            ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = dc.simpleName)
+                            ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = qualifiedRustType)
                         }
 
                         id != null && knownStructs.containsKey(id) -> {
                             val name = knownStructs[id]!!
-                            ResolvedType(KneType.OBJECT("$currentCrateName.$name", name), rustType = name)
+                            ResolvedType(KneType.OBJECT("$currentCrateName.$name", name), rustType = qualifiedRustType)
                         }
 
                         else -> {
@@ -1420,16 +1467,22 @@ class RustdocJsonParser {
                                 when (val lazy = tryLazyResolve(id)) {
                                     is LazyResolveResult.AsDataClass -> {
                                         val dc = lazy.dc
-                                        return ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = dc.simpleName)
+                                        return ResolvedType(KneType.DATA_CLASS(dc.fqName, dc.simpleName, dc.fields), rustType = qualifiedRustType)
                                     }
                                     is LazyResolveResult.AsEnum -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        return if (lazy.isSealed) ResolvedType(KneType.SEALED_ENUM(fq, lazy.name), rustType = lazy.name)
-                                        else ResolvedType(KneType.ENUM(fq, lazy.name), rustType = lazy.name)
+                                        // Use the full path from paths table when available for qualified rustType
+                                        val lazyRustType = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        return if (lazy.isSealed) ResolvedType(KneType.SEALED_ENUM(fq, lazy.name), rustType = lazyRustType)
+                                        else ResolvedType(KneType.ENUM(fq, lazy.name), rustType = lazyRustType)
                                     }
                                     is LazyResolveResult.AsStruct -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        return ResolvedType(KneType.OBJECT(fq, lazy.name), rustType = lazy.name)
+                                        val lazyRustType = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        // Only create an opaque proxy class for types not already
+                                        // in knownStructs (to avoid shadowing richer versions from sub-crates)
+                                        recordOpaqueClass(lazy.name, fq, lazyRustType)
+                                        return ResolvedType(KneType.OBJECT(fq, lazy.name), rustType = lazyRustType)
                                     }
                                     null -> { /* fall through to opaque */ }
                                 }
@@ -1437,8 +1490,8 @@ class RustdocJsonParser {
                             val simpleName = pathSegment
                             val fqName = path.replace("::", ".")
                             val rustType = renderResolvedPathType(path, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
-                            val opaque = recordOpaqueClass(simpleName, fqName, rustType)
-                            ResolvedType(KneType.OBJECT(fqName, opaque.simpleName), rustType = rustType)
+                            recordOpaqueClass(simpleName, fqName, rustType)
+                            ResolvedType(KneType.OBJECT(fqName, simpleName), rustType = rustType)
                         }
                     }
                 }
@@ -1797,8 +1850,8 @@ class RustdocJsonParser {
 
     private sealed class LazyResolveResult {
         data class AsDataClass(val dc: KneDataClass) : LazyResolveResult()
-        data class AsStruct(val name: String) : LazyResolveResult()
-        data class AsEnum(val name: String, val isSealed: Boolean) : LazyResolveResult()
+        data class AsStruct(val name: String, val fullPath: String? = null) : LazyResolveResult()
+        data class AsEnum(val name: String, val isSealed: Boolean, val fullPath: String? = null) : LazyResolveResult()
     }
 
     /**
@@ -1870,6 +1923,10 @@ class RustdocJsonParser {
         val pathSegments = pathEntry.getAsJsonArray("path") ?: return null
         val name = pathSegments.last().asString
 
+        val rawFullPath = pathSegments.map { it.asString }.joinToString("::")
+        // For std/core library paths, the paths table may include private modules
+        // (e.g. std::io::error::Error). Collapse to the public form (std::io::Error).
+        val fullPath = canonicalizeStdPath(rawFullPath)
         return when (kind) {
             // Without the full definition in the index, we can't determine if an enum is
             // unit-only (simple) or has data variants (sealed). Default to opaque struct
@@ -1877,9 +1934,55 @@ class RustdocJsonParser {
             // JSON will override this during module merging.
             "enum", "struct" -> {
                 currentKnownStructs[id] = name
-                LazyResolveResult.AsStruct(name)
+                LazyResolveResult.AsStruct(name, fullPath)
             }
             else -> null
+        }
+    }
+
+    /**
+     * Look up the full Rust path for a type ID from the `paths` table.
+     * Returns null if not found or if the type is from the current crate (no qualification needed).
+     * The result is canonicalized for std/core types.
+     */
+    private fun lookupFullPath(id: Int): String? {
+        val paths = currentPaths ?: return null
+        val pathEntry = paths.get(id.toString())?.asJsonObject ?: return null
+        // crate_id 0 = current crate, skip (no qualification needed for local types)
+        val crateId = pathEntry.get("crate_id")?.asInt ?: return null
+        if (crateId == 0) return null
+        val pathSegments = pathEntry.getAsJsonArray("path") ?: return null
+        val rawPath = pathSegments.map { it.asString }.joinToString("::")
+        // Only qualify types from standard library crates (std, core, alloc).
+        // Types from dependency crates (nokhwa_core, symphonia_core, cpal, etc.)
+        // are re-exported and accessible by their simple name via pub use.
+        val rootCrate = pathSegments.firstOrNull()?.asString ?: return null
+        if (rootCrate !in standardLibraryCrates) return null
+        return canonicalizeStdPath(rawPath)
+    }
+
+    private val standardLibraryCrates = setOf("std", "core", "alloc")
+
+    /**
+     * Canonicalize standard library paths from rustdoc's internal representation to the
+     * public API form. E.g. `std::io::error::Error` -> `std::io::Error`,
+     * `core::time::Duration` -> `std::time::Duration`.
+     */
+    private fun canonicalizeStdPath(path: String): String {
+        val segments = path.split("::")
+        if (segments.size < 2) return path
+        val crate = segments[0]
+        if (crate != "std" && crate != "core" && crate != "alloc") return path
+        val typeName = segments.last()
+        // For core:: types, prefer std:: as the canonical import path
+        val prefix = if (crate == "core") "std" else crate
+        // Build canonical path: crate::module::TypeName (skip private sub-modules)
+        // Standard form is usually max 3 segments: std::module::Type
+        return if (segments.size <= 3) {
+            "$prefix::${segments.drop(1).joinToString("::")}"
+        } else {
+            // Collapse: std::io::error::Error -> std::io::Error
+            "$prefix::${segments[1]}::$typeName"
         }
     }
 
@@ -2060,13 +2163,25 @@ class RustdocJsonParser {
                         expandGlobModule(targetId, index, result)
                     }
                 }
+                // For crates whose root only has modules (e.g. symphonia_core with
+                // modules: io, audio, formats, ...), recursively expand each public
+                // module to discover the exported types.
+                inner.has("module") -> {
+                    expandGlobModule(itemId, index, result)
+                }
             }
         }
         return result
     }
 
-    private fun expandGlobModule(moduleId: Int, index: JsonObject, result: MutableSet<Int>) {
+    private fun expandGlobModule(moduleId: Int, index: JsonObject, result: MutableSet<Int>, depth: Int = 0) {
+        if (depth > 5) return // Prevent infinite recursion
         val moduleItem = index.get(moduleId.toString())?.asJsonObject ?: return
+        // Only follow modules that have an entry in the rustdoc paths table.
+        // Private/internal modules (like `bit` in symphonia_core::io::bit) have no
+        // path entry and their types are not accessible from outside the crate.
+        val hasPathEntry = currentPaths?.has(moduleId.toString()) == true
+        if (depth > 0 && !hasPathEntry) return
         val moduleItems = moduleItem.getAsJsonObject("inner")
             ?.getAsJsonObject("module")
             ?.getAsJsonArray("items") ?: return
@@ -2079,12 +2194,19 @@ class RustdocJsonParser {
                 inner.has("struct") || inner.has("enum") || inner.has("trait") -> result.add(itemId)
                 inner.has("use") -> {
                     val useData = inner.getAsJsonObject("use")
-                    if (useData.get("is_glob")?.asBoolean != true) {
-                        val targetId = useData.get("id")
-                            ?.takeIf { !it.isJsonNull }
-                            ?.asInt ?: continue
+                    val isGlob = useData.get("is_glob")?.asBoolean ?: false
+                    val targetId = useData.get("id")
+                        ?.takeIf { !it.isJsonNull }
+                        ?.asInt ?: continue
+                    if (isGlob) {
+                        expandGlobModule(targetId, index, result, depth + 1)
+                    } else {
                         result.add(targetId)
                     }
+                }
+                inner.has("module") -> {
+                    // Expand public sub-modules to find types declared within them
+                    expandGlobModule(itemId, index, result, depth + 1)
                 }
             }
         }

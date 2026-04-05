@@ -15,6 +15,9 @@ data class KneModule(
      *  Built by scanning all `impl Trait for ConcreteType` blocks in rustdoc JSON.
      *  Enables auto-monomorphisation of generic functions by finding concrete implementors. */
     val traitImpls: Map<String, List<KneType.OBJECT>> = emptyMap(),
+    /** Type simple names that appear in multiple crates (detected during module merge).
+     *  Methods using these types without qualified paths should be skipped. */
+    val ambiguousTypeNames: Set<String> = emptySet(),
 ) : Serializable
 
 data class KneDataClass(
@@ -55,6 +58,12 @@ data class KneClass(
     /** Generic type parameters for this struct (e.g., `T` in `RequestedFormat<T>`).
      *  When non-empty, the class is a generic template requiring monomorphisation. */
     val genericParams: List<GenericParamInfo> = emptyList(),
+    /** True if the Rust struct has lifetime parameters (e.g. `BufReader<'a>`).
+     *  Such types cannot be safely used as type args in other generic classes. */
+    val hasLifetimeParams: Boolean = false,
+    /** True if the Rust struct has generic type parameters that were NOT monomorphised.
+     *  (e.g. `ReadOnlySource<R>` where no concrete `R` was found.) */
+    val hasUnresolvedGenericTypeParams: Boolean = false,
 ) : Serializable
 
 data class KneEnum(
