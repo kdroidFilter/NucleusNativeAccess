@@ -900,6 +900,68 @@ pub fn create_empty_payload() -> DataPayload {
     DataPayload::Empty
 }
 
+// ── Generic monomorphisation support ────────────────────────────────────
+
+/// Trait for value transformation — used to test auto-monomorphisation.
+pub trait ValueTransformer {
+    fn transform(&self, input: i32) -> i32;
+    fn transformer_name(&self) -> String;
+}
+
+/// Doubles the input value.
+pub struct Doubler;
+
+impl Doubler {
+    pub fn new() -> Self {
+        Doubler
+    }
+}
+
+impl ValueTransformer for Doubler {
+    fn transform(&self, input: i32) -> i32 {
+        input * 2
+    }
+    fn transformer_name(&self) -> String {
+        "Doubler".to_string()
+    }
+}
+
+/// Triples the input value.
+pub struct Tripler;
+
+impl Tripler {
+    pub fn new() -> Self {
+        Tripler
+    }
+}
+
+impl ValueTransformer for Tripler {
+    fn transform(&self, input: i32) -> i32 {
+        input * 3
+    }
+    fn transformer_name(&self) -> String {
+        "Tripler".to_string()
+    }
+}
+
+impl Calculator {
+    /// Applies a generic transformer to the current accumulator.
+    /// NNA should monomorphise this into apply_transformer_doubler and apply_transformer_tripler.
+    pub fn apply_transformer<T: ValueTransformer>(&self, transformer: &T) -> i32 {
+        transformer.transform(self.accumulator)
+    }
+
+    /// Returns the name of a generic transformer.
+    pub fn get_transformer_name<T: ValueTransformer>(&self, transformer: &T) -> String {
+        transformer.transformer_name()
+    }
+}
+
+/// Top-level generic function — transforms a value using any ValueTransformer.
+pub fn transform_value<T: ValueTransformer>(value: i32, transformer: &T) -> i32 {
+    transformer.transform(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

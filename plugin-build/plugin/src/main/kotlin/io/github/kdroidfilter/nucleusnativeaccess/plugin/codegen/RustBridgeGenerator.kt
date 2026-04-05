@@ -15,6 +15,13 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
  */
 class RustBridgeGenerator {
 
+    /** Returns the Rust call name for a function, using rustMethodName + turbofish if available. */
+    private fun rustCallName(fn: KneFunction): String {
+        val base = fn.rustMethodName ?: fn.name
+        val turbo = fn.turbofish ?: ""
+        return "$base$turbo"
+    }
+
     fun generate(module: KneModule): String {
         val sb = StringBuilder()
         val prefix = module.libName
@@ -344,7 +351,7 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
+            val expr = wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe)
             appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
             appendLine("        $expr")
             appendLine("    })) {")
@@ -358,7 +365,7 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapCallForSafety("obj.${fn.name}($callArgs)", fn.isUnsafe)
+            val expr = wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe)
             if (fn.canFail) {
                 appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
             } else {
@@ -440,7 +447,7 @@ class RustBridgeGenerator {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        val expr = wrapCallForSafety("${cls.simpleName}::${fn.name}($callArgs)", fn.isUnsafe)
+        val expr = wrapCallForSafety("${cls.simpleName}::${rustCallName(fn)}($callArgs)", fn.isUnsafe)
         if (fn.canFail) {
             appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
@@ -1398,7 +1405,7 @@ class RustBridgeGenerator {
             appendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        val expr = wrapCallForSafety("${fn.name}($callArgs)", fn.isUnsafe)
+        val expr = wrapCallForSafety("${rustCallName(fn)}($callArgs)", fn.isUnsafe)
         if (fn.canFail) {
             appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
         } else {
@@ -1517,7 +1524,7 @@ class RustBridgeGenerator {
                 appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
                 val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
                     .joinToString(", ") { convertedParamName(it) }
-                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 appendLine("        match result {")
                 appendLine("            Ok(v) => {")
                 appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
@@ -1550,7 +1557,7 @@ class RustBridgeGenerator {
                 appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
                 val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
                     .joinToString(", ") { convertedParamName(it) }
-                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 appendLine("        match result {")
                 appendLine("            Some(v) => {")
                 appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
@@ -1585,7 +1592,7 @@ class RustBridgeGenerator {
                 }
                 val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
                     .joinToString(", ") { convertedParamName(it) }
-                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 appendLine("        let count = result.len() as i32;")
                 appendLine("        unsafe { out_count.write(count); }")
                 appendLine("        for (i, item) in result.into_iter().enumerate() {")
@@ -1615,7 +1622,7 @@ class RustBridgeGenerator {
                 appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
                 val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
                     .joinToString(", ") { convertedParamName(it) }
-                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 appendLine("        let handle = KNE_NEXT_HANDLE.with(|counter| {")
                 appendLine("            let h = *counter.borrow();")
                 appendLine("            *counter.borrow_mut() += 1;")
@@ -1661,7 +1668,7 @@ class RustBridgeGenerator {
                     if (traitHandleParams.contains(p)) "${p.name}_ref"
                     else convertedParamName(p)
                 }
-                appendLine("        let result = ${fn.name}($callArgs);")
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 // Handle return value
                 if (needsBuf) {
                     appendLine("        let bytes = result.as_bytes();")
@@ -1741,7 +1748,7 @@ class RustBridgeGenerator {
             appendSuspendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        appendLine("            obj.${fn.name}($callArgs)")
+        appendLine("            obj.${rustCallName(fn)}($callArgs)")
         appendLine("        }));")
         appendLine()
         appendLine("        match result {")
@@ -1825,7 +1832,7 @@ class RustBridgeGenerator {
             appendSuspendParamConversion(p)
         }
         val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-        appendLine("            obj.${fn.name}($callArgs)")
+        appendLine("            obj.${rustCallName(fn)}($callArgs)")
         appendLine("        }));")
         appendLine()
         appendLine("        match result {")

@@ -11,6 +11,10 @@ data class KneModule(
     val functions: List<KneFunction>,
     val interfaces: List<KneInterface> = emptyList(),
     val sealedEnums: List<KneSealedEnum> = emptyList(),
+    /** Map from trait FQ name → list of concrete types that implement the trait.
+     *  Built by scanning all `impl Trait for ConcreteType` blocks in rustdoc JSON.
+     *  Enables auto-monomorphisation of generic functions by finding concrete implementors. */
+    val traitImpls: Map<String, List<KneType.OBJECT>> = emptyMap(),
 ) : Serializable
 
 data class KneDataClass(
@@ -48,6 +52,9 @@ data class KneClass(
     val rustTypeName: String = simpleName,
     /** True for synthetic classes wrapping `Box<dyn Trait>` trait objects. */
     val isDynTrait: Boolean = false,
+    /** Generic type parameters for this struct (e.g., `T` in `RequestedFormat<T>`).
+     *  When non-empty, the class is a generic template requiring monomorphisation. */
+    val genericParams: List<GenericParamInfo> = emptyList(),
 ) : Serializable
 
 data class KneEnum(
@@ -91,6 +98,30 @@ enum class KneReceiverKind : Serializable {
     OWNED,
 }
 
+/**
+ * Represents a single trait bound on a generic parameter.
+ * For `T: FormatDecoder`, this would be `GenericBound(traitFqName = "nokhwa_types.FormatDecoder")`.
+ * For `T: Trait1 + Trait2`, this would be two GenericBound entries.
+ */
+data class GenericBound(
+    /** Fully-qualified trait name (e.g., "nokhwa_types.FormatDecoder") */
+    val traitFqName: String,
+    /** Simple trait name for naming (e.g., "FormatDecoder") */
+    val traitSimpleName: String,
+) : Serializable
+
+/**
+ * Information about a generic type parameter used in monomorphisation.
+ * Captures the parameter name and all trait bounds that must be satisfied.
+ */
+data class GenericParamInfo(
+    val paramName: String,
+    val bounds: List<GenericBound>,
+    /** Concrete types that implement ALL bounds — used for monomorphisation.
+     *  Computed from traitImpls registry. */
+    val concreteTypes: List<KneType.OBJECT> = emptyList(),
+) : Serializable
+
 data class KneFunction(
     val name: String,
     val params: List<KneParam>,
@@ -108,6 +139,14 @@ data class KneFunction(
     val isUnsafe: Boolean = false,
     /** Rust expression suffix for `impl Trait` return conversion (e.g. `.collect::<Vec<_>>()`). */
     val returnConversion: String? = null,
+    /** Generic type parameters that require monomorphisation.
+     *  When non-empty, the method needs concrete type substitutions. */
+    val genericParams: List<GenericParamInfo> = emptyList(),
+    /** Original Rust method name before monomorphisation suffix was added.
+     *  When set, the bridge must call this name (with turbofish) instead of [name]. */
+    val rustMethodName: String? = null,
+    /** Turbofish type args to append to the Rust method call (e.g. "::<Doubler>"). */
+    val turbofish: String? = null,
 ) : Serializable
 
 data class KneProperty(

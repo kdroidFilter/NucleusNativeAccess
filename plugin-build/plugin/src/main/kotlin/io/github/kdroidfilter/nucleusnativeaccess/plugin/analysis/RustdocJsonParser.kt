@@ -33,6 +33,13 @@ class RustdocJsonParser {
     /** Trait names that appear as `dyn Trait` in function signatures (need synthetic wrapper classes). */
     private val dynTraitNames = mutableSetOf<String>()
 
+    /** Trait -> [ConcreteType] registry built from impl blocks. Used for generic monomorphisation. */
+    private var traitImpls: Map<String, List<KneType.OBJECT>> = emptyMap()
+
+    /** Tracks generic params with user-defined trait bounds (e.g., `F: FormatDecoder`).
+     *  Set during method building to enable monomorphisation. */
+    private var currentUnresolvedBounds: Map<String, List<GenericBound>> = emptyMap()
+
     private fun JsonElement?.safeString(): String? {
         if (this == null || this.isJsonNull) return null
         if (!this.isJsonPrimitive) return null
@@ -49,6 +56,19 @@ class RustdocJsonParser {
         val rustType: String? = null,
         /** Rust expression suffix to apply in bridge code for `impl Trait` return types (e.g. `.collect::<Vec<_>>()`). */
         val implTraitConversion: String? = null,
+    )
+
+    /**
+     * Result of resolving generic type parameters, including both resolved types
+     * (for built-in traits like Fn, AsRef) and unresolved bounds (for user-defined traits
+     * that require monomorphisation via traitImpls).
+     */
+    private data class GenericResolution(
+        /** Maps generic param name -> resolved type (for Fn, AsRef, Into, etc.) */
+        val resolvedTypes: Map<String, ResolvedType>,
+        /** Maps generic param name -> trait bounds that could not be resolved to a concrete type.
+         *  These require monomorphisation using traitImpls. */
+        val unresolvedBounds: Map<String, List<GenericBound>>,
     )
 
     fun parse(
@@ -187,12 +207,12 @@ class RustdocJsonParser {
                     val fn = methodInner.getAsJsonObject("function")
                     val sig = fn.getAsJsonObject("sig")
                     val inputs = sig.getAsJsonArray("inputs")
-                    val genericTypes = resolveGenericMappings(fn.getAsJsonObject("generics"), knownStructs, knownEnums, emptyMap(), selfType)
-                    if (hasUnsupportedGenerics(fn.getAsJsonObject("generics"), genericTypes)) {
+                    val genericResolution = resolveGenericMappings(fn.getAsJsonObject("generics"), knownStructs, knownEnums, emptyMap(), selfType)
+                    if (hasUnsupportedGenerics(fn.getAsJsonObject("generics"), genericResolution)) {
                         onUnsupported("Skipped constructor '${methodName}' for ${typeDisplayName(selfType)}: unsupported generic signature")
                         continue
                     }
-                    val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, emptyMap(), genericTypes, selfType)
+                    val returnType = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, emptyMap(), genericResolution.resolvedTypes, selfType)
                     val isConstructor = methodName == "new" && !hasSelfParam(inputs) && returnType?.type == selfType
 
                     when {
@@ -209,6 +229,17 @@ class RustdocJsonParser {
                 }
             }
         }
+
+        val traitToImplTypes = mutableMapOf<String, MutableList<KneType.OBJECT>>()
+        for ((typeId, traitNames) in structTraitImpls) {
+            val structName = knownStructs[typeId] ?: continue
+            val implementingType = KneType.OBJECT("$crateName.$structName", structName)
+            for (traitName in traitNames) {
+                val fqTraitName = "$crateName.$traitName"
+                traitToImplTypes.getOrPut(fqTraitName) { mutableListOf() }.add(implementingType)
+            }
+        }
+        traitImpls = traitToImplTypes
 
         val knownDataClasses = mutableMapOf<Int, KneDataClass>()
         for ((id, name) in knownStructs) {
@@ -243,7 +274,7 @@ class RustdocJsonParser {
                 onUnsupported = { onUnsupported("Class '$name': $it") },
             )
 
-            val allMethods = (implMethods[id] ?: emptyList()).mapNotNull { entry ->
+            val allMethods = (implMethods[id] ?: emptyList()).flatMap { entry ->
                 buildMethod(
                     methodItem = entry.item,
                     knownStructs = knownStructs,
@@ -253,10 +284,10 @@ class RustdocJsonParser {
                     docs = entry.docs,
                     ownerType = selfType,
                     onUnsupported = { onUnsupported("Class '${name}': $it") },
-                )?.let { if (entry.isOverride) it.copy(isOverride = true) else it }
+                ).map { if (entry.isOverride) it.copy(isOverride = true) else it }
             }
 
-            val companionMethods = (implCompanionMethods[id] ?: emptyList()).mapNotNull { methodItem ->
+            val companionMethods = (implCompanionMethods[id] ?: emptyList()).flatMap { methodItem ->
                 buildMethod(
                     methodItem = methodItem,
                     knownStructs = knownStructs,
@@ -352,7 +383,7 @@ class RustdocJsonParser {
                 docs = item.get("docs").safeString(),
                 ownerType = null,
                 onUnsupported = { onUnsupported("Top-level function '$name': $it") },
-            )?.let(topLevelFunctions::add)
+            ).let(topLevelFunctions::addAll)
         }
 
         val interfaces = mutableListOf<KneInterface>()
@@ -361,10 +392,10 @@ class RustdocJsonParser {
             val traitInner = traitItem.getAsJsonObject("inner")?.getAsJsonObject("trait") ?: continue
             val traitItems = traitInner.getAsJsonArray("items") ?: continue
             val selfType = KneType.INTERFACE("$crateName.$traitName", traitName)
-            val traitMethods = traitItems.mapNotNull { methodId ->
-                val methodItem = index.get(methodId.asInt.toString())?.asJsonObject ?: return@mapNotNull null
-                val methodInner = methodItem.getAsJsonObject("inner") ?: return@mapNotNull null
-                if (!methodInner.has("function")) return@mapNotNull null
+            val traitMethods = traitItems.flatMap { methodId ->
+                val methodItem = index.get(methodId.asInt.toString())?.asJsonObject ?: return@flatMap emptyList()
+                val methodInner = methodItem.getAsJsonObject("inner") ?: return@flatMap emptyList()
+                if (!methodInner.has("function")) return@flatMap emptyList()
                 val sig = methodInner.getAsJsonObject("function").getAsJsonObject("sig")
                 buildMethod(
                     methodItem = methodItem,
@@ -493,6 +524,7 @@ class RustdocJsonParser {
             enums = enums,
             sealedEnums = renamedSealedEnums,
             functions = renamedTopLevelFunctions,
+            traitImpls = traitToImplTypes,
         )
     }
 
@@ -580,9 +612,10 @@ class RustdocJsonParser {
         knownEnums: Map<Int, String>,
         knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
         selfType: KneType? = null,
-    ): Map<String, ResolvedType> {
-        if (generics == null) return emptyMap()
+    ): GenericResolution {
+        if (generics == null) return GenericResolution(emptyMap(), emptyMap())
         val resolved = mutableMapOf<String, ResolvedType>()
+        val unresolvedBounds = mutableMapOf<String, MutableList<GenericBound>>()
 
         val params = generics.getAsJsonArray("params") ?: JsonArray()
         for (param in params) {
@@ -591,8 +624,12 @@ class RustdocJsonParser {
             val kind = paramObj.getAsJsonObject("kind") ?: continue
             if (kind.has("lifetime")) continue
             val typeKind = kind.getAsJsonObject("type") ?: continue
-            resolveGenericMappingFromBounds(typeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)?.let {
-                resolved[name] = it
+            val result = resolveGenericMappingFromBoundsWithTracking(typeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)
+            if (result.resolvedType != null) {
+                resolved[name] = result.resolvedType
+            }
+            if (result.unresolvedBounds.isNotEmpty()) {
+                unresolvedBounds.getOrPut(name) { mutableListOf() }.addAll(result.unresolvedBounds)
             }
         }
 
@@ -604,13 +641,22 @@ class RustdocJsonParser {
             val name = target.get("generic").asString
             if (name in resolved) continue
             val pseudoTypeKind = JsonObject().apply { add("bounds", boundPredicate.getAsJsonArray("bounds") ?: JsonArray()) }
-            resolveGenericMappingFromBounds(pseudoTypeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)?.let {
-                resolved[name] = it
+            val result = resolveGenericMappingFromBoundsWithTracking(pseudoTypeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)
+            if (result.resolvedType != null) {
+                resolved[name] = result.resolvedType
+            }
+            if (result.unresolvedBounds.isNotEmpty()) {
+                unresolvedBounds.getOrPut(name) { mutableListOf() }.addAll(result.unresolvedBounds)
             }
         }
 
-        return resolved
+        return GenericResolution(resolved, unresolvedBounds)
     }
+
+    private data class BoundResolution(
+        val resolvedType: ResolvedType?,
+        val unresolvedBounds: List<GenericBound>,
+    )
 
     private fun resolveGenericMappingFromBounds(
         typeKind: JsonObject,
@@ -619,8 +665,18 @@ class RustdocJsonParser {
         knownDataClasses: Map<Int, KneDataClass>,
         genericTypes: Map<String, ResolvedType>,
         selfType: KneType?,
-    ): ResolvedType? {
-        val bounds = typeKind.getAsJsonArray("bounds") ?: return null
+    ): ResolvedType? = resolveGenericMappingFromBoundsWithTracking(typeKind, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType).resolvedType
+
+    private fun resolveGenericMappingFromBoundsWithTracking(
+        typeKind: JsonObject,
+        knownStructs: Map<Int, String>,
+        knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass>,
+        genericTypes: Map<String, ResolvedType>,
+        selfType: KneType?,
+    ): BoundResolution {
+        val bounds = typeKind.getAsJsonArray("bounds") ?: return BoundResolution(null, emptyList())
+        val unresolvedBounds = mutableListOf<GenericBound>()
         for (bound in bounds) {
             val boundObj = bound.asJsonObject
             val traitBound = boundObj.getAsJsonObject("trait_bound") ?: continue
@@ -635,11 +691,14 @@ class RustdocJsonParser {
                     val paramTypes = inputs.mapNotNull {
                         resolveTypeWithBorrow(it, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)?.type
                     }
-                    if (paramTypes.size != inputs.size()) return null
+                    if (paramTypes.size != inputs.size()) continue
                     val outputResolved = resolveTypeWithBorrow(parenthesized.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
-                    return ResolvedType(
-                        type = KneType.FUNCTION(paramTypes, outputResolved?.type ?: KneType.UNIT),
-                        rustType = traitPath,
+                    return BoundResolution(
+                        ResolvedType(
+                            type = KneType.FUNCTION(paramTypes, outputResolved?.type ?: KneType.UNIT),
+                            rustType = traitPath,
+                        ),
+                        emptyList(),
                     )
                 }
 
@@ -648,17 +707,25 @@ class RustdocJsonParser {
                     val targetSegment = lastPathSegment(target.rustType ?: renderRustType(target.type))
                     if (traitPath == "AsRef" && (targetSegment == "str" || targetSegment == "Path" || targetSegment == "PathBuf")) {
                         val rustTarget = if (targetSegment == "Path" || targetSegment == "PathBuf") "Path" else "str"
-                        return ResolvedType(type = KneType.STRING, rustType = "AsRef<$rustTarget>")
+                        return BoundResolution(ResolvedType(type = KneType.STRING, rustType = "AsRef<$rustTarget>"), emptyList())
                     }
-                    return target.copy(rustType = "$traitPath<${target.rustType ?: renderRustType(target.type)}>")
+                    return BoundResolution(target.copy(rustType = "$traitPath<${target.rustType ?: renderRustType(target.type)}>"), emptyList())
+                }
+
+                else -> {
+                    val traitFullPath = trait.get("path")?.asString ?: continue
+                    val fqTraitName = traitFullPath.replace("::", ".")
+                    unresolvedBounds.add(GenericBound(fqTraitName, traitPath))
                 }
             }
         }
-        return null
+        return if (unresolvedBounds.isNotEmpty()) BoundResolution(null, unresolvedBounds) else BoundResolution(null, emptyList())
     }
 
-    private fun hasUnsupportedGenerics(generics: JsonObject?, resolvedGenerics: Map<String, ResolvedType>): Boolean {
+    private fun hasUnsupportedGenerics(generics: JsonObject?, genericResolution: GenericResolution): Boolean {
         if (generics == null) return false
+        val resolved = genericResolution.resolvedTypes
+        val unresolved = genericResolution.unresolvedBounds
         val params = generics.getAsJsonArray("params") ?: return false
         for (param in params) {
             val paramObj = param.asJsonObject
@@ -666,7 +733,7 @@ class RustdocJsonParser {
             val kind = paramObj.getAsJsonObject("kind") ?: continue
             when {
                 kind.has("lifetime") -> continue
-                kind.has("type") -> if (name !in resolvedGenerics) return true
+                kind.has("type") -> if (name !in resolved && name !in unresolved) return true
                 else -> return true
             }
         }
@@ -722,7 +789,7 @@ class RustdocJsonParser {
                 knownStructs = knownStructs,
                 knownEnums = knownEnums,
                 knownDataClasses = knownDataClasses,
-                genericTypes = generics,
+                genericTypes = generics.resolvedTypes,
                 selfType = selfType,
                 context = "constructor ${selfType.simpleName}",
                 onUnsupported = onUnsupported,
@@ -763,15 +830,16 @@ class RustdocJsonParser {
         docs: String? = null,
         ownerType: KneType? = null,
         onUnsupported: (String) -> Unit = {},
-    ): KneFunction? {
-        val name = methodItem.get("name").safeString() ?: return null
-        val inner = methodItem.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return null
-        val genericTypes = resolveGenericMappings(inner.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, ownerType)
-        if (hasUnsupportedGenerics(inner.getAsJsonObject("generics"), genericTypes)) {
+    ): List<KneFunction> {
+        val name = methodItem.get("name").safeString() ?: return emptyList()
+        val inner = methodItem.getAsJsonObject("inner")?.getAsJsonObject("function") ?: return emptyList()
+        val genericResolution = resolveGenericMappings(inner.getAsJsonObject("generics"), knownStructs, knownEnums, knownDataClasses, ownerType)
+        if (hasUnsupportedGenerics(inner.getAsJsonObject("generics"), genericResolution)) {
             onUnsupported("Skipped method '$name': unsupported generic signature")
-            return null
+            return emptyList()
         }
 
+        currentUnresolvedBounds = genericResolution.unresolvedBounds
         val sig = inner.getAsJsonObject("sig")
         val inputs = sig.getAsJsonArray("inputs")
         val params = buildParams(
@@ -779,27 +847,30 @@ class RustdocJsonParser {
             knownStructs = knownStructs,
             knownEnums = knownEnums,
             knownDataClasses = knownDataClasses,
-            genericTypes = genericTypes,
+            genericTypes = genericResolution.resolvedTypes,
             selfType = ownerType,
             skipSelf = hasSelfParam(inputs),
             context = "method '$name'",
             onUnsupported = onUnsupported,
         ) ?: run {
+            currentUnresolvedBounds = emptyMap()
             onUnsupported("Skipped method '$name': unsupported parameter type")
-            return null
+            return emptyList()
         }
         val returnResolved = resolveReturnTypeOrUnit(
             output = sig.get("output"),
             knownStructs = knownStructs,
             knownEnums = knownEnums,
             knownDataClasses = knownDataClasses,
-            genericTypes = genericTypes,
+            genericTypes = genericResolution.resolvedTypes,
             selfType = ownerType,
         )
         if (returnResolved == null) {
+            currentUnresolvedBounds = emptyMap()
             onUnsupported("Skipped method '$name': unsupported return type")
-            return null
+            return emptyList()
         }
+        currentUnresolvedBounds = emptyMap()
         val returnType = returnResolved.type
 
         val isSuspend = docs?.contains("@kne:suspend") == true
@@ -820,6 +891,16 @@ class RustdocJsonParser {
             returnType
         }
 
+        val genericParams = genericResolution.unresolvedBounds.map { (paramName, bounds) ->
+            val concreteTypes = if (bounds.size == 1) {
+                lookupTraitImpls(bounds[0].traitFqName)
+            } else {
+                bounds.map { bound -> lookupTraitImpls(bound.traitFqName).toSet() }
+                    .reduceOrNull { acc, types -> acc.intersect(types) }?.toList() ?: emptyList()
+            }
+            GenericParamInfo(paramName, bounds, concreteTypes)
+        }
+
         return KneFunction(
             name = name,
             params = params,
@@ -832,8 +913,93 @@ class RustdocJsonParser {
             returnRustType = returnResolved.rustType,
             isUnsafe = inner.getAsJsonObject("header")?.get("is_unsafe")?.asBoolean == true,
             returnConversion = returnResolved.implTraitConversion,
+            genericParams = genericParams,
+        ).let { method ->
+            expandMethodWithGenerics(method, genericParams)
+        }
+    }
+
+    /** Looks up trait implementors, trying both the raw fqName and the crate-prefixed form. */
+    private fun lookupTraitImpls(traitFqName: String): List<KneType.OBJECT> {
+        traitImpls[traitFqName]?.let { return it }
+        // Rustdoc may emit bare trait names (e.g. "ValueTransformer") while the registry
+        // uses crate-prefixed keys (e.g. "rustcalc.ValueTransformer"). Try prefixing.
+        val prefixed = "$currentCrateName.$traitFqName"
+        traitImpls[prefixed]?.let { return it }
+        return emptyList()
+    }
+
+    private fun expandMethodWithGenerics(method: KneFunction, genericParams: List<GenericParamInfo>): List<KneFunction> {
+        if (genericParams.isEmpty()) return listOf(method)
+        val unresolvedToConcrete = genericParams.associate { gp ->
+            "__unresolved_generic__${gp.paramName}" to gp.concreteTypes
+        }
+        val firstGenericParam = unresolvedToConcrete.keys.firstOrNull() ?: return listOf(method)
+        val concreteTypes = unresolvedToConcrete[firstGenericParam] ?: return listOf(method)
+        if (concreteTypes.isEmpty()) return listOf(method)
+        val restGenericParams = genericParams.drop(1)
+        return concreteTypes.flatMap { concreteType ->
+            val substitutedMethod = substituteUnresolvedGeneric(method, firstGenericParam.removePrefix("__unresolved_generic__"), concreteType)
+            if (restGenericParams.isEmpty()) {
+                listOf(substitutedMethod)
+            } else {
+                expandMethodWithGenerics(substitutedMethod, restGenericParams)
+            }
+        }
+    }
+
+    private fun substituteUnresolvedGeneric(method: KneFunction, paramName: String, concreteType: KneType.OBJECT): KneFunction {
+        val concreteRustName = concreteType.simpleName
+        fun substituteType(type: KneType): KneType = when (type) {
+            is KneType.OBJECT -> {
+                if (type.fqName == "__unresolved_generic__$paramName") concreteType
+                else type
+            }
+            is KneType.NULLABLE -> type.copy(inner = substituteType(type.inner))
+            is KneType.FUNCTION -> type.copy(
+                paramTypes = type.paramTypes.map(::substituteType),
+                returnType = substituteType(type.returnType),
+            )
+            is KneType.DATA_CLASS -> type.copy(fields = type.fields.map { it.copy(type = substituteType(it.type)) })
+            is KneType.LIST -> type.copy(elementType = substituteType(type.elementType))
+            is KneType.SET -> type.copy(elementType = substituteType(type.elementType))
+            is KneType.MAP -> type.copy(keyType = substituteType(type.keyType), valueType = substituteType(type.valueType))
+            is KneType.FLOW -> type.copy(elementType = substituteType(type.elementType))
+            is KneType.TUPLE -> type.copy(elementTypes = type.elementTypes.map(::substituteType))
+            else -> type
+        }
+        fun substituteParam(param: KneParam): KneParam {
+            val newType = substituteType(param.type)
+            // Replace generic param name in rustType, handling borrowed forms like "&T", "&mut T"
+            val newRustType = param.rustType?.replace(Regex("\\b${Regex.escape(paramName)}\\b"), concreteRustName)
+            return param.copy(type = newType, rustType = newRustType)
+        }
+        // Suffix method name with snake_case concrete type to avoid collisions
+        val suffix = "_${toSnakeCase(concreteRustName)}"
+        val originalName = method.rustMethodName ?: method.name
+        // Build turbofish: append concrete type to existing turbofish or start new one
+        val existingTurbofish = method.turbofish
+        val newTurbofish = if (existingTurbofish != null) {
+            existingTurbofish.removeSuffix(">") + ", $concreteRustName>"
+        } else {
+            "::<$concreteRustName>"
+        }
+        return method.copy(
+            name = method.name + suffix,
+            params = method.params.map(::substituteParam),
+            returnType = substituteType(method.returnType),
+            returnRustType = method.returnRustType?.replace(Regex("\\b${Regex.escape(paramName)}\\b"), concreteRustName),
+            receiverType = method.receiverType?.let(::substituteType),
+            genericParams = emptyList(),
+            rustMethodName = originalName,
+            turbofish = newTurbofish,
         )
     }
+
+    private fun toSnakeCase(name: String): String =
+        name.replace(Regex("([a-z])([A-Z])"), "$1_$2")
+            .replace(Regex("([A-Z]+)([A-Z][a-z])"), "$1_$2")
+            .lowercase()
 
     private fun buildParams(
         inputs: JsonArray,
@@ -1142,7 +1308,16 @@ class RustdocJsonParser {
             if (name == "Self" && selfType != null) {
                 return ResolvedType(selfType, rustType = renderRustType(selfType))
             }
-            return genericTypes[name]
+            if (name in genericTypes) {
+                return genericTypes[name]
+            }
+            if (name in currentUnresolvedBounds) {
+                return ResolvedType(
+                    type = KneType.OBJECT("__unresolved_generic__$name", name),
+                    rustType = name,
+                )
+            }
+            return null
         }
 
         return null
