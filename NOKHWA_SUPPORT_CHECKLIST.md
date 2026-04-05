@@ -74,11 +74,16 @@ NNA must infer everything from the rustdoc JSON.
 
 > **Necessaire** — `Buffer::buffer()` retourne `&[u8]`, pas `Vec<u8>`.
 
-- [ ] **Mapping `&[u8]` -> `ByteArray`** — aujourd'hui `Vec<u8>` est mappe en
+- [x] **Mapping `&[u8]` -> `ByteArray`** — aujourd'hui `Vec<u8>` est mappe en
       `BYTE_ARRAY`, mais `&[u8]` (borrowed slice) n'est probablement pas reconnu
       par le parser ; ajouter la detection du pattern slice dans rustdoc JSON
-- [ ] **Bridge copie** — le bridge doit copier le slice dans un buffer alloue
+      ✓ Already supported: parser resolves borrowed_ref → slice → BYTE_ARRAY
+        with isBorrowed=true. No code change needed in parser.
+- [x] **Bridge copie** — le bridge doit copier le slice dans un buffer alloue
       cote JVM (le borrow ne peut pas survivre au-dela de l'appel FFI)
+      ✓ Already supported: bridge uses copy_nonoverlapping inside catch_unwind
+        where the borrow is still valid. Verified with label_bytes() -> &[u8]
+        (7 tests: empty, unicode, 10K bytes, load 100K, concurrency 10 threads)
 
 ## 5. `Result<T, E>` avec erreurs structurees
 

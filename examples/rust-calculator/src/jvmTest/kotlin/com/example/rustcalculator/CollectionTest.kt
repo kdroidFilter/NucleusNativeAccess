@@ -220,6 +220,78 @@ class CollectionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Borrowed slice return (&[u8] -> ByteArray)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `label_bytes returns borrowed slice as ByteArray`() {
+        Calculator(0).use { calc ->
+            calc.label = "hello"
+            val bytes = calc.label_bytes()
+            assertEquals("hello", String(bytes))
+        }
+    }
+
+    @Test fun `label_bytes with empty label`() {
+        Calculator(0).use { calc ->
+            val bytes = calc.label_bytes()
+            assertTrue(bytes.isEmpty())
+        }
+    }
+
+    @Test fun `label_bytes with unicode`() {
+        Calculator(0).use { calc ->
+            calc.label = "日本語 🎉"
+            val bytes = calc.label_bytes()
+            assertEquals("日本語 🎉", String(bytes, Charsets.UTF_8))
+        }
+    }
+
+    @Test fun `label_bytes with long string`() {
+        Calculator(0).use { calc ->
+            val longLabel = "x".repeat(10_000)
+            calc.label = longLabel
+            val bytes = calc.label_bytes()
+            assertEquals(10_000, bytes.size)
+            assertEquals(longLabel, String(bytes))
+        }
+    }
+
+    @Test fun `label_bytes reflects latest label`() {
+        Calculator(0).use { calc ->
+            calc.label = "first"
+            assertEquals("first", String(calc.label_bytes()))
+            calc.label = "second"
+            assertEquals("second", String(calc.label_bytes()))
+        }
+    }
+
+    @Test fun `load - 100K label_bytes calls`() {
+        Calculator(0).use { calc ->
+            calc.label = "test"
+            repeat(100_000) {
+                val bytes = calc.label_bytes()
+                assertEquals(4, bytes.size)
+            }
+        }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K label_bytes`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    calc.label = "t$tid"
+                    repeat(10_000) {
+                        val bytes = calc.label_bytes()
+                        assertEquals("t$tid", String(bytes))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Top-level functions with collections
     // ═══════════════════════════════════════════════════════════════════════════
 

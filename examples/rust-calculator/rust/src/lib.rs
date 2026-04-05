@@ -466,6 +466,11 @@ impl Calculator {
         data.iter().rev().copied().collect()
     }
 
+    /// Returns the label as a borrowed byte slice (&[u8]).
+    pub fn label_bytes(&self) -> &[u8] {
+        self.label.as_bytes()
+    }
+
     // ── Collection support ──────────────────────────────────────────────
 
     pub fn get_recent_scores(&self) -> Vec<i32> {
