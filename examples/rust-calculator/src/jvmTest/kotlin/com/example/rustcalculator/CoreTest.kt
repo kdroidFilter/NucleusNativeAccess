@@ -187,6 +187,41 @@ class CoreTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // &mut self + Result combination (try_divide_result)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `try_divide_result succeeds and mutates`() {
+        Calculator(10).use { calc ->
+            assertEquals(5, calc.try_divide_result(2))
+            assertEquals(5, calc.current)
+        }
+    }
+
+    @Test fun `try_divide_result by zero throws`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.try_divide_result(0) }
+            assertEquals(10, calc.current)
+        }
+    }
+
+    @Test fun `try_divide_result recovers after error`() {
+        Calculator(10).use { calc ->
+            assertFailsWith<KotlinNativeException> { calc.try_divide_result(0) }
+            assertEquals(5, calc.try_divide_result(2))
+            assertEquals(5, calc.current)
+        }
+    }
+
+    @Test fun `load - 100K try_divide_result calls`() {
+        Calculator(1_000_000).use { calc ->
+            repeat(100_000) {
+                calc.try_divide_result(1)
+            }
+            assertEquals(1_000_000, calc.current)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Mutable properties (var)
     // ═══════════════════════════════════════════════════════════════════════════
 

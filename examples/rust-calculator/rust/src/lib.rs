@@ -151,6 +151,16 @@ impl Calculator {
         self.accumulator
     }
 
+    /// Divides accumulator, returning Result. Tests &mut self + Result combination.
+    pub fn try_divide_result(&mut self, divisor: i32) -> Result<i32, String> {
+        if divisor == 0 {
+            Err("Division by zero".to_string())
+        } else {
+            self.accumulator /= divisor;
+            Ok(self.accumulator)
+        }
+    }
+
     pub fn fail_always(&self) -> String {
         panic!("Intentional error for testing");
     }

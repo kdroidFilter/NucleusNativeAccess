@@ -11,7 +11,7 @@ class DataClassTest {
 
     @Test fun `get_point returns correct values`() {
         Calculator(5).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             assertEquals(5, p.x)
             assertEquals(10, p.y)
         }
@@ -19,7 +19,7 @@ class DataClassTest {
 
     @Test fun `get_point with zero`() {
         Calculator(0).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             assertEquals(0, p.x)
             assertEquals(0, p.y)
         }
@@ -27,7 +27,7 @@ class DataClassTest {
 
     @Test fun `get_point with negative`() {
         Calculator(-3).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             assertEquals(-3, p.x)
             assertEquals(-6, p.y)
         }
@@ -50,7 +50,7 @@ class DataClassTest {
 
     @Test fun `get_point then add_point roundtrip`() {
         Calculator(5).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             calc.add_point(p) // adds 5 + 10 = 15
             assertEquals(20, calc.current) // 5 + 15
         }
@@ -62,7 +62,7 @@ class DataClassTest {
 
     @Test fun `get_named_value default label`() {
         Calculator(5).use { calc ->
-            val nv = calc.get_named_value()
+            val nv = calc.named_value
             assertEquals("default", nv.name)
             assertEquals(5, nv.value)
         }
@@ -71,7 +71,7 @@ class DataClassTest {
     @Test fun `get_named_value custom label`() {
         Calculator(5).use { calc ->
             calc.label = "myCalc"
-            val nv = calc.get_named_value()
+            val nv = calc.named_value
             assertEquals("myCalc", nv.name)
             assertEquals(5, nv.value)
         }
@@ -89,7 +89,7 @@ class DataClassTest {
         Calculator(0).use { calc ->
             val nv = NamedValue("test", 99)
             calc.set_from_named(nv)
-            val got = calc.get_named_value()
+            val got = calc.named_value
             assertEquals("test", got.name)
             assertEquals(99, got.value)
         }
@@ -101,14 +101,14 @@ class DataClassTest {
 
     @Test fun `edge dc - Point with MAX_VALUE`() {
         Calculator(Int.MAX_VALUE).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             assertEquals(Int.MAX_VALUE, p.x)
         }
     }
 
     @Test fun `edge dc - Point with MIN_VALUE`() {
         Calculator(Int.MIN_VALUE).use { calc ->
-            val p = calc.get_point()
+            val p = calc.point
             assertEquals(Int.MIN_VALUE, p.x)
         }
     }
@@ -123,7 +123,7 @@ class DataClassTest {
     @Test fun `edge dc - NamedValue with unicode name`() {
         Calculator(0).use { calc ->
             calc.set_from_named(NamedValue("日本語テスト 🚀", 7))
-            val got = calc.get_named_value()
+            val got = calc.named_value
             assertEquals("日本語テスト 🚀", got.name)
             assertEquals(7, got.value)
         }
@@ -132,7 +132,7 @@ class DataClassTest {
     @Test fun `edge dc - NamedValue with empty name`() {
         Calculator(0).use { calc ->
             calc.set_from_named(NamedValue("", 0))
-            val got = calc.get_named_value()
+            val got = calc.named_value
             // empty label returns "default"
             assertEquals("default", got.name)
             assertEquals(0, got.value)
@@ -142,7 +142,7 @@ class DataClassTest {
     @Test fun `edge dc - lifecycle create use close`() {
         repeat(50) { i ->
             Calculator(i).use { calc ->
-                val p = calc.get_point()
+                val p = calc.point
                 assertEquals(i, p.x)
             }
         }
@@ -155,7 +155,7 @@ class DataClassTest {
     @Test fun `load - 100K get_point calls`() {
         Calculator(7).use { calc ->
             repeat(100_000) {
-                val p = calc.get_point()
+                val p = calc.point
                 assertEquals(7, p.x)
                 assertEquals(14, p.y)
             }
@@ -175,7 +175,7 @@ class DataClassTest {
         Calculator(1).use { calc ->
             calc.label = "load"
             repeat(100_000) {
-                val nv = calc.get_named_value()
+                val nv = calc.named_value
                 assertEquals("load", nv.name)
             }
         }
@@ -190,7 +190,7 @@ class DataClassTest {
             Thread {
                 Calculator(tid).use { calc ->
                     repeat(10_000) {
-                        val p = calc.get_point()
+                        val p = calc.point
                         assertEquals(tid, p.x)
                         assertEquals(tid * 2, p.y)
                     }

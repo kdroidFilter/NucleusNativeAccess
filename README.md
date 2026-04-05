@@ -238,6 +238,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | **Enums** | Struct variants (`Variant { field: T, ... }`) | **Fully supported**: constructors with named params, named field getters. Supports String, primitive, Bool, and enum-typed fields | &mdash; |
 | **Enums** | Enum-typed fields inside sealed variants | **Fully supported**: enum fields pass as ordinal (i32), getter reads via ptr-cast. Factory methods accept Kotlin enum values | &mdash; |
 | **Types** | Cross-crate re-exported types | **Lazy resolution**: types from sub-crates (e.g. `nokhwa_core::Resolution`) are auto-discovered from rustdoc JSON index as data classes, enums, or opaque classes | &mdash; |
+| **Properties** | Getters returning data classes as properties | `get_point() -> Point` extracted as `val point: Point` with per-field out-params in the Rust bridge | &mdash; |
 | **Constructors** | Generic constructors (`fn new<T: Trait>(...)`) on standalone structs | Skipped if generics can't be resolved | Use concrete types or non-generic factory methods |
 | **Mutability** | Interior mutability (`Cell`, `RefCell`, `Mutex`) | No special handling; may cause UB if misused | &mdash; |
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |

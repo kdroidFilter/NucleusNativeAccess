@@ -479,18 +479,31 @@ class RustBridgeGenerator {
         }
 
         val needsBuf = needsOutputBuffer(prop.type)
+        val returnDc = extractReturnDataClass(prop.type)
 
         // Getter bridge
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn ${sym}_get_${prop.name}(handle: i64")
         if (needsBuf) append(", out_buf: *mut u8, out_buf_len: i32")
+        if (returnDc != null) {
+            for (field in returnDc.fields) {
+                when (field.type) {
+                    KneType.STRING -> append(", out_${field.name}: *mut u8, out_${field.name}_len: i32")
+                    else -> append(", out_${field.name}: *mut ${rustCType(field.type)}")
+                }
+            }
+        }
         appendLine(") -> ${rustCReturnType(prop.type)} {")
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
         appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
         appendValueReturnHandling("obj.get_${prop.name}()", prop.type)
         appendLine("    })) {")
-        appendLine("        Ok(v) => v,")
+        if (returnDc != null) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
         appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(prop.type)} }")
         appendLine("    }")
         appendLine("}")

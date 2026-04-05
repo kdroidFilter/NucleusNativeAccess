@@ -101,20 +101,31 @@ NNA must infer everything from the rustdoc JSON.
 
 > **Mineur** — `Camera` expose `index()`, `backend()`, `info()`, `resolution()`.
 
-- [ ] **Getters retournant un enum** — `camera.backend() -> ApiBackend` :
+- [x] **Getters retournant un enum** — `camera.backend() -> ApiBackend` :
       verifier que le pattern getter (`fn backend(&self) -> ApiBackend`)
       est detecte comme propriete et non comme methode
-- [ ] **Getters retournant un struct/data class** — `camera.resolution() -> Resolution` :
+      ✓ Already supported: ENUM was in isSimplePropertyType. Verified with
+        cross-crate test (get_format → val format: FrameFormat property).
+- [x] **Getters retournant un struct/data class** — `camera.resolution() -> Resolution` :
       verifier que le retour d'un data class par valeur fonctionne via getter
+      ✓ Fix: added DATA_CLASS to isSimplePropertyType + added out-params to
+        appendPropertyBridges for data class returns. get_point() → val point: Point,
+        get_named_value() → val named_value: NamedValue. All tests pass.
 
 ## 7. Methodes `&mut self`
 
 > **Deja supporte** en theorie, mais a valider pour le volume de nokhwa.
 
-- [ ] **Verifier la generation `&mut self`** pour les methodes comme
+- [x] **Verifier la generation `&mut self`** pour les methodes comme
       `open_stream()`, `stop_stream()`, `set_resolution()`, `set_frame_rate()`
-- [ ] **Methodes avec `Result` retour + `&mut self`** — `frame(&mut self) -> Result<Buffer, NokhwaError>`
+      ✓ Already fully supported: classifyReceiverKind detects &mut self →
+        BORROWED_MUT, bridge generates `&mut *(handle as *mut T)`. Validated
+        with existing add/subtract/multiply/divide tests (all &mut self).
+- [x] **Methodes avec `Result` retour + `&mut self`** — `frame(&mut self) -> Result<Buffer, NokhwaError>`
       combine deux patterns, verifier que la composition fonctionne
+      ✓ Added try_divide_result(&mut self) -> Result<i32, String> to verify.
+        canFail and isMutating are independent flags. 4 tests including
+        success+mutation, error+no-mutation, recovery, and 100K load.
 
 ---
 
