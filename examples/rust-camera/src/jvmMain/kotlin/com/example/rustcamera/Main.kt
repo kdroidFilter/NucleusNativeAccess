@@ -74,17 +74,19 @@ fun CameraApp() {
                     val buf = withContext(Dispatchers.Default) {
                         cam.frame()
                     }
-                    val bytes = buf.buffer()
+                    // Decode raw frame to RGB using nokhwa's FormatDecoder
+                    val rgbBytes = ByteArray(w * h * 3)
+                    buf.decode_image_to_buffer_rgb_format(rgbBytes)
                     buf.close()
 
-                    if (bytes.isNotEmpty()) {
+                    if (rgbBytes.isNotEmpty()) {
                         val img = BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR)
                         val data = (img.raster.dataBuffer as DataBufferByte).data
-                        val pixelCount = minOf(bytes.size / 3, data.size / 3)
+                        val pixelCount = minOf(rgbBytes.size / 3, data.size / 3)
                         for (i in 0 until pixelCount) {
-                            data[i * 3] = bytes[i * 3 + 2]     // B
-                            data[i * 3 + 1] = bytes[i * 3 + 1] // G
-                            data[i * 3 + 2] = bytes[i * 3]     // R
+                            data[i * 3] = rgbBytes[i * 3 + 2]     // B
+                            data[i * 3 + 1] = rgbBytes[i * 3 + 1] // G
+                            data[i * 3 + 2] = rgbBytes[i * 3]     // R
                         }
                         frameBitmap = img
                         frameCount++
@@ -100,7 +102,7 @@ fun CameraApp() {
                     statusMessage = "Capture error: ${e.message}"
                     break
                 }
-                delay(1)
+                delay(16)
             }
         }
 

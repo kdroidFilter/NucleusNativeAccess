@@ -2520,6 +2520,7 @@ class FfmProxyGenerator {
             } else {
                 val invokeArgs = buildClassInvokeArgsExpanded(fn)
                 appendCallAndReturn("            ", fn.returnType, handleName, invokeArgs, fn.returnsBorrowed)
+                appendByteArrayCopyBack("            ", fn.params)
             }
             appendLine("        }")
         } else {
@@ -4135,10 +4136,7 @@ class FfmProxyGenerator {
 
     // ── Invoke arg builders ──────────────────────────────────────────────────
 
-    private fun buildReceiverInvokeArg(fn: KneFunction): String = when (fn.receiverKind) {
-        KneReceiverKind.OWNED -> "_consumeHandle()"
-        else -> "handle"
-    }
+    private fun buildReceiverInvokeArg(fn: KneFunction): String = "handle"
 
     private fun buildOwnedHandleArg(name: String, isBorrowed: Boolean): String =
         if (isBorrowed) "$name.handle" else "$name._consumeHandle()"
@@ -4235,6 +4233,16 @@ class FfmProxyGenerator {
     }
 
     // ── Code emission helpers ────────────────────────────────────────────────
+
+    /**
+     * Emits copy-back code for mutable ByteArray params (&mut [u8]).
+     * Must be called AFTER the native invoke, while the arena is still alive.
+     */
+    private fun StringBuilder.appendByteArrayCopyBack(indent: String, params: List<KneParam>) {
+        params.filter { it.type == KneType.BYTE_ARRAY && it.rustType?.startsWith("&mut ") == true }.forEach { p ->
+            appendLine("${indent}MemorySegment.copy(${p.name}Seg, JAVA_BYTE, 0, ${p.name}, 0, ${p.name}.size)")
+        }
+    }
 
     private fun StringBuilder.appendStringInvokeArgsAlloc(indent: String, params: List<KneParam>) {
         params.filter { it.type == KneType.STRING }.forEach { p ->
