@@ -172,4 +172,251 @@ class CallbackTest {
         threads.forEach { it.start() }
         threads.forEach { it.join() }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Callbacks returning sealed enum (CalcResult)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `cb sealed - map_to_result returns Value variant`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(42) { v -> CalcResult.value(v) }.use { result ->
+                assertTrue(result is CalcResult.Value)
+                assertEquals(42, (result as CalcResult.Value).value)
+            }
+        }
+    }
+
+    @Test fun `cb sealed - map_to_result returns Error variant`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(-1) { _ -> CalcResult.error("negative") }.use { result ->
+                assertTrue(result is CalcResult.Error)
+                assertEquals("negative", (result as CalcResult.Error).value)
+            }
+        }
+    }
+
+    @Test fun `cb sealed - map_to_result returns Partial variant`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(7) { v -> CalcResult.partial(v, 0.75) }.use { result ->
+                assertTrue(result is CalcResult.Partial)
+                val partial = result as CalcResult.Partial
+                assertEquals(7, partial.value)
+                assertEquals(0.75, partial.confidence, 0.001)
+            }
+        }
+    }
+
+    @Test fun `cb sealed - map_to_result returns Nothing variant`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(0) { _ -> CalcResult.nothing() }.use { result ->
+                assertTrue(result is CalcResult.Nothing)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Callbacks returning object (Calculator)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `cb obj - create_via_callback returns new Calculator`() {
+        Calculator(10).use { calc ->
+            calc.create_via_callback { initial -> Calculator(initial * 2) }.use { created ->
+                assertEquals(20, created.current)
+            }
+        }
+    }
+
+    @Test fun `cb obj - create_via_callback with zero`() {
+        Calculator(0).use { calc ->
+            calc.create_via_callback { initial -> Calculator(initial) }.use { created ->
+                assertEquals(0, created.current)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Callbacks taking object param (Calculator)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `cb obj param - apply_to_clone reads accumulator`() {
+        Calculator(42).use { calc ->
+            val result = calc.apply_to_clone { c ->
+                c.use { it.current }
+            }
+            assertEquals(42, result)
+        }
+    }
+
+    @Test fun `cb obj param - apply_to_clone with mutation`() {
+        Calculator(10).use { calc ->
+            val result = calc.apply_to_clone { c ->
+                c.use {
+                    it.add(5)
+                    it.current
+                }
+            }
+            assertEquals(15, result)
+            // Original calculator should not be affected
+            assertEquals(10, calc.current)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Callbacks taking sealed enum param (CalcResult)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `cb sealed param - format_result with Value`() {
+        Calculator(0).use { calc ->
+            CalcResult.value(99).use { input ->
+                val result = calc.format_result(input) { r ->
+                    r.use {
+                        when (it) {
+                            is CalcResult.Value -> "got ${it.value}"
+                            else -> "other"
+                        }
+                    }
+                }
+                assertEquals("got 99", result)
+            }
+        }
+    }
+
+    @Test fun `cb sealed param - format_result with Error`() {
+        Calculator(0).use { calc ->
+            CalcResult.error("boom").use { input ->
+                val result = calc.format_result(input) { r ->
+                    r.use {
+                        when (it) {
+                            is CalcResult.Error -> "err: ${it.value}"
+                            else -> "other"
+                        }
+                    }
+                }
+                assertEquals("err: boom", result)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge cases for handle-backed callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `edge cb sealed - map_to_result with MAX_VALUE`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(Int.MAX_VALUE) { v -> CalcResult.value(v) }.use { result ->
+                assertTrue(result is CalcResult.Value)
+                assertEquals(Int.MAX_VALUE, (result as CalcResult.Value).value)
+            }
+        }
+    }
+
+    @Test fun `edge cb sealed - map_to_result with MIN_VALUE`() {
+        Calculator(0).use { calc ->
+            calc.map_to_result(Int.MIN_VALUE) { v -> CalcResult.value(v) }.use { result ->
+                assertTrue(result is CalcResult.Value)
+                assertEquals(Int.MIN_VALUE, (result as CalcResult.Value).value)
+            }
+        }
+    }
+
+    @Test fun `edge cb sealed param - format_result with empty error string`() {
+        Calculator(0).use { calc ->
+            CalcResult.error("").use { input ->
+                val result = calc.format_result(input) { r ->
+                    r.use {
+                        when (it) {
+                            is CalcResult.Error -> "err:[${it.value}]"
+                            else -> "other"
+                        }
+                    }
+                }
+                assertEquals("err:[]", result)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Load tests for handle-backed callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `load - 1K map_to_result calls`() {
+        Calculator(0).use { calc ->
+            repeat(1_000) { i ->
+                calc.map_to_result(i) { v -> CalcResult.value(v) }.use { result ->
+                    assertTrue(result is CalcResult.Value)
+                }
+            }
+        }
+    }
+
+    @Test fun `load - 1K create_via_callback calls`() {
+        Calculator(1).use { calc ->
+            repeat(1_000) {
+                calc.create_via_callback { v -> Calculator(v) }.use { created ->
+                    assertEquals(1, created.current)
+                }
+            }
+        }
+    }
+
+    @Test fun `load - 1K apply_to_clone calls`() {
+        Calculator(5).use { calc ->
+            repeat(1_000) {
+                val result = calc.apply_to_clone { c -> c.use { it.current } }
+                assertEquals(5, result)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Concurrency tests for handle-backed callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `concurrent - 10 threads x 1K map_to_result`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(0).use { calc ->
+                    repeat(1_000) {
+                        calc.map_to_result(tid) { v -> CalcResult.value(v) }.use { result ->
+                            assertTrue(result is CalcResult.Value)
+                            assertEquals(tid, (result as CalcResult.Value).value)
+                        }
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 1K create_via_callback`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(1_000) {
+                        calc.create_via_callback { v -> Calculator(v) }.use { created ->
+                            assertEquals(tid, created.current)
+                        }
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 1K apply_to_clone`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(1_000) {
+                        val result = calc.apply_to_clone { c -> c.use { it.current } }
+                        assertEquals(tid, result)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }

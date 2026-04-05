@@ -110,6 +110,7 @@ class RustBridgeGenerator {
         KneType.BOOLEAN, KneType.BYTE, KneType.SHORT,
         KneType.STRING, KneType.UNIT, KneType.NEVER -> true
         is KneType.ENUM -> true
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> true
         else -> false
     }
 
@@ -2092,6 +2093,8 @@ class RustBridgeGenerator {
         KneType.FLOAT -> "item.to_bits() as i64"
         is KneType.ENUM -> "item as i64"
         is KneType.OBJECT -> "Box::into_raw(Box::new(item)) as i64"
+        is KneType.SEALED_ENUM -> "Box::into_raw(Box::new(item)) as i64"
+        is KneType.INTERFACE -> "{ let w: [usize; 2] = unsafe { std::mem::transmute(item) }; let h = KNE_NEXT_HANDLE.with(|h| { let v = *h.borrow(); *h.borrow_mut() = v + 1; v }); KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(h, w); }); h as i64 }"
         else -> "item as i64"
     }
 
@@ -2177,6 +2180,16 @@ class RustBridgeGenerator {
             is KneType.OBJECT -> {
                 appendLine("                let obj_handle = Box::into_raw(Box::new(value)) as i64;")
                 appendLine("                cont_fn(1, obj_handle);")
+            }
+            is KneType.SEALED_ENUM -> {
+                appendLine("                let obj_handle = Box::into_raw(Box::new(value)) as i64;")
+                appendLine("                cont_fn(1, obj_handle);")
+            }
+            is KneType.INTERFACE -> {
+                appendLine("                let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(value) };")
+                appendLine("                let handle = KNE_NEXT_HANDLE.with(|h| { let v = *h.borrow(); *h.borrow_mut() = v + 1; v });")
+                appendLine("                KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("                cont_fn(1, handle as i64);")
             }
             is KneType.ENUM -> appendLine("                cont_fn(1, (value as i32) as i64);")
             else -> appendLine("                cont_fn(1, value as i64);")
@@ -2556,15 +2569,17 @@ class RustBridgeGenerator {
      */
     private fun StringBuilder.appendFunctionParamConversion(p: KneParam, indent: String) {
         val fnType = p.type as KneType.FUNCTION
+        val hasHandleType = fnType.paramTypes.any { it.isHandleBackedType() } || fnType.returnType.isHandleBackedType()
         val needsConversion = fnType.paramTypes.any { it == KneType.BOOLEAN || it == KneType.STRING } ||
-            (fnType.returnType == KneType.BOOLEAN || fnType.returnType == KneType.STRING)
+            (fnType.returnType == KneType.BOOLEAN || fnType.returnType == KneType.STRING) ||
+            hasHandleType
 
         if (!needsConversion) {
             // Direct transmute to Rust fn pointer (safe for primitives on x86-64/aarch64)
             val nativeParams = fnType.paramTypes.joinToString(", ") { rustNativeType(it) }
             val nativeRet = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustNativeType(fnType.returnType)
             appendLine("${indent}let ${p.name}_fn: fn($nativeParams) -> $nativeRet = unsafe { std::mem::transmute(${p.name}) };")
-        } else {
+        } else if (!hasHandleType) {
             // Transmute to extern "C" fn, then wrap in closure for type conversion
             val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->
                 "_p$i: ${rustCType(t)}"
@@ -2582,6 +2597,133 @@ class RustBridgeGenerator {
             val callExpr = "${p.name}_c($callArgs)"
             val returnExpr = rustFromCRetConvert(callExpr, fnType.returnType)
             appendLine("${indent}let ${p.name}_fn = |$closureParams|$closureRetType { $returnExpr };")
+        } else {
+            // Multi-line closure for handle-backed types (OBJECT, INTERFACE, SEALED_ENUM)
+            val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->
+                "_p$i: ${rustCType(t)}"
+            }.joinToString(", ")
+            val cRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustCType(fnType.returnType)
+            appendLine("${indent}let ${p.name}_c: extern \"C\" fn($cParamTypes) -> $cRetType = unsafe { std::mem::transmute(${p.name}) };")
+
+            val closureParams = fnType.paramTypes.mapIndexed { i, t ->
+                "_cp$i: ${callbackNativeParamType(t)}"
+            }.joinToString(", ")
+            val closureRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "" else " -> ${callbackNativeReturnType(fnType.returnType)}"
+            appendLine("${indent}let ${p.name}_fn = move |$closureParams|$closureRetType {")
+
+            // Convert each param to C ABI handle
+            for ((i, t) in fnType.paramTypes.withIndex()) {
+                appendCallbackParamToHandle(i, t, "$indent    ")
+            }
+
+            // Build call args
+            val callArgs = fnType.paramTypes.mapIndexed { i, t ->
+                callbackHandleArgExpr(i, t)
+            }.joinToString(", ")
+
+            val retType = fnType.returnType
+            if (retType == KneType.UNIT || retType == KneType.NEVER) {
+                appendLine("$indent    ${p.name}_c($callArgs);")
+            } else {
+                appendLine("$indent    let _cb_result = ${p.name}_c($callArgs);")
+            }
+
+            // Cleanup temporary handles for borrowed params
+            for ((i, t) in fnType.paramTypes.withIndex()) {
+                appendCallbackParamCleanup(i, t, "$indent    ")
+            }
+
+            // Convert return value from C ABI
+            if (retType != KneType.UNIT && retType != KneType.NEVER) {
+                appendCallbackReturnFromHandle(retType, "$indent    ")
+            }
+
+            appendLine("$indent};")
+        }
+    }
+
+    /** Returns true if the type uses opaque i64 handles across the C ABI boundary. */
+    private fun KneType.isHandleBackedType(): Boolean = this is KneType.OBJECT || this is KneType.INTERFACE || this is KneType.SEALED_ENUM
+
+    /** Native Rust type for callback closure parameters. */
+    private fun callbackNativeParamType(type: KneType): String = when (type) {
+        is KneType.OBJECT -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        is KneType.INTERFACE -> "Box<dyn ${type.simpleName}>"
+        else -> rustNativeType(type)
+    }
+
+    /** Native Rust type for callback closure return values. */
+    private fun callbackNativeReturnType(type: KneType): String = when (type) {
+        is KneType.OBJECT -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        is KneType.INTERFACE -> "Box<dyn ${type.simpleName}>"
+        else -> rustNativeType(type)
+    }
+
+    /** Emit code to convert a callback param to a C ABI handle. */
+    private fun StringBuilder.appendCallbackParamToHandle(index: Int, type: KneType, indent: String) {
+        when (type) {
+            is KneType.OBJECT, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}let _h$index = Box::into_raw(Box::new(_cp$index)) as i64;")
+            }
+            is KneType.INTERFACE -> {
+                appendLine("${indent}let _h${index}_words: [usize; 2] = unsafe { std::mem::transmute(_cp$index) };")
+                appendLine("${indent}let _h$index = KNE_NEXT_HANDLE.with(|h| { let v = *h.borrow(); *h.borrow_mut() = v + 1; v });")
+                appendLine("${indent}KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(_h$index, _h${index}_words); });")
+            }
+            KneType.BOOLEAN -> appendLine("${indent}let _h$index = if _cp$index { 1i32 } else { 0i32 };")
+            KneType.STRING -> appendLine("${indent}let _h$index = std::ffi::CString::new(_cp$index).unwrap().into_raw();")
+            else -> {} // Primitives don't need conversion
+        }
+    }
+
+    /** The C ABI argument expression for a callback param. */
+    private fun callbackHandleArgExpr(index: Int, type: KneType): String = when (type) {
+        is KneType.OBJECT, is KneType.SEALED_ENUM -> "_h$index"
+        is KneType.INTERFACE -> "_h$index as i64"
+        KneType.BOOLEAN, KneType.STRING -> "_h$index"
+        else -> "_cp$index"
+    }
+
+    /** Emit cleanup code after callback returns (reclaim temporary handles). */
+    private fun StringBuilder.appendCallbackParamCleanup(index: Int, type: KneType, indent: String) {
+        when (type) {
+            is KneType.OBJECT -> {
+                appendLine("${indent}unsafe { let _ = Box::from_raw(_h$index as *mut ${type.simpleName}); }")
+            }
+            is KneType.SEALED_ENUM -> {
+                appendLine("${indent}unsafe { let _ = Box::from_raw(_h$index as *mut ${type.simpleName}); }")
+            }
+            is KneType.INTERFACE -> {
+                appendLine("${indent}KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().remove(&_h$index); });")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}unsafe { let _ = std::ffi::CString::from_raw(_h$index); }")
+            }
+            else -> {} // No cleanup needed
+        }
+    }
+
+    /** Emit code to convert a C ABI return value back to native Rust type. */
+    private fun StringBuilder.appendCallbackReturnFromHandle(type: KneType, indent: String) {
+        when (type) {
+            is KneType.OBJECT -> {
+                appendLine("${indent}unsafe { *Box::from_raw(_cb_result as *mut ${type.simpleName}) }")
+            }
+            is KneType.SEALED_ENUM -> {
+                appendLine("${indent}unsafe { *Box::from_raw(_cb_result as *mut ${type.simpleName}) }")
+            }
+            is KneType.INTERFACE -> {
+                appendLine("${indent}let _ret_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                appendLine("$indent    reg.borrow_mut().remove(&(_cb_result as u64)).expect(\"Invalid trait handle\")")
+                appendLine("${indent}});")
+                appendLine("${indent}unsafe { std::mem::transmute::<[usize; 2], Box<dyn ${type.simpleName}>>(_ret_words) }")
+            }
+            KneType.BOOLEAN -> appendLine("${indent}_cb_result != 0")
+            KneType.STRING -> appendLine("${indent}unsafe { std::ffi::CString::from_raw(_cb_result as *mut c_char) }.into_string().unwrap_or_default()")
+            KneType.UNIT, KneType.NEVER -> {}
+            else -> appendLine("${indent}_cb_result")
         }
     }
 

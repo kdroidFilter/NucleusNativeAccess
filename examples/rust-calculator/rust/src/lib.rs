@@ -430,6 +430,29 @@ impl Calculator {
         }
     }
 
+    // ── Callbacks with handle-backed types ─────────────────────────────
+
+    /// Callback returning a CalcResult (sealed enum).
+    pub fn map_to_result<F: FnOnce(i32) -> CalcResult>(&self, value: i32, mapper: F) -> CalcResult {
+        mapper(value)
+    }
+
+    /// Callback returning a Calculator (object).
+    pub fn create_via_callback<F: FnOnce(i32) -> Calculator>(&self, factory: F) -> Calculator {
+        factory(self.accumulator)
+    }
+
+    /// Callback taking a Calculator (object) and returning an i32.
+    pub fn apply_to_clone<F: FnOnce(Calculator) -> i32>(&self, processor: F) -> i32 {
+        let clone = Calculator::new(self.accumulator);
+        processor(clone)
+    }
+
+    /// Callback taking a CalcResult (sealed enum) and returning a String.
+    pub fn format_result<F: FnOnce(CalcResult) -> String>(&self, result: CalcResult, formatter: F) -> String {
+        formatter(result)
+    }
+
     // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {

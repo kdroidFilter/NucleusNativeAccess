@@ -217,6 +217,8 @@ fun main() {
 | `impl Into<T>` return | `T` | Converted via `.into()` in bridge |
 | `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator) |
 | Trait objects (`dyn Trait`) | **Supported** | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` params via handle + transmute |
+| `fn(A) -> B` callbacks | **Supported** | Function pointers and `impl Fn`/`FnOnce` with primitive, enum, object, sealed enum, and `dyn Trait` types |
+| Callbacks with handle types | **Supported** | `impl FnOnce(Object) -> SealedEnum`, `impl FnOnce(i32) -> Box<dyn Trait>`, etc. Handle-backed types use Box/trait-registry bridging |
 
 ### Current limitations (Rust Import)
 
@@ -396,10 +398,11 @@ JVM lambdas cross the FFM boundary via upcall stubs. The plugin generates all th
 **Lifecycle**: each proxy object holds a persistent `Arena.ofShared()`. Upcall stubs live as long as the object &mdash; async callbacks (event handlers, listeners) work out of the box. The arena is freed on `close()` or GC.
 
 **Supported callback signatures**:
-- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `data class`
-- Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`, `data class`
+- Params: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `enum class`, `data class`, opaque objects, sealed enums, `dyn Trait` (interfaces)
+- Returns: `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `String`, `Unit`, `enum class`, `data class`, opaque objects, sealed enums, `dyn Trait` (interfaces)
 - Multi-param: `(T, U) -> R` with any supported types
 - Data class params are decomposed into individual fields at C ABI level
+- Handle-backed types (objects, sealed enums, interfaces) are passed as opaque `i64` handles across the C ABI boundary
 
 ```kotlin
 // Kotlin/Native
