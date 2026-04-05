@@ -277,12 +277,15 @@ class RustdocJsonParser {
         traitImpls = traitToImplTypes
 
         val knownDataClasses = mutableMapOf<Int, KneDataClass>()
-        for ((id, name) in knownStructs) {
+        // Snapshot the initial struct IDs to avoid processing lazily-discovered cross-crate types
+        val initialStructIds = knownStructs.keys.toSet()
+        for (id in initialStructIds) {
+            val name = knownStructs[id] ?: continue
             val hasMethods = implMethods[id]?.isNotEmpty() == true || implCompanionMethods[id]?.isNotEmpty() == true
             if (hasMethods) continue
 
             val structItem = index.get(id.toString())?.asJsonObject ?: continue
-            val fields = extractStructFields(structItem, index, knownStructs, knownEnums)
+            val fields = extractStructFields(structItem, index, knownStructs, knownEnums, knownDataClasses)
             if (fields == null || fields.isEmpty()) continue
             if (!fields.all { isDataClassFieldSupported(it.type) }) continue
 
@@ -806,6 +809,7 @@ class RustdocJsonParser {
         index: JsonObject,
         knownStructs: Map<Int, String>,
         knownEnums: Map<Int, String>,
+        knownDataClasses: Map<Int, KneDataClass> = emptyMap(),
     ): List<KneParam>? {
         val structData = structItem.getAsJsonObject("inner")?.getAsJsonObject("struct") ?: return null
         val kindElem = structData.get("kind") ?: return null
@@ -820,7 +824,7 @@ class RustdocJsonParser {
             if (fieldVis != "public") return null
             val fieldName = fieldItem.get("name").safeString() ?: return null
             val fieldType = fieldItem.getAsJsonObject("inner")?.getAsJsonObject("struct_field") ?: return null
-            val resolved = resolveTypeWithBorrow(fieldType, knownStructs, knownEnums) ?: return null
+            val resolved = resolveTypeWithBorrow(fieldType, knownStructs, knownEnums, knownDataClasses) ?: return null
             params.add(KneParam(fieldName, resolved.type, isBorrowed = resolved.isBorrowed, rustType = resolved.rustType))
         }
         return params
@@ -1759,7 +1763,7 @@ class RustdocJsonParser {
                     // Register in knownStructs before field resolution (breaks cycles)
                     currentKnownStructs[id] = name
 
-                    val fields = extractStructFields(item, index, currentKnownStructs, currentKnownEnums)
+                    val fields = extractStructFields(item, index, currentKnownStructs, currentKnownEnums, currentKnownDataClasses)
                     if (fields != null && fields.isNotEmpty() && fields.all { isDataClassFieldSupported(it.type) }) {
                         val dc = KneDataClass(
                             simpleName = name,

@@ -58,11 +58,17 @@ NNA must infer everything from the rustdoc JSON.
         when resolveType encounters an unknown ID, looks up the index and discovers
         structs (→ data class if all fields are primitive/String), enums (simple or
         sealed). Tested with cross-crate-reexport.json fixture (8 tests).
-- [ ] **Structs de sous-crates comme data classes** — `Resolution { width: u32, height: u32 }`
+- [x] **Structs de sous-crates comme data classes** — `Resolution { width: u32, height: u32 }`
       et `CameraFormat { resolution, format, frame_rate }` doivent etre detectes
       comme data classes (tous champs publics, pas de methodes complexes)
-- [ ] **Enums de sous-crates** — `FrameFormat`, `ApiBackend`, `CameraControl`
+      ✓ Tested with Resolution (primitive fields) and CameraFormat (nested data class
+        + enum + primitive fields). extractStructFields now passes knownDataClasses
+        for proper nested type resolution. Initial scan snapshots struct IDs to
+        avoid re-processing lazily-discovered types.
+- [x] **Enums de sous-crates** — `FrameFormat`, `ApiBackend`, `CameraControl`
       doivent etre resolus meme s'ils viennent de `nokhwa-types`
+      ✓ Tested with FrameFormat { Rgb, Yuv, Gray } and CaptureError (sealed).
+        Lazy resolution detects sealed vs simple enums by checking variant kinds.
 
 ## 4. Support `&[u8]` en retour (borrowed slice)
 

@@ -94,9 +94,77 @@ class CrossCrateReexportTest {
 
     @Test
     fun `cross-crate types are not opaque`() {
-        // Verify that Resolution and FrameFormat are NOT in the opaque classes list
         val opaqueNames = module.classes.filter { it.isOpaque }.map { it.simpleName }
         assertFalse("Resolution should not be opaque", opaqueNames.contains("Resolution"))
         assertFalse("FrameFormat should not be opaque", opaqueNames.contains("FrameFormat"))
+        assertFalse("CameraFormat should not be opaque", opaqueNames.contains("CameraFormat"))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Nested cross-crate data class: CameraFormat { resolution, format, frame_rate }
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `CameraFormat from sub-crate is resolved as data class`() {
+        val camera = module.classes.first { it.simpleName == "Camera" }
+        val method = camera.methods.find { it.name == "get_camera_format" }
+        assertNotNull("get_camera_format method should exist", method)
+        val returnType = method!!.returnType
+        assertTrue(
+            "CameraFormat should be DATA_CLASS, got $returnType",
+            returnType is KneType.DATA_CLASS
+        )
+    }
+
+    @Test
+    fun `CameraFormat has resolution field as nested data class`() {
+        val camera = module.classes.first { it.simpleName == "Camera" }
+        val method = camera.methods.first { it.name == "get_camera_format" }
+        val dc = method.returnType as KneType.DATA_CLASS
+        assertEquals("CameraFormat", dc.simpleName)
+        assertEquals(3, dc.fields.size)
+
+        val resolutionField = dc.fields.find { it.name == "resolution" }
+        assertNotNull("resolution field should exist", resolutionField)
+        assertTrue(
+            "resolution should be DATA_CLASS, got ${resolutionField!!.type}",
+            resolutionField.type is KneType.DATA_CLASS
+        )
+        val nestedDc = resolutionField.type as KneType.DATA_CLASS
+        assertEquals("Resolution", nestedDc.simpleName)
+        assertEquals(2, nestedDc.fields.size)
+    }
+
+    @Test
+    fun `CameraFormat has format field as enum`() {
+        val camera = module.classes.first { it.simpleName == "Camera" }
+        val method = camera.methods.first { it.name == "get_camera_format" }
+        val dc = method.returnType as KneType.DATA_CLASS
+
+        val formatField = dc.fields.find { it.name == "format" }
+        assertNotNull("format field should exist", formatField)
+        assertTrue(
+            "format should be ENUM, got ${formatField!!.type}",
+            formatField.type is KneType.ENUM
+        )
+        assertEquals("FrameFormat", (formatField.type as KneType.ENUM).simpleName)
+    }
+
+    @Test
+    fun `CameraFormat has frame_rate field as primitive`() {
+        val camera = module.classes.first { it.simpleName == "Camera" }
+        val method = camera.methods.first { it.name == "get_camera_format" }
+        val dc = method.returnType as KneType.DATA_CLASS
+
+        val frameRateField = dc.fields.find { it.name == "frame_rate" }
+        assertNotNull("frame_rate field should exist", frameRateField)
+        assertEquals(KneType.INT, frameRateField!!.type)
+    }
+
+    @Test
+    fun `CameraFormat appears in module dataClasses`() {
+        val dc = module.dataClasses.find { it.simpleName == "CameraFormat" }
+        assertNotNull("CameraFormat data class should be in module", dc)
+        assertEquals(3, dc!!.fields.size)
     }
 }
