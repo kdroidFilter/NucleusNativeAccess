@@ -41,5 +41,5 @@ rustImport {
     libraryName = "rustcamera"
     jvmPackage = "com.example.rustcamera"
     buildType = "release"
-    crate("nokhwa", "0.10", features = listOf("input-native"))
+    cratePath("camera", "${projectDir}/rust")
 }

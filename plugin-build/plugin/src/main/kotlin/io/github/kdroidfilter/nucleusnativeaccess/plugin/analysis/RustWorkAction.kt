@@ -6,6 +6,7 @@ import io.github.kdroidfilter.nucleusnativeaccess.plugin.findCargo
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.FfmProxyGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen.RustBridgeGenerator
 import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneModule
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.KneType
 import java.io.File
 
 /**
@@ -51,17 +52,50 @@ object RustWorkAction {
             ?: throw org.gradle.api.GradleException("Failed to generate rustdoc JSON for '$libName'")
 
         // Step 4: Parse JSON → KneModule
-        val jsonContent = rustdocJson.readText()
         val unsupported = mutableListOf<String>()
-        val module = RustdocJsonParser().parse(jsonContent, libName) { unsupported.add(it) }
+        val isWrapper = crates.isNotEmpty() && crates.none { it.path != null }
+
+        val module = if (isWrapper) {
+            // For wrapper crates, parse all dependency JSONs and merge them.
+            // The main crate JSON has Camera etc., but sub-crates (nokhwa_core)
+            // have Buffer, FormatDecoder impls, Resolution, FrameFormat, etc.
+            val docDir = rustdocProjectDir.resolve("target/doc")
+            val depJsons = crates.flatMap { crate ->
+                val baseName = crate.name.replace('-', '_')
+                // Parse main crate + _core and _types sub-crates (not platform bindings)
+                docDir.listFiles()
+                    ?.filter { f ->
+                        f.extension == "json" &&
+                        f.nameWithoutExtension.startsWith(baseName) &&
+                        !f.nameWithoutExtension.contains("bindings")
+                    }
+                    ?: emptyList()
+            }.distinct()
+            // Parse main crate first, then sub-crates for supplementary types
+            val mainJson = depJsons.find { it.nameWithoutExtension == crates.first().name.replace('-', '_') }
+            val subJsons = depJsons.filter { it != mainJson }
+            logger.lifecycle("kne-rust: Parsing main: ${mainJson?.name}, sub: ${subJsons.map { it.name }}")
+
+            val parser = RustdocJsonParser()
+            val mainModule = if (mainJson != null) {
+                parser.parse(mainJson.readText(), libName) { unsupported.add(it) }
+            } else null
+            val subModules = subJsons.map { jsonFile ->
+                parser.parse(jsonFile.readText(), libName) { unsupported.add(it) }
+            }
+            mergeModules(listOfNotNull(mainModule) + subModules, libName)
+        } else {
+            RustdocJsonParser().parse(rustdocJson.readText(), libName) { unsupported.add(it) }
+        }
+
         logger.lifecycle("kne-rust: Parsed ${module.classes.size} classes, ${module.dataClasses.size} data classes, ${module.enums.size} enums, ${module.functions.size} functions")
         if (unsupported.isNotEmpty()) {
             logger.warn("kne-rust: Skipped unsupported API elements:")
-            unsupported.forEach { logger.warn("kne-rust:   $it") }
+            unsupported.take(20).forEach { logger.warn("kne-rust:   $it") }
+            if (unsupported.size > 20) logger.warn("kne-rust:   ... and ${unsupported.size - 20} more")
         }
 
         // Step 4b: For wrapper crates, rewrite lib.rs with proper imports based on rustdoc analysis
-        val isWrapper = crates.isNotEmpty() && crates.none { it.path != null }
         if (isWrapper) {
             rewriteWrapperLibRs(crateSrcDir, crates, rustdocJson, logger)
         }
@@ -199,6 +233,42 @@ object RustWorkAction {
             buildRs.writeText(content)
             logger.lifecycle("kne-rust: Generated build.rs for bridge inclusion")
         }
+    }
+
+    private fun mergeModules(modules: List<KneModule>, libName: String): KneModule {
+        if (modules.isEmpty()) return KneModule(libName = libName, packages = emptySet(), classes = emptyList(), dataClasses = emptyList(), enums = emptyList(), functions = emptyList())
+        if (modules.size == 1) return modules.single()
+
+        // Collect all type names from richer representations (sealed enums, data classes, enums)
+        // to exclude their opaque class counterparts
+        val sealedEnumNames = modules.flatMap { it.sealedEnums }.map { it.simpleName }.toSet()
+        val dataClassNames = modules.flatMap { it.dataClasses }.map { it.simpleName }.toSet()
+        val enumNames = modules.flatMap { it.enums }.map { it.simpleName }.toSet()
+        val richTypeNames = sealedEnumNames + dataClassNames + enumNames
+
+        val seenClasses = mutableSetOf<String>()
+        val seenDataClasses = mutableSetOf<String>()
+        val seenEnums = mutableSetOf<String>()
+        val seenFunctions = mutableSetOf<String>()
+        val seenInterfaces = mutableSetOf<String>()
+        val seenSealedEnums = mutableSetOf<String>()
+        return KneModule(
+            libName = libName,
+            packages = modules.flatMap { it.packages }.toSet(),
+            // Skip opaque classes that have a richer representation as sealed enum / data class / enum
+            classes = modules.flatMap { it.classes }
+                .filter { it.simpleName !in richTypeNames }
+                .filter { seenClasses.add(it.simpleName) },
+            dataClasses = modules.flatMap { it.dataClasses }.filter { seenDataClasses.add(it.simpleName) },
+            enums = modules.flatMap { it.enums }.filter { seenEnums.add(it.simpleName) },
+            functions = modules.flatMap { it.functions }.filter { seenFunctions.add(it.name) },
+            interfaces = modules.flatMap { it.interfaces }.filter { seenInterfaces.add(it.simpleName) },
+            sealedEnums = modules.flatMap { it.sealedEnums }.filter { seenSealedEnums.add(it.simpleName) },
+            traitImpls = modules.fold(mutableMapOf<String, MutableList<KneType.OBJECT>>()) { acc, m ->
+                m.traitImpls.forEach { (k, v) -> acc.getOrPut(k) { mutableListOf() }.addAll(v) }
+                acc
+            },
+        )
     }
 
     /**

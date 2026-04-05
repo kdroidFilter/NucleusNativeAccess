@@ -561,14 +561,16 @@ class RustBridgeGenerator {
 
     /** Check if the return type is fully supported by the Rust bridge generator. */
     private fun isSupportedReturnType(type: KneType): Boolean = when (type) {
-        is KneType.MAP -> true
-        is KneType.SET -> true
-        is KneType.NULLABLE -> when (type.inner) {
-            is KneType.DATA_CLASS -> true
-            is KneType.LIST, is KneType.SET, is KneType.MAP -> true
-            else -> true
-        }
+        is KneType.MAP -> isSupportedMapElementType(type.keyType) && isSupportedMapElementType(type.valueType)
+        is KneType.NULLABLE -> isSupportedReturnType(type.inner)
         else -> true
+    }
+
+    private fun isSupportedMapElementType(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING -> true
+        is KneType.ENUM, is KneType.OBJECT, is KneType.SEALED_ENUM -> true
+        else -> false
     }
 
     /**
@@ -1140,10 +1142,11 @@ class RustBridgeGenerator {
     private fun StringBuilder.appendSealedVariantConstructor(
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
-        // Skip variants with collection fields containing non-primitive elements (e.g. Object, String)
+        // Skip variants with unsupported field types
         val hasUnsupportedCollectionField = variant.fields.any { f ->
             val t = f.type
             when (t) {
+                is KneType.TUPLE -> true  // Tuple fields in struct variants not yet supported
                 is KneType.LIST -> !isSupportedCollectionElementForConstructor(t.elementType)
                 is KneType.SET -> !isSupportedCollectionElementForConstructor(t.elementType)
                 is KneType.MAP -> !isSupportedCollectionElementForConstructor(t.keyType) || !isSupportedCollectionElementForConstructor(t.valueType)
@@ -1215,6 +1218,8 @@ class RustBridgeGenerator {
         sym: String, rustName: String, variant: KneSealedVariant, prefix: String
     ) {
         for (f in variant.fields) {
+            // Skip tuple-typed fields (not yet supported in sealed variant getters)
+            if (f.type is KneType.TUPLE) continue
             // Handle MAP fields specially with dual buffers
             if (f.type is KneType.MAP) {
                 appendSealedMapVariantFieldGetter(sym, rustName, variant, f)
@@ -1990,7 +1995,12 @@ class RustBridgeGenerator {
                 appendFunctionParamConversion(p, indent)
             }
             KneType.BYTE_ARRAY -> {
-                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                val isMutSlice = p.rustType?.startsWith("&mut ") == true
+                if (isMutSlice) {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts_mut(${p.name}_ptr as *mut u8, ${p.name}_len as usize) };")
+                } else {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                }
                 if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
                     appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
                 }

@@ -1017,7 +1017,7 @@ class RustdocJsonParser {
         }
         val firstGenericParam = unresolvedToConcrete.keys.firstOrNull() ?: return listOf(method)
         val concreteTypes = unresolvedToConcrete[firstGenericParam] ?: return listOf(method)
-        if (concreteTypes.isEmpty()) return listOf(method)
+        if (concreteTypes.isEmpty()) return emptyList()
         val restGenericParams = genericParams.drop(1)
         return concreteTypes.flatMap { concreteType ->
             val substitutedMethod = substituteUnresolvedGeneric(method, firstGenericParam.removePrefix("__unresolved_generic__"), concreteType)
