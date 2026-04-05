@@ -16,12 +16,12 @@ NNA must infer everything from the rustdoc JSON.
 - [x] **Resolution des bornes generiques** — quand un param `T: SomeTrait` est rencontre,
       consulter le registry pour trouver les types concrets qui implementent `SomeTrait`
       (aujourd'hui seuls `Fn`/`AsRef`/`Into`/`From` sont geres)
-- [ ] **Instanciation des structs generiques** — pour `RequestedFormat<T>`, generer
+- [x] **Instanciation des structs generiques** — pour `RequestedFormat<T>`, generer
       une classe JVM par type concret trouve (ex: `RequestedFormatRgb`, `RequestedFormatGray`)
 - [x] **Instanciation des methodes generiques** — pour `buffer.decode_image::<F>()`,
       generer un bridge par monomorphisation avec turbofish (ex: `decode_image_rgb`)
 - [x] **Multi-bound resolution** — gerer les contraintes combinees (`T: Trait1 + Trait2`)
-- [ ] **Constructeurs generiques** — `RequestedFormat::new::<Decoder>()` doit generer
+- [x] **Constructeurs generiques** — `RequestedFormat::new::<Decoder>()` doit generer
       un constructeur par impl concrete de `FormatDecoder`
 
 ## 2. Sealed enum variants multi-champs

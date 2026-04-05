@@ -208,6 +208,7 @@ class RustBridgeGenerator {
 
     private fun StringBuilder.appendConstructor(cls: KneClass, prefix: String) {
         val className = cls.simpleName
+        val rustName = cls.rustTypeName
         val sym = "${prefix}_${className}"
         appendLine("#[no_mangle]")
         append("pub extern \"C\" fn ${sym}_new(")
@@ -218,14 +219,16 @@ class RustBridgeGenerator {
         for (p in cls.constructor.params) {
             appendParamConversion(p)
         }
+        // For generic structs like Processor<Tripler>, constructor path needs turbofish: Processor::<Tripler>::new(...)
+        val ctorRustName = rustName.replace("<", "::<")
         val ctorExpr = when (cls.constructor.kind) {
             KneConstructorKind.FUNCTION -> {
                 val args = cls.constructor.params.joinToString(", ") { p -> convertedCallArg(p) }
-                "$className::new($args)"
+                "$ctorRustName::new($args)"
             }
             KneConstructorKind.STRUCT_LITERAL -> {
                 val args = cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${convertedCallArg(p)}" }
-                "$className { $args }"
+                "$rustName { $args }"
             }
             KneConstructorKind.NONE -> error("unreachable")
         }

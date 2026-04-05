@@ -962,6 +962,37 @@ pub fn transform_value<T: ValueTransformer>(value: i32, transformer: &T) -> i32 
     transformer.transform(value)
 }
 
+// ── Generic struct monomorphisation support ─────────────────────────────
+
+/// A generic processor that wraps a ValueTransformer and adds an offset.
+/// NNA should monomorphise this into `Processor_Doubler` and `Processor_Tripler`.
+pub struct Processor<T: ValueTransformer> {
+    transformer: T,
+    offset: i32,
+}
+
+impl<T: ValueTransformer> Processor<T> {
+    pub fn new(transformer: T, offset: i32) -> Self {
+        Processor { transformer, offset }
+    }
+
+    pub fn process(&self, value: i32) -> i32 {
+        self.transformer.transform(value) + self.offset
+    }
+
+    pub fn get_offset(&self) -> i32 {
+        self.offset
+    }
+
+    pub fn set_offset(&mut self, offset: i32) {
+        self.offset = offset;
+    }
+
+    pub fn name(&self) -> String {
+        format!("Processor({}+{})", self.transformer.transformer_name(), self.offset)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
