@@ -4591,7 +4591,7 @@ class FfmProxyGenerator {
         when (elemType) {
             KneType.STRING -> {
                 appendLine("${indent}val _outBuf = arena.allocate($STRING_BUF_SIZE.toLong())")
-                val invokeArgs = "$baseArgs, _outBuf, $STRING_BUF_SIZE"
+                val invokeArgs = if (baseArgs.isEmpty()) "_outBuf, $STRING_BUF_SIZE" else "$baseArgs, _outBuf, $STRING_BUF_SIZE"
                 appendLine("${indent}val _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
                 if (nullable) appendLine("${indent}if (_count < 0) return null")
@@ -4605,14 +4605,14 @@ class FfmProxyGenerator {
                 val layout = KneType.collectionElementLayout(elemType)
                 appendLine("${indent}var _bufSize = $MAX_COLLECTION_SIZE")
                 appendLine("${indent}var _outBuf = arena.allocate($layout, _bufSize.toLong())")
-                val invokeArgs = "$baseArgs, _outBuf, _bufSize"
+                val invokeArgs = if (baseArgs.isEmpty()) "_outBuf, _bufSize" else "$baseArgs, _outBuf, _bufSize"
                 appendLine("${indent}var _count = $handleName.invoke($invokeArgs) as Int")
                 appendLine("${indent}KneRuntime.checkError()")
                 if (nullable) appendLine("${indent}if (_count < 0) return null")
                 appendLine("${indent}if (_count > _bufSize) {")
                 appendLine("${indent}    _bufSize = _count")
                 appendLine("${indent}    _outBuf = arena.allocate($layout, _bufSize.toLong())")
-                val invokeArgs2 = "$baseArgs, _outBuf, _bufSize"
+                val invokeArgs2 = if (baseArgs.isEmpty()) "_outBuf, _bufSize" else "$baseArgs, _outBuf, _bufSize"
                 appendLine("${indent}    _count = $handleName.invoke($invokeArgs2) as Int")
                 appendLine("${indent}    KneRuntime.checkError()")
                 appendLine("${indent}}")

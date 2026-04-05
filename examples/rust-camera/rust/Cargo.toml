@@ -8,3 +8,4 @@ name = "rustcamera"
 crate-type = ["cdylib"]
 
 [dependencies]
+nokhwa = { version = "0.10", features = ["input-native"] }
