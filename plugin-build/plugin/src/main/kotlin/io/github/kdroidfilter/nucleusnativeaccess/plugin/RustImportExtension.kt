@@ -31,18 +31,18 @@ abstract class RustImportExtension {
     abstract val crates: ListProperty<CrateDependency>
 
     /** Add a crate from crates.io. */
-    fun crate(name: String, version: String) {
-        crates.add(CrateDependency(name = name, version = version))
+    fun crate(name: String, version: String, features: List<String> = emptyList()) {
+        crates.add(CrateDependency(name = name, version = version, features = features))
     }
 
     /** Add a crate from a local path. */
-    fun cratePath(name: String, path: String) {
-        crates.add(CrateDependency(name = name, path = path))
+    fun cratePath(name: String, path: String, features: List<String> = emptyList()) {
+        crates.add(CrateDependency(name = name, path = path, features = features))
     }
 
     /** Add a crate from a git repository. */
-    fun crateGit(name: String, repository: String, branch: String = "main") {
-        crates.add(CrateDependency(name = name, gitUrl = repository, gitBranch = branch))
+    fun crateGit(name: String, repository: String, branch: String = "main", features: List<String> = emptyList()) {
+        crates.add(CrateDependency(name = name, gitUrl = repository, gitBranch = branch, features = features))
     }
 }
 
@@ -52,4 +52,5 @@ data class CrateDependency(
     val path: String? = null,
     val gitUrl: String? = null,
     val gitBranch: String? = null,
+    val features: List<String> = emptyList(),
 ) : Serializable

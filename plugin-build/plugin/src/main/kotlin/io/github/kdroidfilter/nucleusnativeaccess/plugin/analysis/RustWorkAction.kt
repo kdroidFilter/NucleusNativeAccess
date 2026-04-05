@@ -47,7 +47,7 @@ object RustWorkAction {
         ensureLibRsInclude(crateSrcDir, logger)
 
         // Step 3: Run cargo rustdoc to produce JSON
-        val rustdocJson = runCargoRustdoc(rustdocProjectDir, libName, logger)
+        val rustdocJson = runCargoRustdoc(rustdocProjectDir, libName, crates, logger)
             ?: throw org.gradle.api.GradleException("Failed to generate rustdoc JSON for '$libName'")
 
         // Step 4: Parse JSON → KneModule
@@ -58,6 +58,12 @@ object RustWorkAction {
         if (unsupported.isNotEmpty()) {
             logger.warn("kne-rust: Skipped unsupported API elements:")
             unsupported.forEach { logger.warn("kne-rust:   $it") }
+        }
+
+        // Step 4b: For wrapper crates, rewrite lib.rs with proper imports based on rustdoc analysis
+        val isWrapper = crates.isNotEmpty() && crates.none { it.path != null }
+        if (isWrapper) {
+            rewriteWrapperLibRs(crateSrcDir, crates, rustdocJson, logger)
         }
 
         // Step 5: Generate Rust bridges (into Gradle build dir, NOT into crate src)
@@ -116,10 +122,14 @@ object RustWorkAction {
             appendLine()
             appendLine("[dependencies]")
             for (crate in crates) {
+                val featuresList = if (crate.features.isNotEmpty())
+                    ", features = [${crate.features.joinToString(", ") { "\"$it\"" }}]"
+                else ""
                 when {
-                    crate.version != null -> appendLine("${crate.name} = \"${crate.version}\"")
-                    crate.path != null -> appendLine("${crate.name} = { path = \"${crate.path}\" }")
-                    crate.gitUrl != null -> appendLine("${crate.name} = { git = \"${crate.gitUrl}\", branch = \"${crate.gitBranch}\" }")
+                    crate.version != null && featuresList.isEmpty() -> appendLine("${crate.name} = \"${crate.version}\"")
+                    crate.version != null -> appendLine("${crate.name} = { version = \"${crate.version}\"$featuresList }")
+                    crate.path != null -> appendLine("${crate.name} = { path = \"${crate.path}\"$featuresList }")
+                    crate.gitUrl != null -> appendLine("${crate.name} = { git = \"${crate.gitUrl}\", branch = \"${crate.gitBranch}\"$featuresList }")
                 }
             }
         }
@@ -127,15 +137,8 @@ object RustWorkAction {
 
         val srcDir = rustProjectDir.resolve("src")
         srcDir.mkdirs()
-        val libRs = buildString {
-            for (crate in crates) {
-                val crateName = crate.name.replace('-', '_')
-                appendLine("pub use ${crateName}::*;")
-            }
-            appendLine()
-            appendLine("include!(\"kne_bridges.rs\");")
-        }
-        srcDir.resolve("lib.rs").writeText(libRs)
+        srcDir.resolve("lib.rs").writeText("// placeholder\n")
+        // Placeholder lib.rs — will be rewritten after rustdoc analysis in rewriteWrapperLibRs
 
         logger.lifecycle("kne-rust: Generated wrapper Cargo project at ${rustProjectDir.absolutePath}")
         return rustProjectDir
@@ -149,10 +152,10 @@ object RustWorkAction {
         val localCrate = crates.singleOrNull { it.path != null }
         if (localCrate != null) return cargoProjectDir
 
-        val externalCrate = crates.singleOrNull() ?: return cargoProjectDir
-        val sourceDir = resolveDependencySourceDir(cargoProjectDir, externalCrate, logger) ?: return cargoProjectDir
-        logger.lifecycle("kne-rust: Using dependency crate source for rustdoc at ${sourceDir.absolutePath}")
-        return sourceDir
+        // For external crates, run rustdoc on the wrapper project.
+        // The wrapper has `pub use crate::*;` which makes rustdoc inline re-exported types.
+        // Running directly on the dependency source doesn't apply features from the wrapper.
+        return cargoProjectDir
     }
 
     private fun resolveDependencySourceDir(
@@ -198,6 +201,47 @@ object RustWorkAction {
         }
     }
 
+    /**
+     * Rewrites the wrapper crate's lib.rs with proper use statements based on the dependency's
+     * rustdoc JSON. This ensures all sub-module types are in scope for the generated bridges.
+     */
+    private fun rewriteWrapperLibRs(
+        srcDir: File,
+        crates: List<CrateDependency>,
+        rustdocJson: File,
+        logger: org.gradle.api.logging.Logger,
+    ) {
+        val json = com.google.gson.JsonParser.parseString(rustdocJson.readText()).asJsonObject
+        val index = json.getAsJsonObject("index")
+        val rootId = json.get("root").asInt.toString()
+        val rootModule = index.get(rootId)?.asJsonObject ?: return
+        val rootItems = rootModule.getAsJsonObject("inner")
+            ?.getAsJsonObject("module")
+            ?.getAsJsonArray("items") ?: return
+
+        val crateName = crates.first().name.replace('-', '_')
+        val subModules = mutableListOf<String>()
+        for (itemId in rootItems) {
+            val item = index.get(itemId.asInt.toString())?.asJsonObject ?: continue
+            val inner = item.getAsJsonObject("inner") ?: continue
+            if (inner.has("module")) {
+                val name = item.get("name")?.asString ?: continue
+                subModules.add(name)
+            }
+        }
+
+        val libRs = buildString {
+            appendLine("pub use ${crateName}::*;")
+            for (mod in subModules) {
+                appendLine("pub use ${crateName}::${mod}::*;")
+            }
+            appendLine()
+            appendLine("include!(concat!(env!(\"OUT_DIR\"), \"/kne_bridges.rs\"));")
+        }
+        srcDir.resolve("lib.rs").writeText(libRs)
+        logger.lifecycle("kne-rust: Rewrote wrapper lib.rs with ${subModules.size} sub-module imports")
+    }
+
     private fun ensureLibRsInclude(srcDir: File, logger: org.gradle.api.logging.Logger) {
         val libRs = srcDir.resolve("lib.rs")
         if (!libRs.exists()) return
@@ -213,12 +257,17 @@ object RustWorkAction {
         }
     }
 
-    private fun runCargoRustdoc(cargoDir: File, libName: String, logger: org.gradle.api.logging.Logger): File? {
+    private fun runCargoRustdoc(cargoDir: File, libName: String, crates: List<CrateDependency>, logger: org.gradle.api.logging.Logger): File? {
         val cargo = findCargo()
 
-        val process = ProcessBuilder(
-            cargo, "doc", "--no-deps",
-        )
+        val isWrapper = cargoDir.resolve("Cargo.toml").readText().contains("kne-")
+        val cmd = if (isWrapper) {
+            // For wrapper crates, omit --no-deps so re-exported dependency types are inlined
+            listOf(cargo, "doc")
+        } else {
+            listOf(cargo, "doc", "--no-deps")
+        }
+        val process = ProcessBuilder(cmd)
             .directory(cargoDir)
             .apply {
                 environment()["RUSTC_BOOTSTRAP"] = "1"
@@ -237,12 +286,23 @@ object RustWorkAction {
 
         // Find the JSON file in target/doc/
         val docDir = cargoDir.resolve("target/doc")
-        return selectRustdocJson(docDir, cargoDir, libName)
+        return selectRustdocJson(docDir, cargoDir, libName, crates)
     }
 
-    internal fun selectRustdocJson(docDir: File, cargoDir: File, libName: String): File? {
+    internal fun selectRustdocJson(docDir: File, cargoDir: File, libName: String, crates: List<CrateDependency> = emptyList()): File? {
         val jsonFiles = docDir.listFiles()?.filter { it.extension == "json" } ?: return null
         if (jsonFiles.isEmpty()) return null
+
+        // For wrapper crates (no local path), prefer the dependency crate's JSON directly.
+        // Wrapper's glob re-export (pub use dep::*) doesn't inline types in rustdoc JSON.
+        val isWrapper = crates.isNotEmpty() && crates.none { it.path != null }
+        if (isWrapper) {
+            for (crate in crates) {
+                val depName = crate.name.replace('-', '_')
+                val depJson = docDir.resolve("$depName.json")
+                if (depJson.exists()) return depJson
+            }
+        }
 
         val expectedNames = linkedSetOf<String>()
         resolveRustdocTargetName(cargoDir)?.let { expectedNames.add(it) }
