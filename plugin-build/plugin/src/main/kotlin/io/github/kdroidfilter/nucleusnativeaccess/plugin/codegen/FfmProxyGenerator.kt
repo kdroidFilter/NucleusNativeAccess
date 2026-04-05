@@ -49,9 +49,7 @@ class FfmProxyGenerator {
         is KneType.SET -> isBridgeableCollectionElement(type.elementType)
         is KneType.MAP -> isBridgeableCollectionElement(type.keyType) && isBridgeableCollectionElement(type.valueType)
         is KneType.TUPLE -> type.elementTypes.all { isKnownType(it) }
-        is KneType.FUNCTION -> type.paramTypes.all { isKnownType(it) } && isKnownType(type.returnType) &&
-            // Exclude callbacks returning interface/sealed enum types (upcall stubs can't handle them yet)
-            type.returnType !is KneType.INTERFACE && type.returnType !is KneType.SEALED_ENUM
+        is KneType.FUNCTION -> type.paramTypes.all { isKnownType(it) } && isKnownType(type.returnType)
         is KneType.FLOW -> isKnownType(type.elementType)
         else -> true
     }
@@ -616,6 +614,12 @@ class FfmProxyGenerator {
             }
         }
         module.functions.filter { hasOnlyKnownTypes(it) }.forEach { scanParams(it.params) }
+        // Scan sealed enum variant fields for callback signatures
+        module.sealedEnums.forEach { sealed ->
+            sealed.variants.forEach { variant ->
+                scanParams(variant.fields)
+            }
+        }
         return signatures
     }
 
@@ -1002,7 +1006,12 @@ class FfmProxyGenerator {
                 KneType.BYTE_ARRAY -> "_ba$i"
                 KneType.STRING -> "p$i.reinterpret(Long.MAX_VALUE).getString(0)"
                 is KneType.ENUM -> "${t.simpleName}.entries[p$i]"
-                is KneType.OBJECT -> "${t.simpleName}.fromNativeHandle(p$i)"
+                is KneType.OBJECT -> "${t.simpleName}.fromBorrowedHandle(p$i)"
+                is KneType.INTERFACE -> {
+                    val wrapper = dynWrapperLookup[t.fqName] ?: t.simpleName
+                    "$wrapper.fromBorrowedHandle(p$i)"
+                }
+                is KneType.SEALED_ENUM -> "${t.simpleName}.fromBorrowedHandle(p$i)"
                 is KneType.DATA_CLASS -> {
                     val fieldArgs = t.fields.joinToString(", ") { f ->
                         val pName = "p${i}_${f.name}"
@@ -1038,6 +1047,11 @@ class FfmProxyGenerator {
         } else if (sig.returnType is KneType.ENUM) {
             appendLine("        return _fn.invoke($invokeConvertedArgs).ordinal")
         } else if (sig.returnType is KneType.OBJECT) {
+            appendLine("        return _fn.invoke($invokeConvertedArgs).handle")
+        } else if (sig.returnType is KneType.INTERFACE) {
+            val wrapper = dynWrapperLookup[(sig.returnType as KneType.INTERFACE).fqName] ?: sig.returnType.simpleName
+            appendLine("        return (_fn.invoke($invokeConvertedArgs) as $wrapper).handle")
+        } else if (sig.returnType is KneType.SEALED_ENUM) {
             appendLine("        return _fn.invoke($invokeConvertedArgs).handle")
         } else if (sig.returnType is KneType.DATA_CLASS) {
             val dc = sig.returnType
@@ -3616,8 +3630,8 @@ class FfmProxyGenerator {
         appendLine("        internal fun fromBorrowedHandle(handle: Long): ${sealed.simpleName} = create(handle, ownsHandle = false)")
         appendLine()
 
-        // Factory methods for creating variants (skip those with tuple-typed or function-typed fields)
-        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE || it.type is KneType.FUNCTION } }) {
+        // Factory methods for creating variants (skip those with tuple-typed fields)
+        for (variant in sealed.variants.filter { v -> v.fields.none { it.type is KneType.TUPLE } }) {
             if (variant.fields.isEmpty()) {
                 appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}(): ${escapeSealedVariantName(variant.name)} {")
                 appendLine("            val h = NEW_${variant.name.uppercase()}_HANDLE.invoke() as Long")
@@ -3627,10 +3641,12 @@ class FfmProxyGenerator {
             } else {
                 val params = variant.fields.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
                 appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}($params): ${escapeSealedVariantName(variant.name)} {")
+                val hasCallbacks = variant.fields.any { it.type.isFunctionType() }
                 val needsArena = needsConfinedArena(variant.fields, KneType.UNIT) ||
-                    variant.fields.any { it.type == KneType.BYTE_ARRAY || it.type.isCollection() }
+                    variant.fields.any { it.type == KneType.BYTE_ARRAY || it.type.isCollection() } || hasCallbacks
                 if (needsArena) {
                     appendLine("            Arena.ofConfined().use { arena ->")
+                    if (hasCallbacks) appendCallbackStubAlloc("                ", variant.fields, "arena")
                     appendStringInvokeArgsAlloc("                ", variant.fields)
                     appendCollectionParamAlloc("                ", variant.fields)
                     val invokeArgs = variant.fields.flatMap { f -> buildExpandedInvokeArgs(f) }.joinToString(", ")
