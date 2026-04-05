@@ -1,0 +1,163 @@
+{
+  "root": 100,
+  "crate_id": 0,
+  "format_version": 56,
+  "paths": {
+    "100": {"crate_id": 0, "path": ["mylib"], "kind": "module"},
+    "1": {"crate_id": 0, "path": ["mylib", "Camera"], "kind": "struct"},
+    "50": {"crate_id": 1, "path": ["mylib_core", "Resolution"], "kind": "struct"},
+    "60": {"crate_id": 1, "path": ["mylib_core", "FrameFormat"], "kind": "enum"},
+    "70": {"crate_id": 1, "path": ["mylib_core", "CaptureError"], "kind": "enum"},
+    "80": {"crate_id": 1, "path": ["mylib_core", "CameraFormat"], "kind": "struct"}
+  },
+  "external_crates": {
+    "1": {"name": "mylib_core", "html_root_url": null}
+  },
+  "index": {
+    "100": {
+      "id": 100, "crate_id": 0, "name": "mylib", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"module": {"is_crate": true, "items": [1], "is_stripped": false}}
+    },
+    "1": {
+      "id": 1, "crate_id": 0, "name": "Camera", "visibility": "public",
+      "docs": "A camera device.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct": {"kind": {"plain": {"fields": [], "has_stripped_fields": true}}, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "2": {
+      "id": 2, "crate_id": 0, "name": "new", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"function": {"sig": {
+        "inputs": [["index", {"primitive": "i32"}]],
+        "output": {"resolved_path": {"path": "Camera", "id": 1, "args": null}},
+        "is_c_variadic": false
+      }, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "3": {
+      "id": 3, "crate_id": 0, "name": "get_resolution", "visibility": "public",
+      "docs": "Returns the current resolution.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"function": {"sig": {
+        "inputs": [["self", {"borrowed_ref": {"lifetime": null, "is_mutable": false, "type": {"generic": "Self"}}}]],
+        "output": {"resolved_path": {"path": "Resolution", "id": 50, "args": null}},
+        "is_c_variadic": false
+      }, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "4": {
+      "id": 4, "crate_id": 0, "name": "get_format", "visibility": "public",
+      "docs": "Returns the current frame format.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"function": {"sig": {
+        "inputs": [["self", {"borrowed_ref": {"lifetime": null, "is_mutable": false, "type": {"generic": "Self"}}}]],
+        "output": {"resolved_path": {"path": "FrameFormat", "id": 60, "args": null}},
+        "is_c_variadic": false
+      }, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "5": {
+      "id": 5, "crate_id": 0, "name": "capture", "visibility": "public",
+      "docs": "Capture a frame.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"function": {"sig": {
+        "inputs": [["self", {"borrowed_ref": {"lifetime": null, "is_mutable": true, "type": {"generic": "Self"}}}]],
+        "output": {"resolved_path": {"path": "Result", "id": 999, "args": {"angle_bracketed": {"args": [
+          {"type": {"primitive": "i32"}},
+          {"type": {"resolved_path": {"path": "CaptureError", "id": 70, "args": null}}}
+        ], "constraints": []}}}},
+        "is_c_variadic": false
+      }, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "10": {
+      "id": 10, "crate_id": 0, "name": null, "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"impl": {
+        "is_unsafe": false, "generics": {"params": [], "where_predicates": []},
+        "provided_trait_impls": [], "trait": null, "blanket_impl": null,
+        "for": {"resolved_path": {"path": "Camera", "id": 1, "args": null}},
+        "items": [2, 3, 4, 5, 6],
+        "is_synthetic": false, "is_negative": false
+      }}
+    },
+    "50": {
+      "id": 50, "crate_id": 1, "name": "Resolution", "visibility": "public",
+      "docs": "Display resolution.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct": {"kind": {"plain": {"fields": [51, 52], "has_stripped_fields": false}}, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "51": {
+      "id": 51, "crate_id": 1, "name": "width", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"primitive": "u32"}}
+    },
+    "52": {
+      "id": 52, "crate_id": 1, "name": "height", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"primitive": "u32"}}
+    },
+    "60": {
+      "id": 60, "crate_id": 1, "name": "FrameFormat", "visibility": "public",
+      "docs": "Pixel format for frames.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"enum": {"generics": {"params": [], "where_predicates": []}, "variants": [61, 62, 63]}}
+    },
+    "61": {
+      "id": 61, "crate_id": 1, "name": "Rgb", "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"variant": {"kind": "plain", "discriminant": null}}
+    },
+    "62": {
+      "id": 62, "crate_id": 1, "name": "Yuv", "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"variant": {"kind": "plain", "discriminant": null}}
+    },
+    "63": {
+      "id": 63, "crate_id": 1, "name": "Gray", "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"variant": {"kind": "plain", "discriminant": null}}
+    },
+    "70": {
+      "id": 70, "crate_id": 1, "name": "CaptureError", "visibility": "public",
+      "docs": "Error during capture.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"enum": {"generics": {"params": [], "where_predicates": []}, "variants": [71, 72]}}
+    },
+    "71": {
+      "id": 71, "crate_id": 1, "name": "DeviceLost", "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"variant": {"kind": {"tuple": [73]}, "discriminant": null}}
+    },
+    "72": {
+      "id": 72, "crate_id": 1, "name": "Timeout", "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"variant": {"kind": "plain", "discriminant": null}}
+    },
+    "73": {
+      "id": 73, "crate_id": 1, "name": null, "visibility": "default",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"resolved_path": {"path": "String", "id": 999, "args": null}}}
+    },
+    "6": {
+      "id": 6, "crate_id": 0, "name": "get_camera_format", "visibility": "public",
+      "docs": "Returns the full camera format.", "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"function": {"sig": {
+        "inputs": [["self", {"borrowed_ref": {"lifetime": null, "is_mutable": false, "type": {"generic": "Self"}}}]],
+        "output": {"resolved_path": {"path": "CameraFormat", "id": 80, "args": null}},
+        "is_c_variadic": false
+      }, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "80": {
+      "id": 80, "crate_id": 1, "name": "CameraFormat", "visibility": "public",
+      "docs": "Full camera format with resolution, pixel format, and frame rate.",
+      "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct": {"kind": {"plain": {"fields": [81, 82, 83], "has_stripped_fields": false}}, "generics": {"params": [], "where_predicates": []}}}
+    },
+    "81": {
+      "id": 81, "crate_id": 1, "name": "resolution", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"resolved_path": {"path": "Resolution", "id": 50, "args": null}}}
+    },
+    "82": {
+      "id": 82, "crate_id": 1, "name": "format", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"resolved_path": {"path": "FrameFormat", "id": 60, "args": null}}}
+    },
+    "83": {
+      "id": 83, "crate_id": 1, "name": "frame_rate", "visibility": "public",
+      "docs": null, "links": {}, "attrs": [], "deprecation": null,
+      "inner": {"struct_field": {"primitive": "u32"}}
+    }
+  }
+}

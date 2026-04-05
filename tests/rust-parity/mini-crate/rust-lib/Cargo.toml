@@ -1,0 +1,8 @@
+[package]
+name = "kne-test-calculator"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kne_test_calculator"
+crate-type = ["cdylib"]

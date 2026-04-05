@@ -37,3 +37,8 @@ rootProject.name = "io.github.kdroidfilter.nucleusnativeaccess"
 include(":examples:calculator")
 include(":examples:systeminfo")
 include(":examples:benchmark")
+include(":examples:rust-calculator")
+include(":examples:rust-benchmark")
+include(":examples:rust-sysinfo")
+include(":examples:rust-camera")
+include(":examples:rust-symphonia")

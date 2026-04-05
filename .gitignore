@@ -5,3 +5,9 @@
 .idea/
 .kotlin/
 build
+
+# Rust / Cargo
+target/
+**/rust/src/kne_bridges.rs
+**/rust/build.rs
+Cargo.lock

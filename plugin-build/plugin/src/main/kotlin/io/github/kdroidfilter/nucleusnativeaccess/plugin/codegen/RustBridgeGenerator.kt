@@ -1,0 +1,3259 @@
+package io.github.kdroidfilter.nucleusnativeaccess.plugin.codegen
+
+import io.github.kdroidfilter.nucleusnativeaccess.plugin.ir.*
+
+/**
+ * Generates Rust `#[no_mangle] pub extern "C" fn` bridge code from a [KneModule].
+ *
+ * The generated bridges expose the Rust library's public API via the C ABI,
+ * using the same symbol naming convention that [FfmProxyGenerator] expects.
+ * This allows the JVM FFM proxies to call into Rust identically to Kotlin/Native.
+ *
+ * Object lifecycle uses `Box::into_raw` / `Box::from_raw` (equivalent to Kotlin/Native's StableRef).
+ * Error propagation uses a thread-local `KNE_LAST_ERROR` (equivalent to `_kneLastError`).
+ * String I/O uses the output-buffer pattern (equivalent to Kotlin/Native's `CPointer<ByteVar>`).
+ */
+class RustBridgeGenerator {
+
+    companion object {
+        private val RUST_PRIMITIVE_TYPES = setOf(
+            "u8", "u16", "u32", "u64", "u128", "usize",
+            "i8", "i16", "i32", "i64", "i128", "isize",
+            "f32", "f64", "bool", "String", "str",
+        )
+    }
+
+    /** Returns the Rust call name for a function, using rustMethodName + turbofish if available. */
+    private fun rustCallName(fn: KneFunction): String {
+        val base = fn.rustMethodName ?: fn.name
+        val turbo = fn.turbofish ?: ""
+        return "$base$turbo"
+    }
+
+    /** Tracks emitted bridge symbol names to detect and resolve overload collisions. */
+    private val emittedSymbols = mutableMapOf<String, Int>()
+
+    /** Returns a unique symbol name, appending a numeric suffix on collision. */
+    private fun uniqueSym(base: String): String {
+        val count = emittedSymbols.getOrDefault(base, 0)
+        emittedSymbols[base] = count + 1
+        return if (count == 0) base else "${base}_${count}"
+    }
+
+    private var knownTypeNames: Set<String> = emptySet()
+    private var genericOrLifetimeClassNames: Set<String> = emptySet()
+    private var unbridgeableTemplateNames: Set<String> = emptySet()
+    /** Type simple names that appear in multiple crates (e.g. SampleFormat from both symphonia and cpal). */
+    private var ambiguousTypeNames: Set<String> = emptySet()
+    /** Maps fqName -> Rust path for all types, used to resolve ambiguous names. */
+    private var fqNameToRustPath: Map<String, String> = emptyMap()
+
+    private fun isKnownType(type: KneType): Boolean = when (type) {
+        is KneType.OBJECT -> type.simpleName in knownTypeNames
+        is KneType.INTERFACE -> type.simpleName in knownTypeNames
+        is KneType.NULLABLE -> isKnownType(type.inner)
+        is KneType.LIST -> isSupportedCollectionElementForBridge(type.elementType)
+        is KneType.SET -> isSupportedCollectionElementForBridge(type.elementType)
+        is KneType.MAP -> isSupportedCollectionElementForBridge(type.keyType) && isSupportedCollectionElementForBridge(type.valueType)
+        else -> true
+    }
+
+    private fun isSupportedCollectionElementForBridge(elemType: KneType): Boolean = when (elemType) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING,
+        KneType.BYTE_ARRAY -> true
+        is KneType.OBJECT -> elemType.simpleName in knownTypeNames
+        is KneType.INTERFACE -> elemType.simpleName in knownTypeNames
+        is KneType.SEALED_ENUM -> elemType.simpleName in knownTypeNames
+        is KneType.ENUM -> true
+        else -> false
+    }
+
+    private var enumTypeNames: Set<String> = emptySet()
+    private var simpleEnumTypeNames: Set<String> = emptySet()
+
+    private fun hasOnlyKnownTypes(fn: KneFunction): Boolean =
+        isKnownType(fn.returnType) && fn.params.all { isKnownType(it.type) } &&
+        !hasTypeMismatch(fn) &&
+        fn.params.none { hasUnbridgeableParam(it) } &&
+        !hasAmbiguousType(fn)
+
+    /** Returns true if a param has a type that cannot cross the C ABI boundary:
+     *  - `&'static [&str]`, `&'static [&[u8]]` (static slices of non-primitives)
+     *  - Function pointer types with non-primitive params (e.g. `fn(&[u8]) -> u8`)
+     *  - FUNCTION type params where the function's param types include OBJECT/INTERFACE/etc.
+     */
+    private fun hasUnbridgeableParam(p: KneParam): Boolean {
+        val rt = p.rustType ?: ""
+        // Static slices of references or slices: &'static [&str], &'static [&[u8]], etc.
+        if (rt.contains("&'static [") || rt.contains("&[&")) return true
+        // Function pointer with non-primitive parameters (contains & or complex types)
+        if (p.type is KneType.FUNCTION) {
+            val fnType = p.type as KneType.FUNCTION
+            if (fnType.paramTypes.any { !isCAbiFriendlyType(it) } ||
+                !isCAbiFriendlyType(fnType.returnType)) {
+                return true
+            }
+        }
+        // fn(...) in rustType with complex arg types
+        if (rt.startsWith("fn(") && (rt.contains("&[") || rt.contains("&mut ") || rt.contains("dyn "))) return true
+        // Box<dyn T> fields (fat pointers, cannot be passed as i64 handle)
+        if (rt.contains("Box<dyn ")) return true
+        // Bare Box without type params (missing generic info)
+        if (rt == "Box" || rt.endsWith("::Box")) return true
+        return false
+    }
+
+    /** Returns true if a type can be safely passed through the C ABI. */
+    private fun isCAbiFriendlyType(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.BOOLEAN, KneType.BYTE, KneType.SHORT,
+        KneType.STRING, KneType.UNIT, KneType.NEVER -> true
+        is KneType.ENUM -> true
+        else -> false
+    }
+
+    /** Returns true if any param or return type uses a type name that's ambiguous
+     *  across crates and the rustType doesn't carry a qualified Rust path. */
+    private fun hasAmbiguousType(fn: KneFunction): Boolean {
+        if (ambiguousTypeNames.isEmpty()) return false
+        return fn.params.any { p -> isAmbiguousParam(p) } || isAmbiguousReturnType(fn.returnType, fn.returnRustType)
+    }
+
+    private fun isAmbiguousParam(p: KneParam): Boolean {
+        val simpleName = typeSimpleName(p.type) ?: return false
+        if (simpleName !in ambiguousTypeNames) return false
+        // If the rustType carries a qualified path (contains ::), the bridge can use it correctly
+        val rt = unwrapRustWrapperType(p.rustType) ?: return true
+        return !rt.contains("::")
+    }
+
+    private fun isAmbiguousReturnType(type: KneType, rustType: String?): Boolean {
+        val simpleName = typeSimpleName(type) ?: return false
+        if (simpleName !in ambiguousTypeNames) return false
+        val rt = unwrapRustWrapperType(rustType) ?: return true
+        return !rt.contains("::")
+    }
+
+    private fun typeSimpleName(type: KneType): String? = when (type) {
+        is KneType.OBJECT -> type.simpleName
+        is KneType.ENUM -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        is KneType.DATA_CLASS -> type.simpleName
+        is KneType.NULLABLE -> typeSimpleName(type.inner)
+        else -> null
+    }
+
+    private fun hasTypeMismatch(fn: KneFunction): Boolean {
+        val allTypes = fn.params.map { it.type } + fn.returnType
+        if (allTypes.any { type -> type is KneType.OBJECT && type.simpleName in enumTypeNames }) return true
+        // Detect params where the resolved KneType is primitive but the rustType suggests
+        // a complex struct type (e.g. Duration resolved as u64 but actual Rust type is
+        // std::time::Duration). These cannot be safely bridged.
+        return fn.params.any { p -> hasPrimitiveTypeAmbiguity(p) }
+    }
+
+    /** Returns true if a param's KneType was resolved as a primitive but its rustType
+     *  suggests a different complex type that happens to share the same name. */
+    private fun hasPrimitiveTypeAmbiguity(p: KneParam): Boolean {
+        val rt = p.rustType ?: return false
+        val normalized = normalizeRustType(rt) ?: return false
+        // If the KneType is a primitive but the rustType is a qualified path to a struct,
+        // there's a type alias collision (e.g. symphonia Duration = u64 vs std::time::Duration)
+        if (p.type is KneType.LONG || p.type is KneType.INT || p.type is KneType.DOUBLE || p.type is KneType.FLOAT) {
+            // Qualified type path suggests a struct, not a primitive alias
+            if (normalized.contains("::") && !normalized.startsWith("std::") &&
+                !RUST_PRIMITIVE_TYPES.contains(normalized)) {
+                // The normalized type is a crate-qualified struct — that's fine, it's a type alias.
+                // But check if the original type has a std:: prefix (meaning it's std::time::Duration etc.)
+            }
+            // std::time::Duration or similar standard lib types mistakenly resolved as primitive
+            if (rt.contains("std::time::") || rt.contains("core::time::")) return true
+        }
+        return false
+    }
+
+    fun generate(module: KneModule): String {
+        emittedSymbols.clear()
+        knownTypeNames = buildSet {
+            module.classes.forEach { add(it.simpleName) }
+            module.dataClasses.forEach { add(it.simpleName) }
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+            module.interfaces.forEach { add(it.simpleName) }
+        }
+        enumTypeNames = buildSet {
+            module.enums.forEach { add(it.simpleName) }
+            module.sealedEnums.forEach { add(it.simpleName) }
+        }
+        simpleEnumTypeNames = module.enums.map { it.simpleName }.toSet()
+        // Use pre-computed ambiguous type names from module merge (detects names that
+        // appeared in multiple crates before deduplication, e.g. SampleFormat from both
+        // symphonia_core and cpal).
+        ambiguousTypeNames = module.ambiguousTypeNames
+        // Track class names whose rustTypeName contains generics or lifetimes,
+        // or whose Rust struct definition has lifetime params (e.g. BufReader<'a>)
+        // — these classes cannot be safely used as type args in other generic classes.
+        genericOrLifetimeClassNames = buildSet {
+            module.classes.forEach { cls ->
+                if (cls.rustTypeName.contains("<") || cls.rustTypeName.contains("'")) {
+                    add(cls.simpleName)
+                }
+                if (cls.hasLifetimeParams || cls.hasUnresolvedGenericTypeParams) {
+                    add(cls.simpleName)
+                }
+            }
+        }
+        // Detect generic template classes whose concrete type uses the class name with <...>.
+        // These templates (e.g. Processor with rustTypeName="Processor") are not directly
+        // bridgeable — only their monomorphisations (Processor_Doubler) are.
+        // Also detect structs that require type params but weren't monomorphised.
+        val monomorphisedBaseNames = module.classes
+            .filter { it.rustTypeName.contains("<") }
+            .map { it.rustTypeName.substringBefore('<') }
+            .toSet()
+        unbridgeableTemplateNames = module.classes
+            .filter { cls ->
+                !cls.rustTypeName.contains("<") &&
+                cls.simpleName in monomorphisedBaseNames
+            }
+            .map { it.simpleName }
+            .toSet()
+
+        val sb = StringBuilder()
+        val prefix = module.libName
+
+        sb.appendPreamble()
+        sb.appendErrorInfra(prefix)
+        sb.appendFreeBuf(prefix)
+
+        // Check if any class or top-level function uses suspend or flow
+        val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } ||
+            module.functions.any { it.isSuspend }
+        val hasFlow = module.classes.any { c -> c.methods.any { it.returnType is KneType.FLOW } } ||
+            module.functions.any { it.returnType is KneType.FLOW }
+        if (hasSuspend || hasFlow) {
+            sb.appendSuspendHelpers(prefix)
+        }
+
+        for (cls in module.classes) {
+            sb.appendClass(cls, prefix)
+        }
+
+        for (enum in module.enums) {
+            sb.appendEnum(enum, prefix)
+        }
+
+        for (sealed in module.sealedEnums) {
+            sb.appendSealedEnum(sealed, prefix)
+        }
+
+        for (fn in module.functions) {
+            sb.appendTopLevelFunction(fn, prefix)
+        }
+
+        return sb.toString()
+    }
+
+    // --- Preamble ---
+
+    private fun StringBuilder.appendPreamble() {
+        appendLine("// Auto-generated by NNA (Nucleus Native Access) — do not edit.")
+        appendLine()
+        appendLine("use std::cell::RefCell;")
+        appendLine("use std::ffi::CStr;")
+        appendLine("use std::collections::HashMap;")
+        appendLine("use std::os::raw::c_char;")
+        appendLine("use std::panic::catch_unwind;")
+        appendLine("use std::ops::{Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor, Not, Shl, Shr};")
+        appendLine("use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, BitAndAssign, BitOrAssign, BitXorAssign};")
+        appendLine("use std::io::Read;")
+        appendLine("use std::io::Seek;")
+        appendLine()
+        appendLine("// dyn Trait registry: stores fat pointer components as [usize; 2]")
+        appendLine("// Box<dyn Trait> is a fat pointer (data + vtable). We transmute it to [usize; 2] for storage.")
+        appendLine()
+        appendLine("thread_local! {")
+        appendLine("    static KNE_TRAIT_REGISTRY: RefCell<HashMap<u64, [usize; 2]>> = RefCell::new(HashMap::new());")
+        appendLine("    static KNE_NEXT_HANDLE: RefCell<u64> = RefCell::new(1);")
+        appendLine("}")
+        appendLine()
+        appendLine("// Drop a trait object by handle")
+        appendLine("// We reconstruct the Box<dyn Trait> from the stored fat pointer components.")
+        appendLine("fn kne_drop_trait_object(handle: u64) {")
+        appendLine("    KNE_TRAIT_REGISTRY.with(|reg| {")
+        appendLine("        if let Some(words) = reg.borrow_mut().remove(&handle) {")
+        appendLine("            unsafe {")
+        appendLine("                // Reconstruct Box<dyn Trait> from [usize; 2]")
+        appendLine("                let fat_ptr: *mut dyn std::any::Any = std::mem::transmute(words);")
+        appendLine("                let boxed: Box<Box<dyn std::any::Any>> = Box::from_raw(fat_ptr as *mut Box<dyn std::any::Any>);")
+        appendLine("                drop(boxed);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
+        appendLine()
+        appendLine("// Helper to convert a C string pointer to a Rust String")
+        appendLine("fn cstr_to_string(ptr: *const c_char) -> String {")
+        appendLine("    if ptr.is_null() {")
+        appendLine("        String::new()")
+        appendLine("    } else {")
+        appendLine("        unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or(\"\").to_string()")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    // --- Error infrastructure ---
+
+    private fun StringBuilder.appendErrorInfra(prefix: String) {
+        appendLine("thread_local! {")
+        appendLine("    static KNE_LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);")
+        appendLine("}")
+        appendLine()
+        appendLine("fn kne_set_error(msg: String) {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = Some(msg));")
+        appendLine("}")
+        appendLine()
+        appendLine("fn kne_set_panic_error(err: Box<dyn std::any::Any + Send>) {")
+        appendLine("    let msg = if let Some(s) = err.downcast_ref::<&str>() {")
+        appendLine("        s.to_string()")
+        appendLine("    } else if let Some(s) = err.downcast_ref::<String>() {")
+        appendLine("        s.clone()")
+        appendLine("    } else {")
+        appendLine("        \"Unknown panic\".to_string()")
+        appendLine("    };")
+        appendLine("    kne_set_error(msg);")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_hasError() -> i32 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_getLastError(out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| {")
+        appendLine("        let mut err = e.borrow_mut();")
+        appendLine("        if let Some(ref msg) = *err {")
+        appendLine("            let bytes = msg.as_bytes();")
+        appendLine("            let len = bytes.len() as i32;")
+        appendLine("            if len < out_buf_len {")
+        appendLine("                unsafe {")
+        appendLine("                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("                    *out_buf.add(bytes.len()) = 0;")
+        appendLine("                }")
+        appendLine("            }")
+        appendLine("            *err = None;")
+        appendLine("            len + 1")
+        appendLine("        } else {")
+        appendLine("            0")
+        appendLine("        }")
+        appendLine("    })")
+        appendLine("}")
+        appendLine()
+    }
+
+    // --- Tuple buffer free ---
+
+    private fun StringBuilder.appendFreeBuf(prefix: String) {
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_free_buf(ptr: i64, size: i64) {")
+        appendLine("    if ptr != 0 && size > 0 {")
+        appendLine("        unsafe {")
+        appendLine("            let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr as *mut u8, size as usize));")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    // --- Class bridges ---
+
+    private fun StringBuilder.appendClass(cls: KneClass, prefix: String) {
+        val className = cls.simpleName
+        val rustTypeName = cls.rustTypeName
+
+        // Skip classes whose Rust type cannot be correctly bridged:
+        // 1. Types with lifetime params (e.g. BufReader<'_>)
+        if (rustTypeName.contains("'")) {
+            return
+        }
+        // 2. Generic templates that have monomorphised variants — the template itself
+        //    can't be bridged (e.g. Processor with template, vs Processor<Doubler>)
+        if (cls.genericParams.isNotEmpty() && !rustTypeName.contains("<")) {
+            return
+        }
+        // 3. Templates detected by name analysis (for structs where genericParams wasn't set)
+        if (className in unbridgeableTemplateNames) {
+            return
+        }
+        // 4. Structs with unresolved generic type params that weren't monomorphised
+        //    (e.g. ReadOnlySource<R> where no concrete R was found)
+        if (cls.hasUnresolvedGenericTypeParams && !rustTypeName.contains("<")) {
+            return
+        }
+        // 2. Generics: skip multi-param, or single-param with unknown/problematic type arg
+        if (rustTypeName.contains("<")) {
+            val genericContent = rustTypeName.substringAfter('<').substringBeforeLast('>')
+            val argTypes = genericContent.split(",").map { it.trim() }
+            // Multi-param generics: trait bounds make these unreliable
+            if (argTypes.size > 1) return
+            val argType = argTypes.first().removePrefix("&").removePrefix("mut ").trim()
+            // Unknown type arg
+            if (argType.isNotEmpty() && argType !in knownTypeNames && argType !in RUST_PRIMITIVE_TYPES) {
+                return
+            }
+            // Type arg is itself a class with generics/lifetimes in its own definition
+            // (e.g. BufReader which is BufReader<'a> in Rust — the bridge loses the lifetime)
+            if (argType in genericOrLifetimeClassNames) {
+                return
+            }
+        }
+
+        val baseSym = "${prefix}_${className}"
+
+        if (cls.constructor.kind != KneConstructorKind.NONE &&
+            cls.constructor.params.all { isKnownType(it.type) } &&
+            cls.constructor.params.none { hasUnbridgeableParam(it) } &&
+            cls.constructor.params.none { isAmbiguousParam(it) }) {
+            appendConstructor(cls, prefix)
+        }
+
+        // Dispose
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${baseSym}_dispose(handle: i64) {")
+        if (cls.isOpaque) {
+            appendLine("    let _ = handle;")
+        } else {
+            appendLine("    if handle != 0 {")
+            appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustTypeName)); }")
+            appendLine("    }")
+        }
+        appendLine("}")
+        appendLine()
+
+        // Methods (skip those referencing external unknown types)
+        for (method in cls.methods.filter { hasOnlyKnownTypes(it) }) {
+            appendMethod(method, cls, prefix)
+        }
+
+        for (method in cls.companionMethods.filter { hasOnlyKnownTypes(it) }) {
+            appendCompanionMethod(method, cls, prefix)
+        }
+
+        // Properties (skip those with unknown types)
+        for (prop in cls.properties.filter { isKnownType(it.type) }) {
+            appendPropertyBridges(prop, cls, prefix)
+        }
+    }
+
+    private fun StringBuilder.appendConstructor(cls: KneClass, prefix: String) {
+        val className = cls.simpleName
+        val rustName = cls.rustTypeName
+        val sym = "${prefix}_${className}"
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_new(")
+        append(cls.constructor.params.joinToString(", ") { p ->
+            when (p.type) {
+                KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET -> "${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32"
+                is KneType.MAP -> {
+                    val mapType = p.type as KneType.MAP
+                    "${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}, ${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}, ${p.name}_size: i32"
+                }
+                else -> "${p.name}: ${rustCType(p.type)}"
+            }
+        })
+        appendLine(") -> i64 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (p in cls.constructor.params) {
+            appendParamConversion(p)
+        }
+        // For generic structs like Processor<Tripler>, constructor path needs turbofish: Processor::<Tripler>::new(...)
+        val ctorRustName = rustName.replace("<", "::<")
+        val ctorExpr = when (cls.constructor.kind) {
+            KneConstructorKind.FUNCTION -> {
+                val args = cls.constructor.params.joinToString(", ") { p -> convertedCallArg(p) }
+                "$ctorRustName::new($args)"
+            }
+            KneConstructorKind.STRUCT_LITERAL -> {
+                val args = cls.constructor.params.joinToString(", ") { p -> "${p.name}: ${convertedCallArg(p)}" }
+                "$rustName { $args }"
+            }
+            KneConstructorKind.NONE -> error("unreachable")
+        }
+        if (cls.constructor.canFail) {
+            appendFallibleReturnHandling(ctorExpr, KneType.OBJECT(cls.fqName, className))
+        } else {
+            appendValueReturnHandling(ctorExpr, KneType.OBJECT(cls.fqName, className))
+        }
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        if (fn.returnType is KneType.FLOW) {
+            appendFlowMethod(fn, cls, prefix)
+            return
+        }
+        if (fn.isSuspend) {
+            appendSuspendMethod(fn, cls, prefix)
+            return
+        }
+        if (!isSupportedReturnType(fn.returnType)) return
+        // Skip methods with turbofish on generic classes: the turbofish is a
+        // monomorphisation artifact. The method either doesn't take generics (E0107)
+        // or the class already provides the type.
+        val turbo = fn.turbofish
+        if (turbo != null && cls.rustTypeName.contains("<")) {
+            return
+        }
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
+        val needsBufOutput = needsOutputBuffer(fn.returnType)
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(handle: i64")
+        for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                append(", ${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) append(", ${p.name}_keys_len: i32")
+                append(", ${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) append(", ${p.name}_values_len: i32")
+                append(", ${p.name}_size: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
+            } else if (p.type is KneType.DATA_CLASS) {
+                // Expand data class fields as individual C params
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else if (p.type is KneType.TUPLE) {
+                val tuple = p.type as KneType.TUPLE
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    when (elemType) {
+                        is KneType.LIST, is KneType.SET -> {
+                            append(", ${p.name}_${idx}_ptr: ${slicePointerType(elemType)}, ${p.name}_${idx}_len: i32")
+                        }
+                        is KneType.MAP -> {
+                            append(", ${p.name}_${idx}_keys_ptr: ${mapSlicePointerType(elemType.keyType)}, ${p.name}_${idx}_keys_len: i32")
+                            append(", ${p.name}_${idx}_values_ptr: ${mapSlicePointerType(elemType.valueType)}, ${p.name}_${idx}_values_len: i32")
+                        }
+                        else -> append(", ${p.name}_$idx: ${rustCType(elemType)}")
+                    }
+                }
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        if (needsBufOutput) {
+            append(", out_buf: *mut u8, out_buf_len: i32")
+        }
+        // Data class return (or nullable data class): add per-field out-params
+        val returnDc = extractReturnDataClass(fn.returnType)
+        if (returnDc != null) {
+            for (field in returnDc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        append(", out_${field.name}: *mut u8, out_${field.name}_len: i32")
+                    }
+                    else -> {
+                        append(", out_${field.name}: *mut ${rustCType(field.type)}")
+                    }
+                }
+            }
+        }
+        // MAP return: dual key/value buffers + max count
+        extractMapReturnType(fn.returnType)?.let { mapType ->
+            append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+            append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+            append(", out_max_len: i32")
+        }
+        // Tuple return: add per-element out-params
+        if (fn.returnType is KneType.TUPLE) {
+            val tuple = fn.returnType as KneType.TUPLE
+            for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                when (elemType) {
+                    KneType.STRING -> {
+                        append(", out_t_$idx: *mut u8, out_t_${idx}_len: i32")
+                    }
+                    is KneType.LIST, is KneType.SET -> {
+                        val innerElem = when (elemType) { is KneType.LIST -> elemType.elementType; is KneType.SET -> (elemType as KneType.SET).elementType; else -> KneType.INT }
+                        val ptrType = listOutPointerType(innerElem)
+                        append(", out_t_$idx: $ptrType, out_t_${idx}_cap: i32, out_t_${idx}_len: *mut i32")
+                    }
+                    is KneType.MAP -> {
+                        append(", out_t_${idx}_keys: *mut u8, out_t_${idx}_keys_len: i32")
+                        append(", out_t_${idx}_values: *mut u8, out_t_${idx}_values_len: i32")
+                        append(", out_t_${idx}_len: i32")
+                    }
+                    else -> {
+                        append(", out_t_$idx: *mut ${rustCType(elemType)}")
+                    }
+                }
+            }
+        }
+        appendLine(") -> ${if (fn.returnType == KneType.NEVER) "()" else rustCReturnType(fn.returnType)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        if (fn.returnType == KneType.NEVER) {
+            appendReceiverBinding(fn, cls.rustTypeName)
+            for (p in fn.params) {
+                appendParamConversion(p)
+            }
+            val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+            val expr = wrapExprWithMutObjectSliceWriteback(
+                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params, "    "
+            )
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendLine("        $expr")
+            appendLine("    })) {")
+            appendLine("        Ok(_) => unreachable!(),")
+            appendLine("        Err(e) => { kne_set_panic_error(e); }")
+            appendLine("    }")
+        } else {
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendReceiverBinding(fn, cls.rustTypeName)
+            for (p in fn.params) {
+                appendParamConversion(p)
+            }
+            val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+            val expr = wrapExprWithMutObjectSliceWriteback(
+                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+            )
+            if (fn.canFail) {
+                appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+            } else {
+                appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+            }
+            appendLine("    })) {")
+            if (fn.returnType is KneType.DATA_CLASS) {
+                appendLine("        Ok(_) => {},")
+            } else {
+                appendLine("        Ok(v) => v,")
+            }
+            appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
+            appendLine("    }")
+        }
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendCompanionMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        if (!isSupportedReturnType(fn.returnType)) return
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_companion_${fn.name}")
+        val needsBuf = needsOutputBuffer(fn.returnType)
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(")
+        val allParams = mutableListOf<String>()
+        for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                allParams.add("${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) allParams.add("${p.name}_keys_len: i32")
+                allParams.add("${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) allParams.add("${p.name}_values_len: i32")
+                allParams.add("${p.name}_size: i32")
+            } else if (ndc != null) {
+                allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        if (needsBuf) {
+            allParams.add("out_buf: *mut u8")
+            allParams.add("out_buf_len: i32")
+        }
+        val companionReturnDc = extractReturnDataClass(fn.returnType)
+        if (companionReturnDc != null) {
+            for (field in companionReturnDc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        allParams.add("out_${field.name}: *mut u8")
+                        allParams.add("out_${field.name}_len: i32")
+                    }
+                    else -> allParams.add("out_${field.name}: *mut ${rustCType(field.type)}")
+                }
+            }
+        }
+        // MAP return: dual key/value buffers + max count
+        extractMapReturnType(fn.returnType)?.let { mapType ->
+            allParams.add("out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) allParams.add("out_keys_len: i32")
+            allParams.add("out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) allParams.add("out_values_len: i32")
+            allParams.add("out_max_len: i32")
+        }
+        append(allParams.joinToString(", "))
+        appendLine(") -> ${rustCReturnType(fn.returnType)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (p in fn.params) {
+            appendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        val expr = wrapExprWithMutObjectSliceWriteback(
+            wrapCallForSafety("${cls.simpleName}::${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+        )
+        if (fn.canFail) {
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+        } else {
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+        }
+        appendLine("    })) {")
+        if (fn.returnType is KneType.DATA_CLASS) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
+        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendPropertyBridges(prop: KneProperty, cls: KneClass, prefix: String) {
+        if (!isSupportedReturnType(prop.type)) return
+        val className = cls.simpleName
+        val sym = "${prefix}_${className}"
+
+        if (prop.type is KneType.MAP) {
+            appendMapPropertyGetter(prop, cls, sym)
+            return
+        }
+
+        val needsBuf = needsOutputBuffer(prop.type)
+        val returnDc = extractReturnDataClass(prop.type)
+
+        // Getter bridge
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_get_${prop.name}(handle: i64")
+        if (needsBuf) append(", out_buf: *mut u8, out_buf_len: i32")
+        if (returnDc != null) {
+            for (field in returnDc.fields) {
+                when (field.type) {
+                    KneType.STRING -> append(", out_${field.name}: *mut u8, out_${field.name}_len: i32")
+                    else -> append(", out_${field.name}: *mut ${rustCType(field.type)}")
+                }
+            }
+        }
+        appendLine(") -> ${rustCReturnType(prop.type)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
+        appendValueReturnHandling("obj.get_${prop.name}()", prop.type)
+        appendLine("    })) {")
+        if (returnDc != null) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
+        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(prop.type)} }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+
+        // Setter bridge (only if mutable)
+        if (prop.mutable) {
+            val param = KneParam("value", prop.type)
+            appendLine("#[no_mangle]")
+            append("pub extern \"C\" fn ${sym}_set_${prop.name}(handle: i64")
+            append(", value: ${rustCType(prop.type)}")
+            appendLine(") {")
+            appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+            appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+            appendLine("        let obj = unsafe { &mut *(handle as *mut ${cls.rustTypeName}) };")
+            appendParamConversion(param)
+            val callArg = convertedParamName(param)
+            appendLine("        obj.set_${prop.name}($callArg);")
+            appendLine("    })) {")
+            appendLine("        Ok(_) => {},")
+            appendLine("        Err(e) => { kne_set_panic_error(e); }")
+            appendLine("    }")
+            appendLine("}")
+            appendLine()
+        }
+    }
+
+    private fun StringBuilder.appendMapPropertyGetter(prop: KneProperty, cls: KneClass, sym: String) {
+        val mapType = prop.type as KneType.MAP
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn ${sym}_get_${prop.name}(handle: i64")
+        append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+        if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+        append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+        if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+        appendLine(", out_max_len: i32) -> i32 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
+        appendMapReturnFromBinding("obj.get_${prop.name}()", mapType, "        ")
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0 }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Extract a DATA_CLASS from a return type (handles both direct and nullable). */
+    private fun extractReturnDataClass(type: KneType): KneType.DATA_CLASS? = when (type) {
+        is KneType.DATA_CLASS -> type
+        is KneType.NULLABLE -> type.inner as? KneType.DATA_CLASS
+        else -> null
+    }
+
+    /** Check if the return type is fully supported by the Rust bridge generator. */
+    private fun isSupportedReturnType(type: KneType): Boolean = when (type) {
+        is KneType.MAP -> isSupportedMapElementType(type.keyType) && isSupportedMapElementType(type.valueType)
+        is KneType.NULLABLE -> isSupportedReturnType(type.inner)
+        else -> true
+    }
+
+    private fun isSupportedMapElementType(type: KneType): Boolean = when (type) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING -> true
+        is KneType.ENUM, is KneType.OBJECT, is KneType.SEALED_ENUM -> true
+        else -> false
+    }
+
+    /**
+     * Returns true if the given type is a dyn Trait (fat pointer) that cannot be
+     * represented as an i64 handle across the FFM boundary.
+     * Handles: dyn Trait, &dyn Trait, &mut dyn Trait, Box<dyn Trait>
+     */
+    private fun isDynTraitType(type: KneType, rustType: String?): Boolean {
+        if (type is KneType.INTERFACE) {
+            val rt = rustType ?: return false
+            // Check for direct dyn Trait or dyn Trait in Box/Option/Result
+            rt.startsWith("dyn ") || rt.startsWith("&dyn ") || rt.startsWith("&mut dyn ") ||
+                rt.startsWith("Box<dyn") || rt.startsWith("Option<Box<dyn") || rt.startsWith("Result<Box<dyn")
+        }
+        return false
+    }
+
+    /**
+     * Returns true if the given param uses dyn Trait.
+     */
+    private fun isDynTraitParam(p: KneParam): Boolean =
+        isDynTraitType(p.type, p.rustType)
+
+    /**
+     * Returns true if this function uses dyn Trait and should be handled by the dyn Trait handler.
+     * Returns false if the function should be skipped (e.g., &dyn Trait params which can't be bridged).
+     */
+    private fun isDynTraitFunction(fn: KneFunction): Boolean {
+        // If params contain &dyn Trait (INTERFACE type), handle via registry-based handle passing
+        if (fn.params.any { p -> p.type is KneType.INTERFACE }) {
+            return true  // Handle via registry — pass handle, reconstruct &dyn Trait on Rust side
+        }
+
+        // If return type is dyn Trait (Box<dyn Trait>, Option<...>, Result<...>), handle via registry
+        val retRt = fn.returnRustType ?: ""
+        if (retRt.contains("dyn ")) {
+            return true  // Handle via registry
+        }
+
+        // If return type is INTERFACE (dyn Trait interface), handle via registry
+        if (isDynTraitType(fn.returnType, fn.returnRustType)) {
+            return true
+        }
+
+        return false  // Not a dyn Trait function
+    }
+
+    /** Extract MAP type from a direct MAP or Nullable<MAP> return. */
+    private fun extractMapReturnType(type: KneType): KneType.MAP? = when (type) {
+        is KneType.MAP -> type
+        is KneType.NULLABLE -> type.inner as? KneType.MAP
+        else -> null
+    }
+
+    /** Returns the Rust pointer type for a MAP out-parameter buffer. */
+    private fun mapOutPointerType(elemType: KneType): String = when (elemType) {
+        KneType.STRING -> "*mut u8"
+        KneType.INT, KneType.BOOLEAN -> "*mut i32"
+        KneType.LONG -> "*mut i64"
+        KneType.DOUBLE -> "*mut f64"
+        KneType.FLOAT -> "*mut f32"
+        KneType.SHORT -> "*mut i16"
+        KneType.BYTE -> "*mut i8"
+        is KneType.ENUM -> "*mut i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*mut i64"
+        else -> "*mut i64"
+    }
+
+    private fun needsOutputBuffer(type: KneType): Boolean = when (type) {
+        KneType.STRING, KneType.BYTE_ARRAY -> true
+        is KneType.LIST, is KneType.SET -> true
+        is KneType.NULLABLE -> when (type.inner) {
+            KneType.STRING, KneType.BYTE_ARRAY -> true
+            is KneType.LIST, is KneType.SET -> true
+            else -> false
+        }
+        is KneType.DATA_CLASS -> false // Data class returns use per-field out-params, not a single buffer
+        is KneType.MAP -> false // MAP uses dual buffers, handled separately
+        else -> false
+    }
+
+    private fun StringBuilder.appendReturnHandling(expr: String, returnType: KneType) {
+        appendValueReturnHandling(expr, returnType)
+    }
+
+    private fun StringBuilder.appendFallibleReturnHandling(
+        expr: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+        returnConversion: String? = null,
+    ) {
+        appendLine("        match $expr {")
+        appendLine("            Ok(result) => {")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "            ", returnConversion)
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_error(e.to_string());")
+        appendLine("                ${defaultReturnValue(returnType)}")
+        appendLine("            }")
+        appendLine("        }")
+    }
+
+    private fun StringBuilder.appendValueReturnHandling(
+        expr: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+        returnConversion: String? = null,
+    ) {
+        appendLine("        let result = $expr;")
+        appendValueReturnFromBinding("result", returnType, returnRustType, returnsBorrowed, "        ", returnConversion)
+    }
+
+    private fun StringBuilder.appendValueReturnFromBinding(
+        binding: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+        indent: String = "        ",
+        returnConversion: String? = null,
+    ) {
+        if (returnConversion != null) {
+            appendLine("${indent}let $binding = $binding$returnConversion;")
+        }
+        when (returnType) {
+            KneType.STRING -> {
+                appendStringOutput(binding, indent, returnRustType)
+            }
+            KneType.BYTE_ARRAY -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping($binding.as_ptr(), out_buf, $binding.len()); }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.UNIT -> {
+                appendLine("${indent}()")
+            }
+            KneType.NEVER -> {
+                appendLine("${indent}()")
+            }
+            is KneType.DATA_CLASS -> {
+                val dc = returnType
+                for (field in dc.fields) {
+                    when (field.type) {
+                        KneType.STRING -> {
+                            appendLine("${indent}let _f_bytes = $binding.${field.name}.as_bytes();")
+                            appendLine("${indent}if (_f_bytes.len() as i32) < out_${field.name}_len {")
+                            appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
+                            appendLine("${indent}    unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
+                            appendLine("${indent}}")
+                        }
+                        else -> {
+                            appendLine("${indent}unsafe { *out_${field.name} = ${rustReturnExpr("$binding.${field.name}", field.type, field.rustType)}; }")
+                        }
+                    }
+                }
+                appendLine("${indent}()")
+            }
+            is KneType.TUPLE -> {
+                val tuple = returnType
+                val tupleCounter = intArrayOf(0) // shared across all nested tuples in this return
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    when (elemType) {
+                        KneType.STRING -> {
+                            appendLine("${indent}let _e_bytes = $binding.$idx.as_bytes();")
+                            appendLine("${indent}if (_e_bytes.len() as i32) < out_t_${idx}_len {")
+                            appendLine("${indent}    unsafe { std::ptr::copy_nonoverlapping(_e_bytes.as_ptr(), out_t_$idx, _e_bytes.len()); }")
+                            appendLine("${indent}    unsafe { *out_t_$idx.add(_e_bytes.len()) = 0; }")
+                            appendLine("${indent}}")
+                        }
+                        is KneType.LIST -> {
+                            appendLine("${indent}let _list_len_$idx = $binding.$idx.len() as i32;")
+                            appendLine("${indent}unsafe { *out_t_${idx}_len = _list_len_$idx; }")
+                            appendLine("${indent}if _list_len_$idx <= out_t_${idx}_cap {")
+                            appendListTupleElementWrite("$binding.$idx", elemType as KneType.LIST, "out_t_$idx", indent)
+                            appendLine("${indent}}")
+                        }
+                        is KneType.SET -> {
+                            appendLine("${indent}let _set_len_$idx = $binding.$idx.len() as i32;")
+                            appendLine("${indent}unsafe { *out_t_${idx}_len = _set_len_$idx; }")
+                            appendLine("${indent}if _set_len_$idx <= out_t_${idx}_cap {")
+                            appendListTupleElementWrite("$binding.$idx", KneType.LIST(elemType.elementType), "out_t_$idx", indent)
+                            appendLine("${indent}}")
+                        }
+                        is KneType.MAP -> {
+                            appendMapTupleElementWrite("$binding.$idx", elemType as KneType.MAP, idx, indent)
+                        }
+                        is KneType.TUPLE -> {
+                            val bufVar = appendNestedTupleWrite(indent, "$binding.$idx", elemType as KneType.TUPLE, tupleCounter)
+                            appendLine("${indent}unsafe { out_t_$idx.write($bufVar as i64); }")
+                        }
+                        else -> {
+                            appendLine("${indent}unsafe { *out_t_$idx = ${rustReturnExpr("$binding.$idx", elemType, null)}; }")
+                        }
+                    }
+                }
+                appendLine("${indent}()")
+            }
+            is KneType.OBJECT -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
+            }
+            is KneType.INTERFACE -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
+            }
+            is KneType.SEALED_ENUM -> {
+                if (returnsBorrowed) {
+                    appendLine("${indent}$binding as *const _ as i64")
+                } else {
+                    appendLine("${indent}Box::into_raw(Box::new($binding)) as i64")
+                }
+            }
+            is KneType.NULLABLE -> {
+                appendNullableReturn(returnType, binding, returnsBorrowed, returnRustType, indent)
+            }
+            is KneType.LIST -> {
+                appendListReturnFromBinding(binding, returnType, indent, returnRustType)
+            }
+            is KneType.SET -> {
+                appendListReturnFromBinding(binding, KneType.LIST(returnType.elementType), indent, returnRustType)
+            }
+            is KneType.MAP -> {
+                appendMapReturnFromBinding(binding, returnType, indent, returnRustType)
+            }
+            else -> { appendLine("${indent}${rustReturnExpr(binding, returnType, returnRustType, returnsBorrowed)}")
+            }
+        }
+    }
+
+    // --- Enum bridges ---
+
+    private fun StringBuilder.appendListReturnFromBinding(binding: String, listType: KneType.LIST, indent: String, returnRustType: String? = null) {
+        val elemType = listType.elementType
+        when (elemType) {
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                // Check if this OBJECT is actually an enum (cross-crate mis-resolution)
+                if (elemType is KneType.OBJECT && elemType.simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}let len = $binding.len() as i32;")
+                    appendLine("${indent}if len <= out_buf_len {")
+                    appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                    appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = *v as i32; }")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                    appendLine("${indent}len")
+                } else {
+                    // Return borrowed pointers - ownership remains with parent
+                    appendLine("${indent}let len = $binding.len() as i32;")
+                    appendLine("${indent}if len <= out_buf_len {")
+                    appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                    appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = v as *const _ as i64; }")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                    appendLine("${indent}len")
+                }
+            }
+            KneType.STRING -> {
+                // Serialize strings as null-terminated, concatenated in buffer
+                val needsLossy = isPathLikeRustType(returnRustType)
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $binding.iter() {")
+                if (needsLossy) {
+                    appendLine("${indent}    let _lossy = s.to_string_lossy();")
+                    appendLine("${indent}    let bytes = _lossy.as_bytes();")
+                } else {
+                    appendLine("${indent}    let bytes = s.as_bytes();")
+                }
+                appendLine("${indent}    if offset + bytes.len() + 1 > out_buf_len as usize {")
+                appendLine("${indent}        break;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.add(offset), bytes.len());")
+                appendLine("${indent}        *out_buf.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+            else -> {
+                // Default: treat as i32 primitives
+                appendLine("${indent}let len = $binding.len() as i32;")
+                appendLine("${indent}if len <= out_buf_len {")
+                appendLine("${indent}    for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}        unsafe { *(out_buf as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}    }")
+                appendLine("${indent}}")
+                appendLine("${indent}len")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendListTupleElementWrite(
+        binding: String, listType: KneType.LIST, bufName: String, indent: String
+    ) {
+        val elemType = listType.elementType
+        when (elemType) {
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $binding.iter() {")
+                appendLine("${indent}    let bytes = s.as_bytes();")
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), $bufName.add(offset), bytes.len());")
+                appendLine("${indent}        *$bufName.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
+                appendLine("${indent}}")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}}")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}}")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}}")
+            }
+            else -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendMapTupleElementWrite(
+        binding: String, mapType: KneType.MAP, idx: Int, indent: String
+    ) {
+        val keyType = mapType.keyType
+        val valueType = mapType.valueType
+        appendLine("${indent}let _map_len = $binding.len() as i32;")
+        appendLine("${indent}if _map_len <= out_t_${idx}_len {")
+        appendLine("${indent}    let mut _key_offset = 0usize;")
+        appendLine("${indent}    let mut _val_offset = 0usize;")
+        appendLine("${indent}    for (k, v) in $binding.iter().enumerate() {")
+        appendMapElementWrite("Some(k)", keyType, "out_t_${idx}_keys", indent + "        ", null)
+        appendMapElementWrite("Some(v)", valueType, "out_t_${idx}_values", indent + "        ", null)
+        appendLine("${indent}    }")
+        appendLine("${indent}}")
+    }
+
+    // ── MAP return bridge ────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendMapReturnFromBinding(
+        binding: String, mapType: KneType.MAP, indent: String, returnRustType: String? = null
+    ) {
+        val keyType = mapType.keyType
+        val valueType = mapType.valueType
+        appendLine("${indent}let len = $binding.len() as i32;")
+        appendLine("${indent}if len <= out_max_len {")
+        // Write keys
+        appendMapElementWrite("$binding.keys()", keyType, "out_keys", indent + "    ", returnRustType)
+        // Write values
+        appendMapElementWrite("$binding.values()", valueType, "out_values", indent + "    ", returnRustType)
+        appendLine("${indent}}")
+        appendLine("${indent}len")
+    }
+
+    private fun StringBuilder.appendMapElementWrite(
+        iterExpr: String, elemType: KneType, bufName: String,
+        indent: String, returnRustType: String? = null,
+    ) {
+        when (elemType) {
+            KneType.STRING -> {
+                val needsLossy = isPathLikeRustType(returnRustType)
+                appendLine("${indent}let mut offset = 0usize;")
+                appendLine("${indent}for s in $iterExpr {")
+                if (needsLossy) {
+                    appendLine("${indent}    let _lossy = s.to_string_lossy();")
+                    appendLine("${indent}    let bytes = _lossy.as_bytes();")
+                } else {
+                    appendLine("${indent}    let bytes = s.as_bytes();")
+                }
+                appendLine("${indent}    unsafe {")
+                appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), $bufName.add(offset), bytes.len());")
+                appendLine("${indent}        *$bufName.add(offset + bytes.len()) = 0;")
+                appendLine("${indent}    }")
+                appendLine("${indent}    offset += bytes.len() + 1;")
+                appendLine("${indent}}")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = *v as i64; }")
+                appendLine("${indent}}")
+            }
+            KneType.INT -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f64).add(i) = *v as f64; }")
+                appendLine("${indent}}")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut f32).add(i) = *v as f32; }")
+                appendLine("${indent}}")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = if *v { 1 } else { 0 }; }")
+                appendLine("${indent}}")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = v.clone() as i32; }")
+                appendLine("${indent}}")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}}")
+            }
+            else -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+        }
+    }
+
+    // ── Enum bridges ─────────────────────────────────────────────────────────
+
+    private fun StringBuilder.appendEnum(enum: KneEnum, prefix: String) {
+        val sym = "${prefix}_${enum.simpleName}"
+
+        // name(ordinal) -> string
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_name(ordinal: i32, out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+        appendLine("    let name = match ordinal {")
+        for ((i, entry) in enum.entries.withIndex()) {
+            appendLine("        $i => \"$entry\",")
+        }
+        appendLine("        _ => \"Unknown\",")
+        appendLine("    };")
+        appendLine("    let bytes = name.as_bytes();")
+        appendLine("    let len = bytes.len() as i32;")
+        appendLine("    if len < out_buf_len {")
+        appendLine("        unsafe {")
+        appendLine("            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("            *out_buf.add(bytes.len()) = 0;")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("    len + 1")
+        appendLine("}")
+        appendLine()
+
+        // count() -> i32
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_count() -> i32 {")
+        appendLine("    ${enum.entries.size}")
+        appendLine("}")
+        appendLine()
+    }
+
+    // --- Sealed enums (tagged enums with data variants) ---
+
+    private fun StringBuilder.appendSealedEnum(sealed: KneSealedEnum, prefix: String) {
+        val sym = "${prefix}_${sealed.simpleName}"
+        val rustName = sealed.simpleName
+
+        // dispose(handle)
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_dispose(handle: i64) {")
+        appendLine("    if handle != 0 {")
+        appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustName)); }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+
+        // tag(handle) -> i32
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${sym}_tag(handle: i64) -> i32 {")
+        appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+        appendLine("    match obj {")
+        for ((i, variant) in sealed.variants.withIndex()) {
+            val pattern = when {
+                variant.fields.isEmpty() -> "$rustName::${variant.name}"
+                variant.isTuple -> "$rustName::${variant.name}(..)"
+                else -> "$rustName::${variant.name} { .. }"
+            }
+            appendLine("        $pattern => $i,")
+        }
+        appendLine("        _ => -1,")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+
+        // Per-variant constructors and field getters
+        for ((i, variant) in sealed.variants.withIndex()) {
+            appendSealedVariantConstructor(sym, rustName, variant, prefix)
+            appendSealedVariantFieldGetters(sym, rustName, variant, prefix)
+        }
+    }
+
+    /** Whether a collection element type can be passed as a flat C slice. */
+    private fun isSupportedCollectionElementForConstructor(elemType: KneType): Boolean = when (elemType) {
+        KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
+        KneType.SHORT, KneType.BYTE, KneType.BOOLEAN,
+        KneType.STRING -> true
+        else -> false
+    }
+
+    private fun StringBuilder.appendSealedVariantConstructor(
+        sym: String, rustName: String, variant: KneSealedVariant, prefix: String
+    ) {
+        // Skip variants with unsupported field types
+        val hasUnsupportedField = variant.fields.any { f ->
+            val t = f.type
+            when (t) {
+                is KneType.TUPLE -> true  // Tuple fields in struct variants not yet supported
+                is KneType.LIST -> !isSupportedCollectionElementForConstructor(t.elementType)
+                is KneType.SET -> !isSupportedCollectionElementForConstructor(t.elementType)
+                is KneType.MAP -> !isSupportedCollectionElementForConstructor(t.keyType) || !isSupportedCollectionElementForConstructor(t.valueType)
+                else -> hasUnbridgeableParam(f)
+            }
+        }
+        if (hasUnsupportedField) return
+        val fnName = "${sym}_new_${variant.name}"
+        appendLine("#[no_mangle]")
+        val params = variant.fields.joinToString(", ") { f ->
+            when (f.type) {
+                KneType.BYTE_ARRAY, is KneType.LIST, is KneType.SET -> "${f.name}_ptr: ${slicePointerType(f.type)}, ${f.name}_len: i32"
+                is KneType.MAP -> {
+                    val mapType = f.type as KneType.MAP
+                    buildString {
+                        append("${f.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}, ")
+                        append("${f.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}, ")
+                        append("${f.name}_size: i32")
+                    }
+                }
+                else -> "${f.name}: ${rustCType(f.type)}"
+            }
+        }
+        appendLine("pub extern \"C\" fn $fnName($params) -> i64 {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (f in variant.fields) {
+            appendParamConversion(f)
+        }
+        if (variant.fields.isEmpty()) {
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name})) as i64")
+        } else if (variant.isTuple) {
+            val args = variant.fields.joinToString(", ") { convertedCallArg(it) }
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name}($args))) as i64")
+        } else {
+            val fieldArgs = variant.fields.joinToString(", ") { f ->
+                "${f.name}: ${convertedCallArg(f)}"
+            }
+            appendLine("        Box::into_raw(Box::new($rustName::${variant.name} { $fieldArgs })) as i64")
+        }
+        appendLine("    })) {")
+        appendLine("        Ok(v) => v,")
+        appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun StringBuilder.appendSealedFieldConversion(f: KneParam) {
+        when (f.type) {
+            KneType.STRING -> {
+                appendLine("    let ${f.name} = unsafe { CStr::from_ptr(${f.name}) }.to_str().unwrap_or(\"\").to_string();")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("    let ${f.name} = ${f.name} != 0;")
+            }
+            else -> {} // Primitives don't need conversion
+        }
+    }
+
+    private fun sealedFieldArgExpr(f: KneParam): String = when (f.type) {
+        KneType.STRING -> f.name // already converted to String above
+        KneType.BOOLEAN -> f.name // already converted to bool above
+        KneType.FLOAT -> "${f.name} as f32" // i32 → f32 not needed, but f32 C param is f32
+        else -> f.name
+    }
+
+    private fun StringBuilder.appendSealedVariantFieldGetters(
+        sym: String, rustName: String, variant: KneSealedVariant, prefix: String
+    ) {
+        for (f in variant.fields) {
+            // Skip tuple-typed fields (not yet supported in sealed variant getters)
+            if (f.type is KneType.TUPLE) continue
+            // Skip fields with unbridgeable types (fn pointers with complex params, etc.)
+            if (hasUnbridgeableParam(f)) continue
+            // Handle MAP fields specially with dual buffers
+            if (f.type is KneType.MAP) {
+                appendSealedMapVariantFieldGetter(sym, rustName, variant, f)
+                continue
+            }
+
+            val fnName = "${sym}_${variant.name}_get_${f.name}"
+            val needsBuf = needsOutputBuffer(f.type)
+
+            appendLine("#[no_mangle]")
+            if (needsBuf) {
+                appendLine("pub extern \"C\" fn $fnName(handle: i64, out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+            } else {
+                appendLine("pub extern \"C\" fn $fnName(handle: i64) -> ${rustCType(f.type)} {")
+            }
+            appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+
+            // Build match pattern and value expression based on tuple vs struct
+            val fieldIndex = variant.fields.indexOf(f)
+            val (fieldPattern, valExpr) = if (variant.isTuple) {
+                // Tuple variant: match positionally
+                if (variant.fields.size == 1) {
+                    "$rustName::${variant.name}(ref _v)" to "_v"
+                } else {
+                    val wildcards = variant.fields.indices.joinToString(", ") { i ->
+                        if (i == fieldIndex) "ref _v$i" else "_"
+                    }
+                    "$rustName::${variant.name}($wildcards)" to "_v$fieldIndex"
+                }
+            } else {
+                // Struct variant: match by field name
+                "$rustName::${variant.name} { ref ${f.name}, .. }" to f.name
+            }
+
+            appendLine("    match obj {")
+            if (needsBuf || f.type is KneType.NULLABLE) {
+                // NULLABLE and buffer types need block-style handling via appendValueReturnFromBinding
+                appendLine("        $fieldPattern => {")
+                appendValueReturnFromBinding(
+                    sealedGetterBindingExpr(f, valExpr),
+                    f.type,
+                    f.rustType,
+                    returnsBorrowed = sealedGetterReturnsBorrowed(f.type),
+                    indent = "            ",
+                )
+                appendLine("        }")
+            } else {
+                val bindingExpr = sealedGetterBindingExpr(f, valExpr)
+                appendLine("        $fieldPattern => ${rustReturnExpr(bindingExpr, f.type, f.rustType, sealedGetterReturnsBorrowed(f.type))},")
+            }
+            appendLine("        _ => ${defaultCReturnValue(f.type)}")
+            appendLine("    }")
+            appendLine("}")
+            appendLine()
+        }
+    }
+
+    private fun StringBuilder.appendSealedMapVariantFieldGetter(
+        sym: String, rustName: String, variant: KneSealedVariant, f: KneParam
+    ) {
+        val fnName = "${sym}_${variant.name}_get_${f.name}"
+        val mapType = f.type as KneType.MAP
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $fnName(handle: i64")
+        append(", out_keys: ${mapOutPointerType(mapType.keyType)}")
+        if (mapType.keyType == KneType.STRING) append(", out_keys_len: i32")
+        append(", out_values: ${mapOutPointerType(mapType.valueType)}")
+        if (mapType.valueType == KneType.STRING) append(", out_values_len: i32")
+        appendLine(", out_max_len: i32) -> i32 {")
+        appendLine("    let obj = unsafe { &*(handle as *const $rustName) };")
+
+        // Build match pattern and value expression based on tuple vs struct
+        val fieldIndex = variant.fields.indexOf(f)
+        val (fieldPattern, valExpr) = if (variant.isTuple) {
+            // Tuple variant: match positionally
+            if (variant.fields.size == 1) {
+                "$rustName::${variant.name}(ref _v)" to "_v"
+            } else {
+                val wildcards = variant.fields.indices.joinToString(", ") { i ->
+                    if (i == fieldIndex) "ref _v$i" else "_"
+                }
+                "$rustName::${variant.name}($wildcards)" to "_v$fieldIndex"
+            }
+        } else {
+            // Struct variant: match by field name
+            "$rustName::${variant.name} { ref ${f.name}, .. }" to f.name
+        }
+
+        appendLine("    match obj {")
+        appendLine("        $fieldPattern => {")
+        appendMapReturnFromBinding(
+            sealedGetterBindingExpr(f, valExpr),
+            mapType,
+            "            ",
+            f.rustType
+        )
+        appendLine("        }")
+        appendLine("        _ => 0")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun defaultCReturnValue(type: KneType): String {
+        val v = when (type) {
+            KneType.DOUBLE -> "0.0"
+            KneType.FLOAT -> "0.0"
+            KneType.STRING -> "0"
+            else -> "0"
+        }
+        return "$v,"
+    }
+
+    // --- Top-level functions ---
+
+    private fun StringBuilder.appendTopLevelFunction(fn: KneFunction, prefix: String) {
+        // Handle dyn Trait functions with registry-based approach
+        if (isDynTraitFunction(fn)) {
+            appendDynTraitTopLevelFunction(fn, prefix)
+            return
+        }
+
+        val sym = uniqueSym("${prefix}_${fn.name}")
+        val needsBuf = needsOutputBuffer(fn.returnType)
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(")
+        val allParams = mutableListOf<String>()
+        for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                allParams.add("${p.name}_len: i32")
+            } else if (p.type is KneType.MAP) {
+                val mapType = p.type as KneType.MAP
+                allParams.add("${p.name}_keys_ptr: ${mapSlicePointerType(mapType.keyType)}")
+                if (mapType.keyType == KneType.STRING) allParams.add("${p.name}_keys_len: i32")
+                allParams.add("${p.name}_values_ptr: ${mapSlicePointerType(mapType.valueType)}")
+                if (mapType.valueType == KneType.STRING) allParams.add("${p.name}_values_len: i32")
+                allParams.add("${p.name}_size: i32")
+            } else if (ndc != null) {
+                allParams.addAll(nullableDataClassSignatureParamList(p.name, ndc))
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else if (p.type is KneType.TUPLE) {
+                val tuple = p.type as KneType.TUPLE
+                for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                    allParams.add("${p.name}_$idx: ${rustCType(elemType)}")
+                }
+            } else {
+                allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        if (needsBuf) {
+            allParams.add("out_buf: *mut u8")
+            allParams.add("out_buf_len: i32")
+        }
+        // Data class return: add per-field out-params
+        if (fn.returnType is KneType.DATA_CLASS) {
+            val dc = fn.returnType as KneType.DATA_CLASS
+            for (field in dc.fields) {
+                when (field.type) {
+                    KneType.STRING -> {
+                        allParams.add("out_${field.name}: *mut u8")
+                        allParams.add("out_${field.name}_len: i32")
+                    }
+                    else -> {
+                        allParams.add("out_${field.name}: *mut ${rustCType(field.type)}")
+                    }
+                }
+            }
+        }
+        // Tuple return: add per-element out-params
+        if (fn.returnType is KneType.TUPLE) {
+            val tuple = fn.returnType as KneType.TUPLE
+            for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                when (elemType) {
+                    KneType.STRING -> {
+                        allParams.add("out_t_$idx: *mut u8")
+                        allParams.add("out_t_${idx}_len: i32")
+                    }
+                    else -> {
+                        allParams.add("out_t_$idx: *mut ${rustCType(elemType)}")
+                    }
+                }
+            }
+        }
+        // MAP return: dual key/value buffers + max count
+        extractMapReturnType(fn.returnType)?.let { mapType ->
+            allParams.add("out_keys: ${mapOutPointerType(mapType.keyType)}")
+            if (mapType.keyType == KneType.STRING) allParams.add("out_keys_len: i32")
+            allParams.add("out_values: ${mapOutPointerType(mapType.valueType)}")
+            if (mapType.valueType == KneType.STRING) allParams.add("out_values_len: i32")
+            allParams.add("out_max_len: i32")
+        }
+        append(allParams.joinToString(", "))
+        appendLine(") -> ${rustCReturnType(fn.returnType)} {")
+        appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+        appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        for (p in fn.params) {
+            appendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        val expr = wrapExprWithMutObjectSliceWriteback(
+            wrapCallForSafety("${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+        )
+        if (fn.canFail) {
+            appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+        } else {
+            appendValueReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
+        }
+        appendLine("    })) {")
+        if (fn.returnType is KneType.DATA_CLASS) {
+            appendLine("        Ok(_) => {},")
+        } else {
+            appendLine("        Ok(v) => v,")
+        }
+        appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(fn.returnType)} }")
+        appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    // --- Suspend infrastructure ---
+
+    private fun StringBuilder.appendSuspendHelpers(prefix: String) {
+        appendLine("// ── Suspend helpers ──────────────────────────────────────────────────")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_cancelJob(job_handle: i64) {")
+        appendLine("    if job_handle == 0 { return; }")
+        appendLine("    let flag = unsafe { &*(job_handle as *const std::sync::atomic::AtomicBool) };")
+        appendLine("    flag.store(true, std::sync::atomic::Ordering::SeqCst);")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_disposeRef(handle: i64) {")
+        appendLine("    if handle == 0 { return; }")
+        appendLine("    unsafe { drop(Box::from_raw(handle as *mut String)); }")
+        appendLine("}")
+        appendLine()
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_readStringRef(handle: i64, out_buf: *mut u8, out_buf_len: i32) -> i32 {")
+        appendLine("    let s = unsafe { &*(handle as *const String) };")
+        appendLine("    let bytes = s.as_bytes();")
+        appendLine("    let len = bytes.len() as i32;")
+        appendLine("    if len < out_buf_len {")
+        appendLine("        unsafe {")
+        appendLine("            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("            *out_buf.add(bytes.len()) = 0;")
+        appendLine("        }")
+        appendLine("    }")
+        appendLine("    len + 1")
+        appendLine("}")
+        appendLine()
+    }
+
+    /**
+     * Generates bridge code for functions that use dyn Trait.
+     * Uses a registry-based approach: Box<dyn Trait> objects are stored in a registry
+     * and referenced by u64 handles across the FFM boundary.
+     */
+    private fun StringBuilder.appendDynTraitTopLevelFunction(fn: KneFunction, prefix: String) {
+        val sym = uniqueSym("${prefix}_${fn.name}")
+        val returnType = fn.returnType
+        val params = fn.params
+        val rustRetType = fn.returnRustType ?: ""
+        val needsBuf = needsOutputBuffer(returnType)
+
+        // Determine trait handle params (INTERFACE type = &dyn Trait or &mut dyn Trait)
+        val traitHandleParams = params.filter { p -> p.type is KneType.INTERFACE }
+
+        // Determine return type category
+        val isBoxDynTrait = rustRetType.startsWith("Box<dyn ")
+        val isOptionBoxDyn = rustRetType.startsWith("Option<Box<dyn ")
+        val isVecBoxDyn = rustRetType.startsWith("Vec<Box<dyn ")
+        val isResultBoxDyn = rustRetType.startsWith("Result<Box<dyn ")
+
+        // Build parameter list
+        val allParams = mutableListOf<String>()
+        for (p in params) {
+            when {
+                p.type is KneType.INTERFACE -> {
+                    allParams.add("${p.name}_handle: i64")
+                }
+                p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST -> {
+                    allParams.add("${p.name}_ptr: ${slicePointerType(p.type)}")
+                    allParams.add("${p.name}_len: i32")
+                }
+                p.type is KneType.DATA_CLASS -> {
+                    val dc = p.type as KneType.DATA_CLASS
+                    for (field in dc.fields) {
+                        allParams.add("${p.name}_${field.name}: ${rustCType(field.type)}")
+                    }
+                }
+                p.type is KneType.TUPLE -> {
+                    val tuple = p.type as KneType.TUPLE
+                    for ((idx, elemType) in tuple.elementTypes.withIndex()) {
+                        allParams.add("${p.name}_$idx: ${rustCType(elemType)}")
+                    }
+                }
+                else -> allParams.add("${p.name}: ${rustCType(p.type)}")
+            }
+        }
+
+        // Add output buffer for string returns
+        if (needsBuf) {
+            allParams.add("out_buf: *mut u8")
+            allParams.add("out_buf_len: i32")
+        }
+
+        // Handle different return types - order matters! Result<Box<dyn...> must be before Box<dyn...
+        // Note: returnRustType for Result returns shows inner type (Box<dyn Trait>), not Result<...>.
+        // We detect Result returns via fn.canFail flag combined with isBoxDynTrait.
+        val isResultReturn = fn.canFail && isBoxDynTrait
+        when {
+            // Result<Box<dyn Trait>, E> return - detected via canFail flag
+            isResultReturn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
+                appendLine("        match result {")
+                appendLine("            Ok(v) => {")
+                appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                    let h = *counter.borrow();")
+                appendLine("                    *counter.borrow_mut() += 1;")
+                appendLine("                    h")
+                appendLine("                });")
+                appendLine("                let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(v) };")
+                appendLine("                KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("                handle as i64")
+                appendLine("            }")
+                appendLine("            Err(e) => {")
+                appendLine("                kne_set_error(e.to_string());")
+                appendLine("                0i64")
+                appendLine("            }")
+                appendLine("        }")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Option<Box<dyn Trait>> return
+            isOptionBoxDyn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
+                appendLine("        match result {")
+                appendLine("            Some(v) => {")
+                appendLine("                let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                    let h = *counter.borrow();")
+                appendLine("                    *counter.borrow_mut() += 1;")
+                appendLine("                    h")
+                appendLine("                });")
+                appendLine("                let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(v) };")
+                appendLine("                KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("                handle as i64")
+                appendLine("            }")
+                appendLine("            None => 0i64")
+                appendLine("        }")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Vec<Box<dyn Trait>> return
+            isVecBoxDyn -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}, out_handles: *mut i64, out_count: *mut i32) -> i32 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                for (p in params) {
+                    if (p.type is KneType.LIST || p.type == KneType.BYTE_ARRAY) {
+                        appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    }
+                }
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
+                appendLine("        let count = result.len() as i32;")
+                appendLine("        unsafe { out_count.write(count); }")
+                appendLine("        for (i, item) in result.into_iter().enumerate() {")
+                appendLine("            let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("                let h = *counter.borrow();")
+                appendLine("                *counter.borrow_mut() += 1;")
+                appendLine("                h")
+                appendLine("            });")
+                appendLine("            let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(item) };")
+                appendLine("            KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("            unsafe { out_handles.add(i).write(handle as i64); }")
+                appendLine("        }")
+                appendLine("        count")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); -1 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Box<dyn Trait> return
+            isBoxDynTrait -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> i64 {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                val callArgs = params.filter { (it.rustType ?: "").let { rt -> !rt.startsWith("&dyn ") && !rt.startsWith("&mut dyn ") && !rt.startsWith("Box<dyn ") } }
+                    .joinToString(", ") { convertedParamName(it) }
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
+                appendLine("        let handle = KNE_NEXT_HANDLE.with(|counter| {")
+                appendLine("            let h = *counter.borrow();")
+                appendLine("            *counter.borrow_mut() += 1;")
+                appendLine("            h")
+                appendLine("        });")
+                appendLine("        let fat_ptr_words: [usize; 2] = unsafe { std::mem::transmute(result) };")
+                appendLine("        KNE_TRAIT_REGISTRY.with(|reg| { reg.borrow_mut().insert(handle, fat_ptr_words); });")
+                appendLine("        handle as i64")
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); 0i64 }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            // Functions taking &dyn Trait params — reconstruct reference via transmute from registry
+            traitHandleParams.isNotEmpty() -> {
+                appendLine("#[no_mangle]")
+                appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> ${rustCReturnType(returnType)} {")
+                appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
+                appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
+                // Reconstruct &dyn Trait / &mut dyn Trait from registry via transmute
+                for (p in traitHandleParams) {
+                    val traitName = (p.type as KneType.INTERFACE).simpleName
+                    val rt = p.rustType ?: ""
+                    val isMut = rt.contains("&mut ")
+                    val mutKw = if (isMut) "mut " else ""
+                    val refKw = if (isMut) "&mut " else "&"
+                    appendLine("        let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                    appendLine("            *reg.borrow().get(&(${p.name}_handle as u64)).expect(\"Invalid trait handle\")")
+                    appendLine("        });")
+                    appendLine("        let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
+                }
+                // Slice params
+                for (p in params) {
+                    if (p.type is KneType.LIST || p.type == KneType.BYTE_ARRAY) {
+                        appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    }
+                }
+                // Build call args
+                val callArgs = params.joinToString(", ") { p ->
+                    if (traitHandleParams.contains(p)) "${p.name}_ref"
+                    else convertedParamName(p)
+                }
+                appendLine("        let result = ${rustCallName(fn)}($callArgs);")
+                // Handle return value
+                if (needsBuf) {
+                    appendLine("        let bytes = result.as_bytes();")
+                    appendLine("        let len = bytes.len() as i32;")
+                    appendLine("        if len < out_buf_len {")
+                    appendLine("            unsafe {")
+                    appendLine("                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+                    appendLine("                *out_buf.add(bytes.len()) = 0;")
+                    appendLine("            }")
+                    appendLine("        }")
+                    appendLine("        len + 1")
+                } else {
+                    when (returnType) {
+                        KneType.UNIT -> {} // nothing to return
+                        KneType.INT -> appendLine("        result as i32")
+                        KneType.LONG -> appendLine("        result as i64")
+                        KneType.BOOLEAN -> appendLine("        if result { 1 } else { 0 }")
+                        else -> appendLine("        result")
+                    }
+                }
+                appendLine("    })) {")
+                appendLine("        Ok(v) => v,")
+                appendLine("        Err(e) => { kne_set_panic_error(e); ${defaultReturnValue(returnType)} }")
+                appendLine("    }")
+                appendLine("}")
+                appendLine()
+            }
+
+            else -> {
+                // Unhandled dyn Trait return type - should not reach here with current cases
+            }
+        }
+    }
+
+    private fun StringBuilder.appendFlowMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
+        val className = cls.simpleName
+        val flowType = fn.returnType as KneType.FLOW
+        val elemType = flowType.elementType
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(handle: i64")
+        for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        append(", next_ptr: i64, error_ptr: i64, complete_ptr: i64, cancel_out: *mut i64")
+        appendLine(") {")
+
+        // Create cancellation flag
+        appendLine("    let cancel_flag = Box::into_raw(Box::new(std::sync::atomic::AtomicBool::new(false)));")
+        appendLine("    unsafe { *cancel_out = cancel_flag as i64; }")
+        appendLine("    let cancel_addr = cancel_flag as usize;")
+        appendLine()
+
+        // Spawn thread
+        appendLine("    std::thread::spawn(move || {")
+        appendLine("        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        if (fn.isMutating) {
+            appendLine("            let obj = unsafe { &mut *(handle as *mut $className) };")
+        } else {
+            appendLine("            let obj = unsafe { &*(handle as *const $className) };")
+        }
+        // Param conversions inside the closure
+        for (p in fn.params) {
+            appendSuspendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        appendLine("            obj.${rustCallName(fn)}($callArgs)")
+        appendLine("        }));")
+        appendLine()
+        appendLine("        match result {")
+        appendLine("            Ok(vec) => {")
+        appendLine("                let next_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(next_ptr) };")
+        appendLine("                let cancel = unsafe { &*(cancel_addr as *const std::sync::atomic::AtomicBool) };")
+        appendLine("                for item in vec {")
+        appendLine("                    if cancel.load(std::sync::atomic::Ordering::SeqCst) { break; }")
+        appendLine("                    next_fn(${flowElementEncode(elemType)});")
+        appendLine("                }")
+        appendLine("                let complete_fn: extern \"C\" fn() = unsafe { std::mem::transmute(complete_ptr) };")
+        appendLine("                complete_fn();")
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_panic_error(e);")
+        appendLine("                let msg = KNE_LAST_ERROR.with(|e| e.borrow_mut().take().unwrap_or_default());")
+        appendLine("                let msg_handle = Box::into_raw(Box::new(msg)) as i64;")
+        appendLine("                let error_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(error_ptr) };")
+        appendLine("                error_fn(msg_handle);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Encodes a flow element value to i64 for the next_fn callback. */
+    private fun flowElementEncode(elemType: KneType): String = when (elemType) {
+        KneType.INT -> "item as i64"
+        KneType.LONG -> "item as i64"
+        KneType.BYTE -> "item as i64"
+        KneType.SHORT -> "item as i64"
+        KneType.BOOLEAN -> "if item { 1i64 } else { 0i64 }"
+        KneType.STRING -> "Box::into_raw(Box::new(item)) as i64"
+        KneType.DOUBLE -> "i64::from_ne_bytes(item.to_ne_bytes())"
+        KneType.FLOAT -> "item.to_bits() as i64"
+        is KneType.ENUM -> "item as i64"
+        is KneType.OBJECT -> "Box::into_raw(Box::new(item)) as i64"
+        else -> "item as i64"
+    }
+
+    private fun StringBuilder.appendSuspendMethod(fn: KneFunction, cls: KneClass, prefix: String) {
+        val sym = uniqueSym("${prefix}_${cls.simpleName}_${fn.name}")
+        val className = cls.simpleName
+
+        appendLine("#[no_mangle]")
+        append("pub extern \"C\" fn $sym(handle: i64")
+        for (p in fn.params) {
+            val ndc = nullableDataClass(p.type)
+            if (p.type == KneType.BYTE_ARRAY || p.type is KneType.LIST) {
+                append(", ${p.name}_ptr: ${slicePointerType(p.type)}, ${p.name}_len: i32")
+            } else if (ndc != null) {
+                appendNullableDataClassSignatureParams(p.name, ndc)
+            } else if (p.type is KneType.DATA_CLASS) {
+                val dc = p.type as KneType.DATA_CLASS
+                for (field in dc.fields) {
+                    append(", ${p.name}_${field.name}: ${rustCType(field.type)}")
+                }
+            } else {
+                append(", ${p.name}: ${rustCType(p.type)}")
+            }
+        }
+        append(", cont_ptr: i64, exc_ptr: i64, cancel_out: *mut i64")
+        appendLine(") {")
+
+        // Create cancellation flag
+        appendLine("    let cancel_flag = Box::into_raw(Box::new(std::sync::atomic::AtomicBool::new(false)));")
+        appendLine("    unsafe { *cancel_out = cancel_flag as i64; }")
+        appendLine()
+
+        // Spawn thread
+        appendLine("    std::thread::spawn(move || {")
+        appendLine("        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
+        if (fn.isMutating) {
+            appendLine("            let obj = unsafe { &mut *(handle as *mut $className) };")
+        } else {
+            appendLine("            let obj = unsafe { &*(handle as *const $className) };")
+        }
+        // Param conversions inside the closure
+        for (p in fn.params) {
+            appendSuspendParamConversion(p)
+        }
+        val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
+        appendLine("            obj.${rustCallName(fn)}($callArgs)")
+        appendLine("        }));")
+        appendLine()
+        appendLine("        match result {")
+        appendLine("            Ok(value) => {")
+        appendSuspendContinuationCall(fn.returnType)
+        appendLine("            }")
+        appendLine("            Err(e) => {")
+        appendLine("                kne_set_panic_error(e);")
+        appendLine("                let msg = KNE_LAST_ERROR.with(|e| e.borrow_mut().take().unwrap_or_default());")
+        appendLine("                let msg_handle = Box::into_raw(Box::new(msg)) as i64;")
+        appendLine("                let exc_fn: extern \"C\" fn(i64) = unsafe { std::mem::transmute(exc_ptr) };")
+        appendLine("                exc_fn(msg_handle);")
+        appendLine("            }")
+        appendLine("        }")
+        appendLine("    });")
+        appendLine("}")
+        appendLine()
+    }
+
+    /** Generates the continuation callback invocation based on the return type. */
+    private fun StringBuilder.appendSuspendContinuationCall(returnType: KneType) {
+        appendLine("                let cont_fn: extern \"C\" fn(i32, i64) = unsafe { std::mem::transmute(cont_ptr) };")
+        when (returnType) {
+            KneType.INT -> appendLine("                cont_fn(1, value as i64);")
+            KneType.LONG -> appendLine("                cont_fn(1, value);")
+            KneType.DOUBLE -> appendLine("                cont_fn(1, f64::to_bits(value) as i64);")
+            KneType.FLOAT -> appendLine("                cont_fn(1, f32::to_bits(value) as i64);")
+            KneType.BOOLEAN -> appendLine("                cont_fn(1, (value as i32) as i64);")
+            KneType.BYTE -> appendLine("                cont_fn(1, value as i64);")
+            KneType.SHORT -> appendLine("                cont_fn(1, value as i64);")
+            KneType.STRING -> {
+                appendLine("                let str_handle = Box::into_raw(Box::new(value)) as i64;")
+                appendLine("                cont_fn(1, str_handle);")
+            }
+            KneType.UNIT -> appendLine("                cont_fn(1, 0i64);")
+            KneType.NEVER -> appendLine("                cont_fn(1, 0i64);")
+            is KneType.OBJECT -> {
+                appendLine("                let obj_handle = Box::into_raw(Box::new(value)) as i64;")
+                appendLine("                cont_fn(1, obj_handle);")
+            }
+            is KneType.ENUM -> appendLine("                cont_fn(1, (value as i32) as i64);")
+            else -> appendLine("                cont_fn(1, value as i64);")
+        }
+    }
+
+    /** Param conversion for suspend methods (indented one extra level for the thread closure). */
+    private fun StringBuilder.appendSuspendParamConversion(p: KneParam) {
+        appendParamConversion(p, "            ")
+    }
+
+    // --- Helpers ---
+
+    private fun StringBuilder.appendReceiverBinding(fn: KneFunction, rustTypeName: String) {
+        when (fn.receiverKind) {
+            KneReceiverKind.BORROWED_SHARED -> {
+                appendLine("        let obj = unsafe { &*(handle as *const $rustTypeName) };")
+            }
+            KneReceiverKind.BORROWED_MUT -> {
+                appendLine("        let obj = unsafe { &mut *(handle as *mut $rustTypeName) };")
+            }
+            KneReceiverKind.OWNED -> {
+                // Use ptr::read instead of Box::from_raw to avoid UB on borrowed handles
+                // (e.g. objects returned from MAP). Safe for Copy types; for non-Copy types
+                // the caller must ensure the handle is owned.
+                appendLine("        let obj = unsafe { std::ptr::read(handle as *const $rustTypeName) };")
+            }
+            KneReceiverKind.NONE -> {
+                if (fn.isMutating) {
+                    appendLine("        let obj = unsafe { &mut *(handle as *mut $rustTypeName) };")
+                } else {
+                    appendLine("        let obj = unsafe { &*(handle as *const $rustTypeName) };")
+                }
+            }
+        }
+    }
+
+    private fun StringBuilder.appendParamConversion(p: KneParam, indent: String = "        ") {
+        when (p.type) {
+            KneType.STRING -> {
+                appendLine("${indent}let ${p.name}_conv = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
+                when {
+                    requiresStaticStr(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_static_str: &'static str = Box::leak(${p.name}_conv.to_string().into_boxed_str());")
+                    }
+                    isOsStrLikeRustType(p.rustType) && (p.isBorrowed || isBorrowedRustType(p.rustType)) -> {
+                        appendLine("${indent}let ${p.name}_path = std::ffi::OsStr::new(${p.name}_conv);")
+                    }
+                    isOsStrLikeRustType(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_path = std::ffi::OsString::from(${p.name}_conv.to_string());")
+                    }
+                    isPathLikeRustType(p.rustType) && (p.isBorrowed || isBorrowedRustType(p.rustType)) -> {
+                        appendLine("${indent}let ${p.name}_path = std::path::Path::new(${p.name}_conv);")
+                    }
+                    isPathLikeRustType(p.rustType) -> {
+                        appendLine("${indent}let ${p.name}_path = std::path::PathBuf::from(${p.name}_conv);")
+                    }
+                    !p.isBorrowed -> {
+                        appendLine("${indent}let ${p.name}_str: String = ${p.name}_conv.to_string();")
+                    }
+                }
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}let ${p.name}_conv = ${p.name} != 0;")
+            }
+            is KneType.ENUM -> {
+                // Use the qualified rustType if available to avoid ambiguity when
+                // multiple crates export the same enum name (e.g. cpal::SampleFormat
+                // vs symphonia_core::SampleFormat)
+                val enumName = unwrapRustWrapperType(p.rustType) ?: (p.type as KneType.ENUM).simpleName
+                appendLine("${indent}let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
+            }
+            is KneType.OBJECT -> {
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+            }
+            is KneType.INTERFACE -> {
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+            }
+            is KneType.SEALED_ENUM -> {
+                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+            }
+            is KneType.DATA_CLASS -> {
+                appendDataClassParamConversion(p, p.type as KneType.DATA_CLASS, indent)
+            }
+            is KneType.TUPLE -> {
+                val tuple = p.type as KneType.TUPLE
+                val convertedFields = tuple.elementTypes.mapIndexed { idx, elemType ->
+                    when (elemType) {
+                        KneType.STRING -> "${p.name}_${idx}_str"
+                        KneType.BOOLEAN -> "${p.name}_${idx}_conv"
+                        is KneType.ENUM -> "${p.name}_${idx}_conv"
+                        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "${p.name}_${idx}_owned"
+                        is KneType.LIST, KneType.BYTE_ARRAY -> "${p.name}_${idx}_slice"
+                        else -> "${p.name}_$idx"
+                    }
+                }
+                appendLine("${indent}let ${p.name}_tuple = (${convertedFields.joinToString(", ")});")
+            }
+            is KneType.NULLABLE -> {
+                appendNullableParamConversion(p, indent)
+            }
+            is KneType.FUNCTION -> {
+                appendFunctionParamConversion(p, indent)
+            }
+            KneType.BYTE_ARRAY -> {
+                val isMutSlice = p.rustType?.startsWith("&mut ") == true
+                if (isMutSlice) {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts_mut(${p.name}_ptr as *mut u8, ${p.name}_len as usize) };")
+                } else {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                }
+                if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
+                    appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                }
+            }
+            is KneType.LIST -> {
+                val elemType = (p.type as KneType.LIST).elementType
+                val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+                if (isStringLike) {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    if (elemType == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_vec: Vec<String> = ${p.name}_slice.iter().map(|&p| cstr_to_string(p)).collect();")
+                    } else {
+                        appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                    }
+                } else if (elemType is KneType.ENUM) {
+                    // List of enum ordinals: each i64 is an ordinal, transmute to the enum type
+                    val enumName = unwrapRustWrapperType(extractSliceElementRustType(p.rustType))
+                        ?: (elemType as KneType.ENUM).simpleName
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    val mutPrefix = if (isBorrowedSlice && p.rustType?.contains("&mut ") == true) "mut " else ""
+                    appendLine("${indent}let ${mutPrefix}${p.name}_vec: Vec<$enumName> = ${p.name}_slice.iter().map(|&v| unsafe { std::mem::transmute(v as u8) }).collect();")
+                } else if (elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM) {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    if (isBorrowedSlice) {
+                        // Borrowed slice param (&[T] or &mut [T]): copy values from handles without consuming ownership
+                        val rustElemType = rustHandleTypeName(elemType, extractSliceElementRustType(p.rustType))
+                        val isMutSlice = p.rustType?.contains("&mut ") == true
+                        appendLine("${indent}let ${p.name}_handles = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                        val mutPrefix = if (isMutSlice) "mut " else ""
+                        appendLine("${indent}let ${mutPrefix}${p.name}_vec: Vec<$rustElemType> = ${p.name}_handles.iter().map(|&h| unsafe { std::ptr::read(h as *const $rustElemType) }).collect();")
+                    } else {
+                        // Owned Vec<T> field: consume boxes to transfer ownership
+                        val rustElemType = rustHandleTypeName(elemType, null)
+                        appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                        appendLine("${indent}let ${p.name}_vec: Vec<$rustElemType> = ${p.name}_slice.iter().map(|&h| unsafe { *Box::from_raw(h as *mut $rustElemType) }).collect();")
+                    }
+                } else {
+                    appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) {
+                        appendLine("${indent}let ${p.name}_vec = ${p.name}_slice.to_vec();")
+                    }
+                }
+            }
+            is KneType.SET -> {
+                val elemType = (p.type as KneType.SET).elementType
+                val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+                appendLine("${indent}let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                if (isStringLike) {
+                    if (elemType == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_set: std::collections::HashSet<String> = ${p.name}_slice.iter().map(|&p| cstr_to_string(p)).collect();")
+                    } else {
+                        appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+                    }
+                } else {
+                    appendLine("${indent}let ${p.name}_set = ${p.name}_slice.iter().cloned().collect::<std::collections::HashSet<_>>();")
+                }
+            }
+            is KneType.MAP -> {
+                val mapType = p.type as KneType.MAP
+                val keyType = mapType.keyType
+                val valueType = mapType.valueType
+                appendLine("${indent}let ${p.name}_keys_slice = unsafe { std::slice::from_raw_parts(${p.name}_keys_ptr, ${p.name}_size as usize) };")
+                appendLine("${indent}let ${p.name}_values_slice = unsafe { std::slice::from_raw_parts(${p.name}_values_ptr, ${p.name}_size as usize) };")
+                val keyConv = mapSliceElemReadExpr("${p.name}_keys_slice", "i", keyType)
+                val valueConv = mapSliceElemReadExpr("${p.name}_values_slice", "i", valueType)
+                appendLine("${indent}let mut ${p.name}_map: std::collections::HashMap<${mapValueRustType(keyType)}, ${mapValueRustType(valueType)}> = std::collections::HashMap::new();")
+                appendLine("${indent}for i in 0..${p.name}_size as usize {")
+                appendLine("${indent}    ${p.name}_map.insert($keyConv, $valueConv);")
+                appendLine("${indent}}")
+            }
+            else -> {
+                primitiveCastType(p.type, p.rustType)?.let { castType ->
+                    appendLine("${indent}let ${p.name}_conv = ${p.name} as $castType;")
+                }
+            }
+        }
+    }
+
+    private fun StringBuilder.appendObjectHandleConversion(
+        name: String,
+        rustTypeName: String,
+        borrowed: Boolean,
+        indent: String,
+        originalRustType: String? = null,
+    ) {
+        val useInferredCast = requiresInferredObjectCast(rustTypeName)
+        if (borrowed) {
+            // Check mutability from the ORIGINAL rustType (before unwrapping stripped &mut)
+            val isMutRef = originalRustType?.contains("&mut") == true ||
+                rustTypeName.startsWith("&mut ") || rustTypeName.contains("&mut")
+            if (isMutRef) {
+                if (useInferredCast) {
+                    appendLine("${indent}let ${name}_borrowed = unsafe { &mut *(${name} as *mut _) };")
+                } else {
+                    val cleanType = rustTypeName.removePrefix("&mut ").trim()
+                    appendLine("${indent}let ${name}_borrowed = unsafe { &mut *(${name} as *mut $cleanType) };")
+                }
+            } else if (useInferredCast) {
+                appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const _) };")
+            } else {
+                appendLine("${indent}let ${name}_borrowed = unsafe { &*(${name} as *const $rustTypeName) };")
+            }
+        } else {
+            if (useInferredCast) {
+                appendLine("${indent}let ${name}_owned = unsafe { *Box::from_raw(${name} as *mut _) };")
+            } else {
+                appendLine("${indent}let ${name}_owned = unsafe { *Box::from_raw(${name} as *mut $rustTypeName) };")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendDataClassParamConversion(
+        p: KneParam,
+        dc: KneType.DATA_CLASS,
+        indent: String,
+    ) {
+        for (field in dc.fields) {
+            if (field.type == KneType.STRING) {
+                appendLine("${indent}let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
+            }
+        }
+        val fieldAssignments = dc.fields.joinToString(", ") { field ->
+            val sourceName = "${p.name}_${field.name}"
+            when (field.type) {
+                KneType.STRING -> when {
+                    requiresStaticStr(field.rustType) -> "${field.name}: Box::leak(${sourceName}_conv.to_string().into_boxed_str())"
+                    isPathLikeRustType(field.rustType) -> "${field.name}: std::path::PathBuf::from(${sourceName}_conv)"
+                    field.isBorrowed -> "${field.name}: ${sourceName}_conv"
+                    else -> "${field.name}: ${sourceName}_conv.to_string()"
+                }
+                KneType.BOOLEAN -> "${field.name}: ${sourceName} != 0"
+                is KneType.ENUM -> "${field.name}: unsafe { std::mem::transmute(${sourceName} as u8) }"
+                else -> {
+                    primitiveCastType(field.type, field.rustType)?.let { castType ->
+                        "${field.name}: ${sourceName} as $castType"
+                    } ?: "${field.name}: $sourceName"
+                }
+            }
+        }
+        appendLine("${indent}let ${p.name}_dc = ${dc.simpleName} { $fieldAssignments };")
+    }
+
+    private fun StringBuilder.appendNullableParamConversion(p: KneParam, indent: String) {
+        val inner = (p.type as KneType.NULLABLE).inner
+        val optionInnerRustType = optionInnerRustType(p.rustType)
+        when (inner) {
+            KneType.INT -> {
+                val cast = primitiveCastType(inner, optionInnerRustType)
+                val rustInner = cast ?: "i32"
+                val someExpr = cast?.let { "${p.name} as $it" } ?: "${p.name} as i32"
+                appendLine("${indent}let ${p.name}_opt: Option<$rustInner> = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+            }
+            KneType.LONG -> {
+                val cast = primitiveCastType(inner, optionInnerRustType)
+                val rustInner = cast ?: "i64"
+                val someExpr = cast?.let { "${p.name} as $it" } ?: p.name
+                appendLine("${indent}let ${p.name}_opt: Option<$rustInner> = if ${p.name} == i64::MIN { None } else { Some($someExpr) };")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name}.is_null() { None } else {")
+                appendLine("${indent}    let ${p.name}_value = unsafe { CStr::from_ptr(${p.name}) }.to_str().unwrap_or(\"\");")
+                when {
+                    requiresStaticStr(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(Box::leak(${p.name}_value.to_string().into_boxed_str()) as &'static str)")
+                    }
+                    isPathLikeRustType(optionInnerRustType) && isBorrowedRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(std::path::Path::new(${p.name}_value))")
+                    }
+                    isPathLikeRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(std::path::PathBuf::from(${p.name}_value))")
+                    }
+                    isBorrowedRustType(optionInnerRustType) -> {
+                        appendLine("${indent}    Some(${p.name}_value)")
+                    }
+                    else -> {
+                        appendLine("${indent}    Some(${p.name}_value.to_string())")
+                    }
+                }
+                appendLine("${indent}};")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} < 0 { None } else { Some(${p.name} != 0) };")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(f64::from_ne_bytes(${p.name}.to_ne_bytes())) };")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(f32::from_bits(${p.name} as u32)) };")
+            }
+            KneType.BYTE -> {
+                val cast = primitiveCastType(inner, optionInnerRustType) ?: "i8"
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i32::MIN { None } else { Some(${p.name} as $cast) };")
+            }
+            KneType.SHORT -> {
+                val cast = primitiveCastType(inner, optionInnerRustType) ?: "i16"
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i32::MIN { None } else { Some(${p.name} as $cast) };")
+            }
+            is KneType.ENUM -> {
+                val enumName = inner.simpleName
+                appendLine("${indent}let ${p.name}_opt: Option<$enumName> = if ${p.name} < 0 { None } else { Some(unsafe { std::mem::transmute(${p.name} as u8) }) };")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                val rustTypeName = rustHandleTypeName(inner, optionInnerRustType)
+                val borrowed = isBorrowedRustType(optionInnerRustType)
+                if (borrowed) {
+                    if (requiresInferredObjectCast(rustTypeName)) {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const _) }) };")
+                    } else {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { &*(${p.name} as *const $rustTypeName) }) };")
+                    }
+                } else {
+                    if (requiresInferredObjectCast(rustTypeName)) {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { *Box::from_raw(${p.name} as *mut _) }) };")
+                    } else {
+                        appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else { Some(unsafe { *Box::from_raw(${p.name} as *mut $rustTypeName) }) };")
+                    }
+                }
+            }
+            is KneType.DATA_CLASS -> {
+                val dc = inner
+                val borrowed = isBorrowedRustType(optionInnerRustType)
+                // Reconstruct the data class from expanded fields
+                for (field in dc.fields) {
+                    if (field.type == KneType.STRING) {
+                        appendLine("${indent}let ${p.name}_${field.name}_conv = unsafe { CStr::from_ptr(${p.name}_${field.name}) }.to_str().unwrap_or(\"\");")
+                    }
+                }
+                val fieldAssignments = dc.fields.joinToString(", ") { field ->
+                    val sourceName = "${p.name}_${field.name}"
+                    when (field.type) {
+                        KneType.STRING -> when {
+                            requiresStaticStr(field.rustType) -> "${field.name}: Box::leak(${sourceName}_conv.to_string().into_boxed_str())"
+                            isPathLikeRustType(field.rustType) -> "${field.name}: std::path::PathBuf::from(${sourceName}_conv)"
+                            field.isBorrowed -> "${field.name}: ${sourceName}_conv"
+                            else -> "${field.name}: ${sourceName}_conv.to_string()"
+                        }
+                        KneType.BOOLEAN -> "${field.name}: ${sourceName} != 0"
+                        is KneType.ENUM -> "${field.name}: unsafe { std::mem::transmute(${sourceName} as u8) }"
+                        else -> {
+                            primitiveCastType(field.type, field.rustType)?.let { castType ->
+                                "${field.name}: ${sourceName} as $castType"
+                            } ?: "${field.name}: $sourceName"
+                        }
+                    }
+                }
+                val dcVal = "${dc.simpleName} { $fieldAssignments }"
+                if (borrowed) {
+                    // Declare the value outside the Option so the borrow lives long enough
+                    appendLine("${indent}let ${p.name}_dc_val = $dcVal;")
+                    appendLine("${indent}let ${p.name}_opt = if ${p.name}_has != 0 { None } else { Some(&${p.name}_dc_val) };")
+                } else {
+                    appendLine("${indent}let ${p.name}_opt = if ${p.name}_has != 0 { None } else { Some($dcVal) };")
+                }
+            }
+            else -> {
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == i64::MIN { None } else { Some(${p.name}) };")
+            }
+        }
+    }
+
+    /**
+     * Generates conversion for a FUNCTION param.
+     * For simple types (all primitives): transmute directly to Rust fn() pointer.
+     * For types needing conversion (bool, String): transmute to extern "C" fn + closure wrapper.
+     */
+    private fun StringBuilder.appendFunctionParamConversion(p: KneParam, indent: String) {
+        val fnType = p.type as KneType.FUNCTION
+        val needsConversion = fnType.paramTypes.any { it == KneType.BOOLEAN || it == KneType.STRING } ||
+            (fnType.returnType == KneType.BOOLEAN || fnType.returnType == KneType.STRING)
+
+        if (!needsConversion) {
+            // Direct transmute to Rust fn pointer (safe for primitives on x86-64/aarch64)
+            val nativeParams = fnType.paramTypes.joinToString(", ") { rustNativeType(it) }
+            val nativeRet = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustNativeType(fnType.returnType)
+            appendLine("${indent}let ${p.name}_fn: fn($nativeParams) -> $nativeRet = unsafe { std::mem::transmute(${p.name}) };")
+        } else {
+            // Transmute to extern "C" fn, then wrap in closure for type conversion
+            val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->
+                "_p$i: ${rustCType(t)}"
+            }.joinToString(", ")
+            val cRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "()" else rustCType(fnType.returnType)
+            appendLine("${indent}let ${p.name}_c: extern \"C\" fn($cParamTypes) -> $cRetType = unsafe { std::mem::transmute(${p.name}) };")
+
+            val closureParams = fnType.paramTypes.mapIndexed { i, t ->
+                "_cp$i: ${rustNativeType(t)}"
+            }.joinToString(", ")
+            val closureRetType = if (fnType.returnType == KneType.UNIT || fnType.returnType == KneType.NEVER) "" else " -> ${rustNativeType(fnType.returnType)}"
+            val callArgs = fnType.paramTypes.mapIndexed { i, t ->
+                rustToCCallArgConvert("_cp$i", t)
+            }.joinToString(", ")
+            val callExpr = "${p.name}_c($callArgs)"
+            val returnExpr = rustFromCRetConvert(callExpr, fnType.returnType)
+            appendLine("${indent}let ${p.name}_fn = |$closureParams|$closureRetType { $returnExpr };")
+        }
+    }
+
+    /** Rust native type (not C ABI) for closure params. */
+    private fun rustNativeType(type: KneType): String = when (type) {
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.BOOLEAN -> "bool"
+        KneType.BYTE -> "i8"
+        KneType.SHORT -> "i16"
+        KneType.STRING -> "String"
+        else -> rustCType(type) // fallback
+    }
+
+    /** Convert a Rust native value to C ABI for calling into a C callback. */
+    private fun rustToCCallArgConvert(expr: String, type: KneType): String = when (type) {
+        KneType.BOOLEAN -> "if $expr { 1 } else { 0 }"
+        KneType.STRING -> "std::ffi::CString::new($expr).unwrap().into_raw()"
+        else -> expr
+    }
+
+    /** Convert a C ABI return value back to Rust native type. */
+    private fun rustFromCRetConvert(expr: String, type: KneType): String = when (type) {
+        KneType.UNIT -> expr
+        KneType.NEVER -> expr
+        KneType.BOOLEAN -> "$expr != 0"
+        KneType.STRING -> "unsafe { std::ffi::CString::from_raw($expr as *mut c_char) }.into_string().unwrap_or_default()"
+        else -> expr
+    }
+
+    /** Param name for method calls — uses isBorrowed to decide &str vs String, &T vs T. */
+    private fun convertedParamName(p: KneParam): String = when (p.type) {
+        KneType.STRING -> when {
+            requiresStaticStr(p.rustType) -> "${p.name}_static_str"
+            isPathLikeRustType(p.rustType) -> "${p.name}_path"
+            p.isBorrowed || isBorrowedRustType(p.rustType) -> "${p.name}_conv"
+            else -> "${p.name}_str"
+        }
+        KneType.BOOLEAN -> "${p.name}_conv"
+        is KneType.FUNCTION -> "${p.name}_fn"
+        is KneType.ENUM -> if (p.isBorrowed) "&${p.name}_conv" else "${p.name}_conv"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
+            if (p.isBorrowed) "${p.name}_borrowed" else "${p.name}_owned"
+        is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
+        is KneType.TUPLE -> "${p.name}_tuple"
+        is KneType.NULLABLE -> "${p.name}_opt"
+        KneType.BYTE_ARRAY -> if (expectsOwnedVecLike(p.rustType, p.isBorrowed)) "${p.name}_vec" else "${p.name}_slice"
+        is KneType.LIST -> {
+            val elemType = (p.type as KneType.LIST).elementType
+            val isStringLike = elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY
+            val isObjectLike = elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM
+            val isEnumLike = elemType is KneType.ENUM
+            when {
+                isStringLike -> "${p.name}_ptr"
+                isEnumLike -> {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    when {
+                        p.rustType?.contains("&mut ") == true -> "&mut ${p.name}_vec"
+                        isBorrowedSlice -> "&${p.name}_vec"
+                        else -> "${p.name}_vec"
+                    }
+                }
+                isObjectLike -> {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    when {
+                        p.rustType?.contains("&mut ") == true -> "&mut ${p.name}_vec"
+                        isBorrowedSlice -> "&${p.name}_vec"
+                        else -> "${p.name}_vec" // owned Vec<T>
+                    }
+                }
+                expectsOwnedVecLike(p.rustType, p.isBorrowed) -> "${p.name}_vec"
+                else -> "${p.name}_slice"
+            }
+        }
+        is KneType.SET -> {
+            val elemType = (p.type as KneType.SET).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_ptr" else "${p.name}_set"
+        }
+        is KneType.MAP -> "${p.name}_map"
+        else -> if (primitiveCastType(p.type, p.rustType) != null) "${p.name}_conv" else p.name
+    }
+
+    /** Param name for sealed enum constructor calls — uses the Vec name for LIST/SET with String. */
+    private fun convertedCallArg(p: KneParam): String = when (p.type) {
+        is KneType.LIST -> {
+            val elemType = (p.type as KneType.LIST).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_vec" else convertedParamName(p)
+        }
+        is KneType.SET -> {
+            val elemType = (p.type as KneType.SET).elementType
+            if (elemType == KneType.STRING || elemType == KneType.BYTE_ARRAY) "${p.name}_set" else convertedParamName(p)
+        }
+        else -> convertedParamName(p)
+    }
+
+    private fun StringBuilder.appendNullableReturn(
+        nullableType: KneType.NULLABLE,
+        binding: String,
+        returnsBorrowed: Boolean = false,
+        rustType: String? = null,
+        indent: String = "        ",
+    ) {
+        when (nullableType.inner) {
+            KneType.INT -> {
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
+            }
+            KneType.LONG -> {
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
+            }
+            KneType.DOUBLE -> {
+                appendLine("${indent}match $binding { Some(v) => i64::from_ne_bytes(v.to_ne_bytes()), None => i64::MIN }")
+            }
+            KneType.FLOAT -> {
+                appendLine("${indent}match $binding { Some(v) => v.to_bits() as i64, None => i64::MIN }")
+            }
+            KneType.BOOLEAN -> {
+                appendLine("${indent}match $binding { Some(true) => 1, Some(false) => 0, None => -1 }")
+            }
+            KneType.BYTE -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => i32::MIN }")
+            }
+            KneType.SHORT -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => i32::MIN }")
+            }
+            KneType.STRING -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(ref s) => {")
+                appendStringOutput("s", "$indent        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.ENUM -> {
+                appendLine("${indent}match $binding { Some(v) => v as i32, None => -1 }")
+            }
+            is KneType.DATA_CLASS -> {
+                val dc = nullableType.inner
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                for (field in dc.fields) {
+                    when (field.type) {
+                        KneType.STRING -> {
+                            appendLine("${indent}        let _f_bytes = v.${field.name}.as_bytes();")
+                            appendLine("${indent}        if (_f_bytes.len() as i32) < out_${field.name}_len {")
+                            appendLine("${indent}            unsafe { std::ptr::copy_nonoverlapping(_f_bytes.as_ptr(), out_${field.name}, _f_bytes.len()); }")
+                            appendLine("${indent}            unsafe { *out_${field.name}.add(_f_bytes.len()) = 0; }")
+                            appendLine("${indent}        }")
+                        }
+                        else -> {
+                            appendLine("${indent}        unsafe { *out_${field.name} = ${rustReturnExpr("v.${field.name}", field.type, field.rustType)}; }")
+                        }
+                    }
+                }
+                appendLine("${indent}        1i32")
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => 0i32")
+                appendLine("${indent}}")
+            }
+            KneType.BYTE_ARRAY -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendLine("${indent}        let len = v.len() as i32;")
+                appendLine("${indent}        if len <= out_buf_len {")
+                appendLine("${indent}            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), out_buf, v.len()); }")
+                appendLine("${indent}        }")
+                appendLine("${indent}        len")
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.LIST -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendListReturnFromBinding("v", nullableType.inner as KneType.LIST, "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.SET -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendListReturnFromBinding("v", KneType.LIST((nullableType.inner as KneType.SET).elementType), "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.MAP -> {
+                appendLine("${indent}match $binding {")
+                appendLine("${indent}    Some(v) => {")
+                appendMapReturnFromBinding("v", nullableType.inner as KneType.MAP, "${indent}        ", rustType)
+                appendLine("${indent}    }")
+                appendLine("${indent}    None => -1")
+                appendLine("${indent}}")
+            }
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                appendLine("${indent}match $binding {")
+                if (returnsBorrowed) {
+                    appendLine("${indent}    Some(v) => v as *const _ as i64,")
+                } else {
+                    appendLine("${indent}    Some(v) => Box::into_raw(Box::new(v)) as i64,")
+                }
+                appendLine("${indent}    None => 0i64")
+                appendLine("${indent}}")
+            }
+            else -> {
+                appendLine("${indent}match $binding { Some(v) => v as i64, None => i64::MIN }")
+            }
+        }
+    }
+
+    private fun rustReturnExpr(
+        binding: String,
+        returnType: KneType,
+        returnRustType: String? = null,
+        returnsBorrowed: Boolean = false,
+    ): String = when (returnType) {
+        KneType.INT -> "$binding as i32"
+        KneType.LONG -> "$binding as i64"
+        KneType.DOUBLE -> "$binding as f64"
+        KneType.FLOAT -> "$binding as f32"
+        KneType.BYTE -> "$binding as i8"
+        KneType.SHORT -> "$binding as i16"
+        KneType.BOOLEAN -> "if $binding { 1 } else { 0 }"
+        is KneType.ENUM -> if (returnsBorrowed) "(unsafe { *($binding as *const _ as *const u8) }) as i32" else "$binding as i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
+            if (returnsBorrowed) "$binding as *const _ as i64" else "Box::into_raw(Box::new($binding)) as i64"
+        else -> binding
+    }
+
+    private fun StringBuilder.appendStringOutput(expr: String, indent: String = "        ", rustType: String? = null) {
+        if (isPathLikeRustType(rustType)) {
+            appendLine("${indent}let _s = $expr.to_string_lossy();")
+            appendLine("${indent}let bytes = _s.as_bytes();")
+        } else {
+            appendLine("${indent}let bytes = $expr.as_bytes();")
+        }
+        appendLine("${indent}let len = bytes.len() as i32;")
+        appendLine("${indent}if len < out_buf_len {")
+        appendLine("${indent}    unsafe {")
+        appendLine("${indent}        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());")
+        appendLine("${indent}        *out_buf.add(bytes.len()) = 0;")
+        appendLine("${indent}    }")
+        appendLine("${indent}}")
+        appendLine("${indent}len + 1")
+    }
+
+    private fun expectsOwnedVecLike(rustType: String?, isBorrowed: Boolean): Boolean {
+        if (isBorrowed) return false
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.startsWith("Vec<") || normalized.startsWith("Into<Vec<") || normalized.startsWith("From<Vec<")
+    }
+
+    private fun wrapCallForSafety(expr: String, isUnsafe: Boolean): String =
+        if (isUnsafe) "unsafe { $expr }" else expr
+
+    private fun primitiveCastType(type: KneType, rustType: String?): String? {
+        val normalized = normalizeRustType(rustType) ?: return null
+        val defaultRustType = when (type) {
+            KneType.INT -> "i32"
+            KneType.LONG -> "i64"
+            KneType.DOUBLE -> "f64"
+            KneType.FLOAT -> "f32"
+            KneType.BYTE -> "i8"
+            KneType.SHORT -> "i16"
+            else -> null
+        } ?: return null
+        return when (normalized) {
+            defaultRustType -> null
+            "u32", "u64", "usize", "isize", "u16", "u8" -> normalized
+            else -> null
+        }
+    }
+
+    private fun rustHandleTypeName(type: KneType, rustType: String?): String {
+        val normalized = unwrapRustWrapperType(rustType)
+        return when (type) {
+            is KneType.OBJECT -> normalized ?: type.simpleName
+            is KneType.INTERFACE -> normalized ?: type.simpleName
+            is KneType.SEALED_ENUM -> normalized ?: type.simpleName
+            else -> normalized ?: error("Expected handle-backed type, got $type")
+        }
+    }
+
+    private fun requiresInferredObjectCast(rustTypeName: String): Boolean =
+        rustTypeName.contains("::") &&
+            !rustTypeName.startsWith("dpi::") &&
+            !rustTypeName.startsWith("std::")
+
+    private fun unwrapRustWrapperType(rustType: String?): String? {
+        var current = rustType?.trim() ?: return null
+        var changed = true
+        while (changed) {
+            changed = false
+            normalizeRustType(current)?.let { normalized ->
+                if (normalized != current) {
+                    current = normalized
+                    changed = true
+                }
+            }
+            for (wrapper in listOf("Option", "Into", "From")) {
+                extractGenericInner(current, wrapper)?.let { inner ->
+                    current = inner
+                    changed = true
+                }
+            }
+        }
+        return current.ifBlank { null }
+    }
+
+    private fun extractGenericInner(rustType: String, wrapper: String): String? {
+        val prefix = "$wrapper<"
+        if (!rustType.startsWith(prefix) || !rustType.endsWith(">")) return null
+        return rustType.substring(prefix.length, rustType.length - 1).trim()
+    }
+
+    private fun optionInnerRustType(rustType: String?): String? =
+        rustType?.trim()?.let { extractGenericInner(it, "Option") }
+
+    private fun normalizeRustType(rustType: String?): String? {
+        var result = rustType?.trim() ?: return null
+        var changed = true
+        while (changed) {
+            changed = false
+            if (result.startsWith("&")) {
+                result = result.removePrefix("&").trim()
+                changed = true
+            }
+            if (result.startsWith("mut ")) {
+                result = result.removePrefix("mut ").trim()
+                changed = true
+            }
+            if (result.startsWith("'")) {
+                val afterLifetime = result.substringAfter(' ', result).trim()
+                if (afterLifetime != result) {
+                    result = afterLifetime
+                    changed = true
+                }
+            }
+        }
+        return result.ifBlank { null }
+    }
+
+    private fun isBorrowedRustType(rustType: String?): Boolean = rustType?.trim()?.startsWith("&") == true
+
+    private fun isPathLikeRustType(rustType: String?): Boolean {
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.contains("Path") || normalized.contains("OsStr") || normalized.contains("OsString")
+    }
+
+    private fun isOsStrLikeRustType(rustType: String?): Boolean {
+        val normalized = normalizeRustType(rustType) ?: return false
+        return normalized.contains("OsStr") || normalized.contains("OsString")
+    }
+
+    private fun requiresStaticStr(rustType: String?): Boolean =
+        rustType?.contains("'static str") == true
+
+    /** Extract the element type from a Rust slice type, e.g. "&[Complex]" → "Complex", "&mut [Complex]" → "Complex" */
+    private fun extractSliceElementRustType(rustType: String?): String? {
+        val rt = rustType?.trim() ?: return null
+        val bracketStart = rt.indexOf('[')
+        val bracketEnd = rt.lastIndexOf(']')
+        if (bracketStart < 0 || bracketEnd <= bracketStart) return null
+        return rt.substring(bracketStart + 1, bracketEnd).trim().ifBlank { null }
+    }
+
+    /** Wrap a call expression with writeback code for &mut [Object] slice parameters.
+     *  After the call, modified values in the local Vec are written back to the original Box handles. */
+    private fun wrapExprWithMutObjectSliceWriteback(expr: String, params: List<KneParam>, indent: String = "        "): String {
+        val mutObjectSliceParams = params.filter { p ->
+            val elemType = (p.type as? KneType.LIST)?.elementType
+            (elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM) &&
+                p.rustType?.contains("&mut ") == true
+        }
+        if (mutObjectSliceParams.isEmpty()) return expr
+
+        val sb = StringBuilder()
+        sb.appendLine("{")
+        sb.appendLine("${indent}    let _kne_call_result = $expr;")
+        for (p in mutObjectSliceParams) {
+            val elemType = (p.type as KneType.LIST).elementType
+            val rustElemType = rustHandleTypeName(elemType, extractSliceElementRustType(p.rustType))
+            sb.appendLine("${indent}    for (_kne_i, &_kne_h) in ${p.name}_handles.iter().enumerate() {")
+            sb.appendLine("${indent}        unsafe { std::ptr::write(_kne_h as *mut $rustElemType, ${p.name}_vec[_kne_i]); }")
+            sb.appendLine("${indent}    }")
+        }
+        sb.append("${indent}    _kne_call_result\n${indent}}")
+        return sb.toString()
+    }
+
+    private fun sealedGetterReturnsBorrowed(type: KneType): Boolean = when (type) {
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> true
+        is KneType.NULLABLE -> sealedGetterReturnsBorrowed(type.inner)
+        else -> false
+    }
+
+    private fun sealedGetterBindingExpr(field: KneParam, valueExpr: String): String = when (field.type) {
+        KneType.STRING, KneType.BYTE_ARRAY,
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM,
+        is KneType.ENUM,
+        is KneType.LIST, is KneType.SET, is KneType.MAP -> valueExpr
+        // NULLABLE: the ref binding gives &Option<T>, we need to clone to get an owned Option
+        is KneType.NULLABLE -> "$valueExpr.clone()"
+        else -> "*$valueExpr"
+    }
+
+    /** Mutable pointer type for a LIST element out-buffer in tuple returns. */
+    private fun listOutPointerType(elemType: KneType): String = when (elemType) {
+        KneType.INT, KneType.BOOLEAN -> "*mut i32"
+        KneType.LONG -> "*mut i64"
+        KneType.DOUBLE -> "*mut f64"
+        KneType.FLOAT -> "*mut f32"
+        KneType.SHORT -> "*mut i16"
+        KneType.BYTE -> "*mut i8"
+        KneType.STRING -> "*mut u8"
+        is KneType.ENUM -> "*mut i32"
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*mut i64"
+        else -> "*mut i32"
+    }
+
+    /** C ABI pointer type for a slice parameter. */
+    private fun slicePointerType(type: KneType): String = when (type) {
+        KneType.BYTE_ARRAY -> "*const u8"
+        is KneType.LIST -> when (type.elementType) {
+            KneType.INT -> "*const i32"
+            KneType.LONG -> "*const i64"
+            KneType.DOUBLE -> "*const f64"
+            KneType.FLOAT -> "*const f32"
+            KneType.STRING -> "*const *const c_char"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> "*const i64"
+            else -> "*const i64"
+        }
+        is KneType.SET -> when ((type as KneType.SET).elementType) {
+            KneType.INT -> "*const i32"
+            KneType.LONG -> "*const i64"
+            KneType.DOUBLE -> "*const f64"
+            KneType.FLOAT -> "*const f32"
+            KneType.STRING -> "*const *const c_char"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM, is KneType.ENUM -> "*const i64"
+            else -> "*const i64"
+        }
+        else -> "*const u8"
+    }
+
+    private fun mapSlicePointerType(elemType: KneType): String = when (elemType) {
+        KneType.STRING, is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*const *const c_char"
+        KneType.INT, KneType.BOOLEAN -> "*const i32"
+        KneType.LONG -> "*const i64"
+        KneType.DOUBLE -> "*const f64"
+        KneType.FLOAT -> "*const f32"
+        KneType.SHORT -> "*const i16"
+        KneType.BYTE -> "*const i8"
+        is KneType.ENUM -> "*const i32"
+        else -> "*const i64"
+    }
+
+    /** Extract DATA_CLASS from a nullable param type, if applicable. */
+    private fun nullableDataClass(type: KneType): KneType.DATA_CLASS? =
+        (type as? KneType.NULLABLE)?.inner as? KneType.DATA_CLASS
+
+    /** Append C ABI params for a nullable DATA_CLASS: a sentinel flag + expanded fields. */
+    private fun StringBuilder.appendNullableDataClassSignatureParams(paramName: String, dc: KneType.DATA_CLASS, separator: String = ", ") {
+        append("${separator}${paramName}_has: i32")
+        for (field in dc.fields) {
+            append(", ${paramName}_${field.name}: ${rustCType(field.type)}")
+        }
+    }
+
+    /** Same as [appendNullableDataClassSignatureParams] but returns list entries. */
+    private fun nullableDataClassSignatureParamList(paramName: String, dc: KneType.DATA_CLASS): List<String> {
+        val params = mutableListOf("${paramName}_has: i32")
+        for (field in dc.fields) {
+            params.add("${paramName}_${field.name}: ${rustCType(field.type)}")
+        }
+        return params
+    }
+
+    /** Generate Rust expression to read one element at index i from a map slice. */
+    private fun mapSliceElemReadExpr(sliceName: String, indexExpr: String, elemType: KneType): String = when (elemType) {
+        KneType.BOOLEAN -> "$sliceName[$indexExpr] != 0"
+        KneType.INT -> "$sliceName[$indexExpr]"
+        KneType.LONG -> "$sliceName[$indexExpr]"
+        KneType.DOUBLE -> "$sliceName[$indexExpr]"
+        KneType.FLOAT -> "$sliceName[$indexExpr]"
+        KneType.SHORT -> "$sliceName[$indexExpr]"
+        KneType.BYTE -> "$sliceName[$indexExpr]"
+        KneType.STRING -> "cstr_to_string($sliceName[$indexExpr])"
+        is KneType.ENUM -> {
+            val enumName = elemType.simpleName
+            "unsafe { std::mem::transmute($sliceName[$indexExpr] as u8) }"
+        }
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+            "unsafe { *Box::from_raw($sliceName[$indexExpr] as *mut _) }"
+        }
+        else -> "$sliceName[$indexExpr]"
+    }
+
+    /** Render a Rust owned type for HashMap key/value (not C ABI pointer types). */
+    private fun mapValueRustType(type: KneType): String = when (type) {
+        KneType.BOOLEAN -> "bool"
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.SHORT -> "i16"
+        KneType.BYTE -> "i8"
+        KneType.STRING -> "String"
+        is KneType.ENUM -> type.simpleName
+        is KneType.OBJECT -> type.simpleName
+        is KneType.INTERFACE -> type.simpleName
+        is KneType.SEALED_ENUM -> type.simpleName
+        else -> "i64"
+    }
+
+    /** C ABI type for a parameter. */
+    private fun rustCType(type: KneType): String = when (type) {
+        KneType.INT -> "i32"
+        KneType.LONG -> "i64"
+        KneType.DOUBLE -> "f64"
+        KneType.FLOAT -> "f32"
+        KneType.BOOLEAN -> "i32" // 0/1
+        KneType.BYTE -> "i8"
+        KneType.SHORT -> "i16"
+        KneType.STRING -> "*const c_char"
+        KneType.UNIT -> "()"
+        KneType.NEVER -> "!"
+        is KneType.OBJECT -> "i64" // opaque handle
+        is KneType.INTERFACE -> "i64"
+        is KneType.SEALED_ENUM -> "i64" // opaque handle
+        is KneType.ENUM -> "i32" // ordinal
+        is KneType.NULLABLE -> when ((type).inner) {
+            KneType.STRING -> "*const c_char" // null pointer = None
+            KneType.BOOLEAN -> "i32" // -1 = null
+            KneType.BYTE, KneType.SHORT -> "i32"
+            is KneType.ENUM -> "i32"
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
+            else -> "i64" // widened or sentinel
+        }
+        is KneType.LIST -> "i64" // pointer handle
+        is KneType.SET -> "i64"
+        is KneType.MAP -> "i64"
+        KneType.BYTE_ARRAY -> "i64"
+        is KneType.DATA_CLASS -> "i64"
+        is KneType.TUPLE -> "i64"
+        is KneType.FUNCTION -> "i64"
+        is KneType.FLOW -> "()"
+    }
+
+    /** C ABI return type. Buffer-pattern types return i32 (byte/element count). */
+    private fun rustCReturnType(type: KneType): String = when (type) {
+        KneType.STRING -> "i32"
+        KneType.BYTE_ARRAY -> "i32"
+        KneType.UNIT -> "()"
+        KneType.NEVER -> "!"
+        is KneType.LIST -> "i32"
+        is KneType.MAP -> "i32" // element count
+        is KneType.DATA_CLASS -> "()" // Data class returns use per-field out-params
+        is KneType.TUPLE -> "()" // Tuple returns use per-field out-params
+        is KneType.NULLABLE -> when ((type).inner) {
+            KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT -> "i64"
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING, KneType.BYTE_ARRAY -> "i32"
+            is KneType.ENUM -> "i32"
+            is KneType.DATA_CLASS -> "i32" // 0=None, 1=Some (fields in out-params)
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> "i32" // count or -1 for None
+            is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "i64"
+            else -> "i64"
+        }
+        else -> rustCType(type)
+    }
+
+    /**
+     * Recursively generates Rust code to write a tuple into a heap-allocated buffer
+     * using uniform 8-byte slots. Returns the variable name holding the buffer pointer.
+     *
+     * Layout: element i is at byte offset i * 8. Buffer size = elements.size * 8.
+     * [counter] is a shared mutable int to guarantee unique variable names across sibling tuples.
+     */
+    private fun StringBuilder.appendNestedTupleWrite(
+        indent: String,
+        binding: String,
+        tupleType: KneType.TUPLE,
+        counter: IntArray,
+    ): String {
+        val id = counter[0]++
+        val bufSize = tupleType.elementTypes.size * 8
+        val bufVar = "_tbuf_$id"
+        appendLine("${indent}let $bufVar = Box::into_raw(vec![0u8; $bufSize].into_boxed_slice()) as *mut u8;")
+
+        for ((idx, elemType) in tupleType.elementTypes.withIndex()) {
+            val offset = idx * 8
+            val elem = "$binding.$idx"
+            when (elemType) {
+                KneType.STRING -> {
+                    appendLine("${indent}unsafe {")
+                    appendLine("${indent}    let _sb_${id}_$idx = $elem.as_bytes();")
+                    appendLine("${indent}    let _sl = _sb_${id}_$idx.len();")
+                    appendLine("${indent}    if _sl > 0 {")
+                    appendLine("${indent}        let _sc = Box::into_raw(vec![0u8; _sl + 1].into_boxed_slice()) as *mut u8;")
+                    appendLine("${indent}        std::ptr::copy_nonoverlapping(_sb_${id}_$idx.as_ptr(), _sc, _sl);")
+                    appendLine("${indent}        *($bufVar.add($offset) as *mut usize) = _sc as usize;")
+                    appendLine("${indent}    } else {")
+                    appendLine("${indent}        *($bufVar.add($offset) as *mut usize) = 0usize;")
+                    appendLine("${indent}    }")
+                    appendLine("${indent}}")
+                }
+                KneType.BOOLEAN -> {
+                    appendLine("${indent}unsafe { $bufVar.add($offset).write(if $elem { 1u8 } else { 0u8 }); }")
+                }
+                KneType.BYTE -> {
+                    appendLine("${indent}unsafe { $bufVar.add($offset).write($elem as u8); }")
+                }
+                KneType.SHORT -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i16) = $elem; }")
+                }
+                KneType.INT -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i32) = $elem; }")
+                }
+                KneType.LONG -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i64) = $elem; }")
+                }
+                KneType.FLOAT -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut f32) = $elem; }")
+                }
+                KneType.DOUBLE -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut f64) = $elem; }")
+                }
+                is KneType.ENUM -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i32) = $elem as i32; }")
+                }
+                is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i64) = Box::into_raw(Box::new($elem)) as i64; }")
+                }
+                is KneType.TUPLE -> {
+                    val innerBufVar = appendNestedTupleWrite(indent, elem, elemType, counter)
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut usize) = $innerBufVar as usize; }")
+                }
+                else -> {
+                    appendLine("${indent}// TODO: handle ${elemType::class.simpleName} in nested tuple")
+                }
+            }
+        }
+
+        return bufVar
+    }
+
+    /** Conversion suffix for return expressions (e.g., " as i32" for Boolean). */
+    private fun rustReturnConversion(type: KneType): String = when (type) {
+        KneType.BOOLEAN -> " as i32"
+        is KneType.ENUM -> " as i32"
+        else -> ""
+    }
+
+    /** Default value returned on panic/error. */
+    private fun defaultReturnValue(type: KneType): String = when (type) {
+        KneType.INT, KneType.BYTE, KneType.SHORT -> "0"
+        KneType.LONG -> "0i64"
+        KneType.DOUBLE -> "0.0f64"
+        KneType.FLOAT -> "0.0f32"
+        KneType.BOOLEAN -> "0"
+        KneType.STRING -> "0" // byte count = 0
+        KneType.UNIT -> "()"
+        KneType.NEVER -> "()"
+        is KneType.MAP -> "0" // element count = 0
+        is KneType.DATA_CLASS -> "()" // out-params pattern, void return
+        is KneType.TUPLE -> "()" // out-params pattern, void return
+        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "0i64"
+        is KneType.ENUM -> "0"
+        is KneType.NULLABLE -> when ((type).inner) {
+            KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.STRING, KneType.BYTE_ARRAY -> "0i32"
+            is KneType.ENUM -> "0i32"
+            is KneType.DATA_CLASS -> "0i32" // 0 = None
+            is KneType.LIST, is KneType.SET, is KneType.MAP -> "0" // count = 0 on error
+            else -> "0i64"
+        }
+        else -> "0"
+    }
+}

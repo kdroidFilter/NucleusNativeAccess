@@ -10,6 +10,14 @@ data class KneModule(
     val enums: List<KneEnum>,
     val functions: List<KneFunction>,
     val interfaces: List<KneInterface> = emptyList(),
+    val sealedEnums: List<KneSealedEnum> = emptyList(),
+    /** Map from trait FQ name → list of concrete types that implement the trait.
+     *  Built by scanning all `impl Trait for ConcreteType` blocks in rustdoc JSON.
+     *  Enables auto-monomorphisation of generic functions by finding concrete implementors. */
+    val traitImpls: Map<String, List<KneType.OBJECT>> = emptyMap(),
+    /** Type simple names that appear in multiple crates (detected during module merge).
+     *  Methods using these types without qualified paths should be skipped. */
+    val ambiguousTypeNames: Set<String> = emptySet(),
 ) : Serializable
 
 data class KneDataClass(
@@ -43,6 +51,19 @@ data class KneClass(
     val interfaces: List<String> = emptyList(),
     val sealedSubclasses: List<String> = emptyList(),
     val isCommon: Boolean = false,
+    val isOpaque: Boolean = false,
+    val rustTypeName: String = simpleName,
+    /** True for synthetic classes wrapping `Box<dyn Trait>` trait objects. */
+    val isDynTrait: Boolean = false,
+    /** Generic type parameters for this struct (e.g., `T` in `RequestedFormat<T>`).
+     *  When non-empty, the class is a generic template requiring monomorphisation. */
+    val genericParams: List<GenericParamInfo> = emptyList(),
+    /** True if the Rust struct has lifetime parameters (e.g. `BufReader<'a>`).
+     *  Such types cannot be safely used as type args in other generic classes. */
+    val hasLifetimeParams: Boolean = false,
+    /** True if the Rust struct has generic type parameters that were NOT monomorphised.
+     *  (e.g. `ReadOnlySource<R>` where no concrete `R` was found.) */
+    val hasUnresolvedGenericTypeParams: Boolean = false,
 ) : Serializable
 
 data class KneEnum(
@@ -51,8 +72,63 @@ data class KneEnum(
     val entries: List<String>,
 ) : Serializable
 
+/**
+ * Rust enum with data variants → Kotlin sealed class.
+ * Each variant may carry fields (tuple or struct variant) or be a unit variant (no fields).
+ */
+data class KneSealedEnum(
+    val simpleName: String,
+    val fqName: String,
+    val variants: List<KneSealedVariant>,
+) : Serializable
+
+data class KneSealedVariant(
+    val name: String,
+    val fields: List<KneParam>, // empty for unit variants
+    val isTuple: Boolean = false, // true for tuple variants like Value(i32)
+) : Serializable
+
+enum class KneConstructorKind : Serializable {
+    FUNCTION,
+    STRUCT_LITERAL,
+    NONE,
+}
+
 data class KneConstructor(
     val params: List<KneParam>,
+    val kind: KneConstructorKind = KneConstructorKind.FUNCTION,
+    val canFail: Boolean = false,
+) : Serializable
+
+enum class KneReceiverKind : Serializable {
+    NONE,
+    BORROWED_SHARED,
+    BORROWED_MUT,
+    OWNED,
+}
+
+/**
+ * Represents a single trait bound on a generic parameter.
+ * For `T: FormatDecoder`, this would be `GenericBound(traitFqName = "nokhwa_types.FormatDecoder")`.
+ * For `T: Trait1 + Trait2`, this would be two GenericBound entries.
+ */
+data class GenericBound(
+    /** Fully-qualified trait name (e.g., "nokhwa_types.FormatDecoder") */
+    val traitFqName: String,
+    /** Simple trait name for naming (e.g., "FormatDecoder") */
+    val traitSimpleName: String,
+) : Serializable
+
+/**
+ * Information about a generic type parameter used in monomorphisation.
+ * Captures the parameter name and all trait bounds that must be satisfied.
+ */
+data class GenericParamInfo(
+    val paramName: String,
+    val bounds: List<GenericBound>,
+    /** Concrete types that implement ALL bounds — used for monomorphisation.
+     *  Computed from traitImpls registry. */
+    val concreteTypes: List<KneType.OBJECT> = emptyList(),
 ) : Serializable
 
 data class KneFunction(
@@ -63,6 +139,23 @@ data class KneFunction(
     val isExtension: Boolean = false,
     val receiverType: KneType? = null,
     val isOverride: Boolean = false,
+    /** True if the method takes `&mut self` (Rust). Used by Rust bridge generator. */
+    val isMutating: Boolean = false,
+    val receiverKind: KneReceiverKind = KneReceiverKind.NONE,
+    val canFail: Boolean = false,
+    val returnsBorrowed: Boolean = false,
+    val returnRustType: String? = null,
+    val isUnsafe: Boolean = false,
+    /** Rust expression suffix for `impl Trait` return conversion (e.g. `.collect::<Vec<_>>()`). */
+    val returnConversion: String? = null,
+    /** Generic type parameters that require monomorphisation.
+     *  When non-empty, the method needs concrete type substitutions. */
+    val genericParams: List<GenericParamInfo> = emptyList(),
+    /** Original Rust method name before monomorphisation suffix was added.
+     *  When set, the bridge must call this name (with turbofish) instead of [name]. */
+    val rustMethodName: String? = null,
+    /** Turbofish type args to append to the Rust method call (e.g. "::<Doubler>"). */
+    val turbofish: String? = null,
 ) : Serializable
 
 data class KneProperty(
@@ -76,6 +169,10 @@ data class KneParam(
     val name: String,
     val type: KneType,
     val hasDefault: Boolean = false,
+    /** True if this param is borrowed (`&str`, `&T`) in Rust. Affects bridge codegen. */
+    val isBorrowed: Boolean = false,
+    /** Best-effort original Rust type hint used by bridge generation for casts and ownership. */
+    val rustType: String? = null,
 ) : Serializable
 
 sealed class KneType : Serializable {
@@ -88,9 +185,11 @@ sealed class KneType : Serializable {
     object SHORT : KneType()
     object STRING : KneType()
     object UNIT : KneType()
+    object NEVER : KneType()
     data class OBJECT(val fqName: String, val simpleName: String) : KneType()
     data class INTERFACE(val fqName: String, val simpleName: String) : KneType()
     data class ENUM(val fqName: String, val simpleName: String) : KneType()
+    data class SEALED_ENUM(val fqName: String, val simpleName: String) : KneType()
     data class NULLABLE(val inner: KneType) : KneType()
     data class FUNCTION(val paramTypes: List<KneType>, val returnType: KneType) : KneType()
     data class DATA_CLASS(val fqName: String, val simpleName: String, val fields: List<KneParam>) : KneType()
@@ -99,6 +198,32 @@ sealed class KneType : Serializable {
     data class SET(val elementType: KneType) : KneType()
     data class MAP(val keyType: KneType, val valueType: KneType) : KneType()
     data class FLOW(val elementType: KneType) : KneType()
+    data class TUPLE(val elementTypes: List<KneType>) : KneType() {
+        val typeId: String get() {
+            fun go(sb: StringBuilder, t: KneType) {
+                when (t) {
+                    is TUPLE -> { sb.append("T"); t.elementTypes.forEach { go(sb, it) } }
+                    UNIT -> sb.append("U"); BOOLEAN -> sb.append("Z"); BYTE -> sb.append("B")
+                    SHORT -> sb.append("S"); INT -> sb.append("I"); LONG -> sb.append("J")
+                    FLOAT -> sb.append("F"); DOUBLE -> sb.append("D"); STRING -> sb.append("R")
+                    BYTE_ARRAY -> sb.append("Y")
+                    is ENUM -> sb.append("E${t.simpleName}")
+                    is OBJECT -> sb.append("O${t.simpleName}")
+                    is DATA_CLASS -> sb.append("D${t.simpleName}")
+                    is LIST -> { sb.append("L"); go(sb, t.elementType) }
+                    is SET -> { sb.append("S"); go(sb, t.elementType) }
+                    is MAP -> { sb.append("M"); go(sb, t.keyType); go(sb, t.valueType) }
+                    is FLOW -> { sb.append("W"); go(sb, t.elementType) }
+                    is NULLABLE -> { sb.append("N"); go(sb, t.inner) }
+                    is FUNCTION -> { sb.append("F"); t.paramTypes.forEach { go(sb, it) }; sb.append("X"); go(sb, t.returnType) }
+                    is INTERFACE -> sb.append("I${t.simpleName}")
+                    is SEALED_ENUM -> sb.append("K${t.simpleName}")
+                    NEVER -> sb.append("V")
+                }
+            }
+            return buildString { go(this, this@TUPLE) }
+        }
+    }
 
     /** The FFM ValueLayout constant name for this type. */
     val ffmLayout: String
@@ -112,15 +237,17 @@ sealed class KneType : Serializable {
             SHORT -> "JAVA_SHORT"
             STRING -> "ADDRESS" // char* (input) or output buffer pattern (return)
             UNIT -> "" // void — used with FunctionDescriptor.ofVoid(...)
+            NEVER -> "" // void — diverging type never returns
             is OBJECT -> "JAVA_LONG" // opaque handle
             is INTERFACE -> "JAVA_LONG" // opaque handle (same as OBJECT)
+            is SEALED_ENUM -> "JAVA_LONG" // opaque handle
             is ENUM -> "JAVA_INT" // ordinal
             is NULLABLE -> when (inner) {
                 STRING -> "ADDRESS"
                 BOOLEAN, is ENUM -> "JAVA_INT"
                 SHORT, BYTE -> "JAVA_INT" // widened for sentinel
                 INT, LONG, FLOAT, DOUBLE -> "JAVA_LONG" // widened or raw bits
-                is OBJECT, is INTERFACE -> "JAVA_LONG"
+                is OBJECT, is INTERFACE, is SEALED_ENUM -> "JAVA_LONG"
                 else -> inner.ffmLayout
             }
             is FUNCTION -> "JAVA_LONG" // function pointer address
@@ -130,6 +257,7 @@ sealed class KneType : Serializable {
             is SET -> "ADDRESS"  // same encoding as LIST
             is MAP -> "ADDRESS"  // keys pointer (+ values pointer + size handled in expansion)
             is FLOW -> "" // void — result delivered via callbacks (like suspend)
+            is TUPLE -> "ADDRESS" // pointer to tuple data on heap
         }
 
     /** Kotlin/JVM type name as it appears in generated JVM code. */
@@ -144,8 +272,10 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "String"
             UNIT -> "Unit"
+            NEVER -> "Nothing"
             is OBJECT -> simpleName
             is INTERFACE -> simpleName
+            is SEALED_ENUM -> simpleName
             is ENUM -> simpleName
             is NULLABLE -> if (inner is FUNCTION) "(${inner.jvmTypeName})?" else "${inner.jvmTypeName}?"
             is FUNCTION -> "(${paramTypes.joinToString(", ") { it.jvmTypeName }}) -> ${returnType.jvmTypeName}"
@@ -155,6 +285,7 @@ sealed class KneType : Serializable {
             is SET -> "Set<${elementType.jvmTypeName}>"
             is MAP -> "Map<${keyType.jvmTypeName}, ${valueType.jvmTypeName}>"
             is FLOW -> "kotlinx.coroutines.flow.Flow<${elementType.jvmTypeName}>"
+            is TUPLE -> "KneTuple${elementTypes.size}_${typeId}"
         }
 
     /** Kotlin/Native type used in the @CName bridge function signature. */
@@ -169,8 +300,10 @@ sealed class KneType : Serializable {
             SHORT -> "Short"
             STRING -> "CPointer<ByteVar>?" // null-terminated char*
             UNIT -> "Unit"
+            NEVER -> "Nothing" // diverging type - never returns
             is OBJECT -> "Long" // opaque handle
             is INTERFACE -> "Long" // opaque handle (same as OBJECT)
+            is SEALED_ENUM -> "Long" // opaque handle
             is ENUM -> "Int" // ordinal
             is NULLABLE -> when (inner) {
                 STRING -> "CPointer<ByteVar>?"
@@ -178,7 +311,7 @@ sealed class KneType : Serializable {
                 SHORT, BYTE -> "Int" // widened, Int.MIN_VALUE = null
                 INT, LONG -> "Long" // widened, Long.MIN_VALUE = null
                 FLOAT, DOUBLE -> "Long" // raw bits, Long.MIN_VALUE = null
-                is OBJECT, is INTERFACE -> "Long" // 0L = null
+                is OBJECT, is INTERFACE, is SEALED_ENUM -> "Long" // 0L = null
                 else -> inner.nativeBridgeType
             }
             is FUNCTION -> "Long" // function pointer address
@@ -188,6 +321,7 @@ sealed class KneType : Serializable {
             is SET -> collectionPointerType(elementType)
             is MAP -> collectionPointerType(keyType) // keys pointer type; values handled in expansion
             is FLOW -> "Unit" // void — callbacks deliver values
+            is TUPLE -> "Long" // pointer to tuple on heap
         }
 
     /** The native pointer type for out-param usage (e.g. IntVar for Int). */
@@ -201,7 +335,7 @@ sealed class KneType : Serializable {
             BYTE -> "ByteVar"
             SHORT -> "ShortVar"
             is ENUM -> "IntVar" // ordinal
-            is OBJECT, is INTERFACE -> "LongVar" // StableRef handle
+            is OBJECT, is INTERFACE, is SEALED_ENUM -> "LongVar" // StableRef handle
             else -> "ByteVar"
         }
 
@@ -217,7 +351,7 @@ sealed class KneType : Serializable {
             STRING -> "CPointer<ByteVar>?" // packed null-terminated
             BYTE_ARRAY -> "CPointer<LongVar>?" // StableRef handles
             is ENUM -> "CPointer<IntVar>?" // ordinals
-            is OBJECT, is INTERFACE -> "CPointer<LongVar>?" // handles
+            is OBJECT, is INTERFACE, is SEALED_ENUM -> "CPointer<LongVar>?" // handles
             is LIST, is SET, is MAP -> "CPointer<LongVar>?" // nested collection handles
             else -> "CPointer<ByteVar>?"
         }
@@ -231,7 +365,7 @@ sealed class KneType : Serializable {
             SHORT -> "ShortVar"
             BYTE, STRING -> "ByteVar"
             is ENUM -> "IntVar"
-            is OBJECT, is INTERFACE -> "LongVar"
+            is OBJECT, is INTERFACE, is SEALED_ENUM -> "LongVar"
             else -> "ByteVar"
         }
 
@@ -245,7 +379,7 @@ sealed class KneType : Serializable {
             BYTE -> "JAVA_BYTE"
             STRING -> "JAVA_BYTE" // packed buffer uses byte layout
             is ENUM -> "JAVA_INT"
-            is OBJECT, is INTERFACE -> "JAVA_LONG"
+            is OBJECT, is INTERFACE, is SEALED_ENUM -> "JAVA_LONG"
             BYTE_ARRAY -> "JAVA_LONG" // StableRef handles
             is LIST, is SET, is MAP -> "JAVA_LONG" // nested collection handles
             else -> "JAVA_BYTE"
