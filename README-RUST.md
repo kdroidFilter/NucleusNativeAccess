@@ -91,6 +91,48 @@ fun main() {
 ./gradlew run        # if using Compose Desktop
 ```
 
+## Object lifecycle
+
+Every generated proxy class implements `AutoCloseable`. Each instance registers itself with a JVM `Cleaner` at construction time — **`close()` is never mandatory**, the GC will always free the native memory eventually.
+
+```kotlin
+val calc = Calculator(0)
+calc.add(5)
+// close() not called — the Cleaner will free the Rust Box<Calculator> on next GC
+```
+
+Call `close()` explicitly when you want **deterministic release**:
+
+| Situation | Recommendation |
+|-----------|---------------|
+| Short-lived object, GC runs frequently | `close()` optional |
+| Object holds a costly resource (open camera, socket, large native buffer) | Always `close()` |
+| Object created in a tight loop or at high frequency (e.g. `Disks.new_with_refreshed_list()` every 2s) | Always `close()` — native memory accumulates faster than GC collects |
+| Long-running `Flow` or coroutine scope | `close()` in the `finally` block to release on cancellation |
+
+```kotlin
+// Explicit release — deterministic, no waiting for GC
+Calculator(0).use { calc ->
+    calc.add(5)
+    println(calc.get_current())
+} // close() called automatically by use {}
+
+// Flow: release in finally to free as soon as the flow is cancelled
+val sys = System.new_all()
+try {
+    while (isActive) {
+        sys.refresh_all()
+        val diskList = Disks.new_with_refreshed_list()
+        val disks = diskList.list().map { /* … */ }
+        diskList.close()   // created every iteration — close immediately
+        emit(/* … */)
+        delay(2.seconds)
+    }
+} finally {
+    sys.close()            // released when the Flow collector cancels
+}
+```
+
 ## Real-world examples
 
 Three real crates imported directly from crates.io — no Rust modifications, no wrapper crate, just `rustImport { crate(...) }` in `build.gradle.kts`. Source: [`examples/`](examples/).
