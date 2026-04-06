@@ -500,14 +500,13 @@ Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codege
 
 | Problem | Root cause | Impact |
 |---------|-----------|--------|
-| `MenuItem::new` not bridged | Constructor takes `impl ToString` + `Option<Accelerator>` &rarr; unsupported param types | Cannot create menu items from Kotlin |
 | `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
 | macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
 
-> **Opaque types are now supported.** `Icon` is bridged as an opaque handle &mdash; create it via a Rust wrapper function (`make_icon`), pass it to methods like `create_tray_with_icon` or `update_icon`. See the example below.
+> **Opaque types are now supported.** `Icon` and `MenuItem` are bridged as opaque handles. Create them via Rust wrapper functions (`make_icon`, `create_menu_item`), pass them to methods like `create_tray_with_icon`, `add_menu_item`, `set_menu_item_text`, etc.
 
 The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
-1. Exposes a flat API of top-level functions + **opaque `Icon` handles** for type-safe icon management
+1. Exposes a flat API of top-level functions + **opaque `Icon` and `MenuItem` handles** for type-safe management
 2. Manages the `TrayIcon` lifecycle internally via `thread_local!`
 3. Dispatches all calls to the macOS main thread via `dispatch_sync_f`
 4. Uses `Option<impl Fn(String)>` callbacks for events (`on_tray_event` / `on_menu_event`)
@@ -523,31 +522,32 @@ rustImport {
 
 ```rust
 // rust/src/lib.rs — simplified excerpt
-pub fn create_tray(icon_r: i32, icon_g: i32, icon_b: i32,
-                   tooltip: Option<&str>, title: Option<&str>,
-                   menu_items: Option<&str>) -> Result<(), String> {
-    on_main_sync(move || {
-        let icon = make_icon(icon_r as u8, icon_g as u8, icon_b as u8, 32);
-        let mut builder = TrayIconBuilder::new().with_icon(icon);
-        // ... build menu from |-separated labels ...
-        TRAY.with(|cell| *cell.borrow_mut() = Some(builder.build()?));
-        Ok(())
-    })
+pub fn create_tray(icon_r: i32, ..., menu_items: Option<&str>) -> Result<(), String> {
+    on_main_sync(move || { /* ... */ })
 }
 
-pub fn poll_tray_event() -> Option<String> {
-    TrayIconEvent::receiver().try_recv().ok().map(|e| format!("{:?}", e))
+// Opaque MenuItem: wraps muda::MenuItem::new (impl ToString + Option<Accelerator>)
+// into a bridgeable API using &str + bool
+pub fn create_menu_item(label: &str, enabled: bool) -> tray_icon::menu::MenuItem {
+    MenuItem::new(label, enabled, None)
 }
+pub fn add_menu_item(item: &tray_icon::menu::MenuItem) { /* on_main_sync ... */ }
+pub fn set_menu_item_text(item: &tray_icon::menu::MenuItem, text: &str) { item.set_text(text); }
+pub fn get_menu_item_text(item: &tray_icon::menu::MenuItem) -> String { item.text() }
 ```
 
 ```kotlin
-// Kotlin usage — clean top-level function calls
-Tray_icon_wrapper.create_tray(108, 142, 255, "My App", null, "Open|Settings|Quit")
-Tray_icon_wrapper.set_visible(true)
+// Kotlin usage — opaque Icon and MenuItem handles
+Tray_icon_wrapper.make_icon(108, 142, 255, 32).use { icon ->
+    Tray_icon_wrapper.create_tray_with_icon(icon, "My App", null, "Open|Quit")
+}
 
-// Poll events from a coroutine
-val event = Tray_icon_wrapper.poll_tray_event()   // "click|Left|Released"
-val menu = Tray_icon_wrapper.poll_menu_event()     // "Settings"
+// Create and manage individual menu items
+val item = Tray_icon_wrapper.create_menu_item("Settings", true)
+Tray_icon_wrapper.add_menu_item(item)
+Tray_icon_wrapper.set_menu_item_text(item, "Preferences")
+Tray_icon_wrapper.set_menu_item_enabled(item, false)
+item.close()  // optional — GC handles cleanup
 ```
 
 #### Lessons learned
@@ -556,9 +556,9 @@ This example surfaces important architectural insights about the NNA bridge:
 
 1. **Nullable closures enable Rust-to-Kotlin callbacks**: `Option<impl Fn(String)>` params are bridged as nullable function pointers. Rust code can call the Kotlin lambda via FFM upcall stubs. Example: `on_menu_event(handler: ((String) -> Unit)?)` &mdash; pass `null` to clear the handler.
 
-2. **Opaque types block method generation**: Types with private fields (like `Icon`) become opaque handles with only `dispose()`. Their constructors and methods are not bridged. Workaround: **wrap in a Rust function** that creates and uses the type internally.
+2. **Opaque types block method generation**: Types with private fields (like `Icon`, `MenuItem`) become opaque handles with only `dispose()`. Their constructors and methods are not bridged. Workaround: **wrap in Rust functions** that accept simple types (`&str`, `bool`) and delegate to the opaque type's methods. See `create_menu_item`, `set_menu_item_text`, etc.
 
-3. **`impl Trait` params are unsupported**: `MenuItem::new(text: impl ToString, ...)` can't be bridged because the bridge can't monomorphise `impl Trait` in argument position for non-method functions. Workaround: **call from Rust**.
+3. **`impl Trait` params need wrapping**: `MenuItem::new(text: impl ToString, ...)` can't be bridged directly because the external constructor uses `impl Trait` in argument position. Workaround: **wrap in a Rust function** that accepts a concrete type (e.g., `&str`) and calls the constructor internally.
 
 4. **`Box<dyn Trait>` in struct fields blocks constructors**: `TrayIconAttributes.menu: Option<Box<dyn ContextMenu>>` makes the struct constructor unbridgeable. Workaround: **use the builder or wrap in Rust**.
 

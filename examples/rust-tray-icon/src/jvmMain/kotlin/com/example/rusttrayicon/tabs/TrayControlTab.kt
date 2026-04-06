@@ -147,6 +147,96 @@ fun TrayControlTab(manager: TrayIconManager, onEvent: (TrayEvent) -> Unit) {
         }
 
         InfoCard {
+            Text("Menu Items (opaque MenuItem handles)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = AppColors.textPrimary)
+            Spacer(Modifier.height(4.dp))
+            MiniLabel("Demonstrates opaque MenuItem bridging: create, add, modify, remove")
+            Spacer(Modifier.height(8.dp))
+
+            var newItemLabel by remember { mutableStateOf("Custom Item") }
+            val menuItemHandles = remember { mutableStateListOf<MenuItem>() }
+            var refreshKey by remember { mutableIntStateOf(0) }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SimpleTextField(
+                    value = newItemLabel,
+                    onValueChange = { newItemLabel = it },
+                    placeholder = "Menu item label...",
+                    modifier = Modifier.weight(1f),
+                )
+                ActionButton(
+                    text = "Add",
+                    color = AppColors.green,
+                    enabled = manager.isActive && newItemLabel.isNotBlank(),
+                    onClick = {
+                        val item = manager.createMenuItem(newItemLabel)
+                        manager.addMenuItem(item)
+                        menuItemHandles.add(item)
+                        onEvent(TrayEvent(type = "MenuItem", details = "Added '$newItemLabel'"))
+                    },
+                )
+                ActionButton(
+                    text = "+ Separator",
+                    color = AppColors.accent,
+                    enabled = manager.isActive,
+                    onClick = {
+                        manager.addSeparator()
+                        onEvent(TrayEvent(type = "MenuItem", details = "Separator added"))
+                    },
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+
+            // Show created menu items with edit/remove controls
+            @Suppress("UNUSED_EXPRESSION") refreshKey
+            for ((index, item) in menuItemHandles.withIndex()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(vertical = 2.dp),
+                ) {
+                    val text = manager.getMenuItemText(item)
+                    val enabled = manager.isMenuItemEnabled(item)
+                    Text(
+                        "#${index + 1}: \"$text\" ${if (enabled) "(enabled)" else "(disabled)"}",
+                        color = AppColors.textSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ActionButton(
+                        text = if (enabled) "Disable" else "Enable",
+                        color = if (enabled) AppColors.orange else AppColors.green,
+                        enabled = manager.isActive,
+                        onClick = {
+                            manager.setMenuItemEnabled(item, !enabled)
+                            refreshKey++
+                            onEvent(TrayEvent(type = "MenuItem", details = "Toggled '$text' → ${if (!enabled) "enabled" else "disabled"}"))
+                        },
+                    )
+                    ActionButton(
+                        text = "Rename",
+                        enabled = manager.isActive,
+                        onClick = {
+                            val newName = "${text}*"
+                            manager.setMenuItemText(item, newName)
+                            refreshKey++
+                            onEvent(TrayEvent(type = "MenuItem", details = "Renamed '$text' → '$newName'"))
+                        },
+                    )
+                    ActionButton(
+                        text = "Remove",
+                        color = AppColors.red,
+                        enabled = manager.isActive,
+                        onClick = {
+                            manager.removeMenuItem(item)
+                            menuItemHandles.removeAt(index)
+                            item.close()
+                            onEvent(TrayEvent(type = "MenuItem", details = "Removed '$text'"))
+                        },
+                    )
+                }
+            }
+        }
+
+        InfoCard {
             Text("Visibility & Icon", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = AppColors.textPrimary)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

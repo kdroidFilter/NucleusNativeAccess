@@ -1497,14 +1497,24 @@ class RustdocJsonParser {
                                     }
                                     is LazyResolveResult.AsEnum -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        val basePath = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        // Prefer the public path from the function signature (path) over
+                                        // the internal crate path from the paths table (lazy.fullPath),
+                                        // since the paths table may reference transitive dependencies
+                                        // (e.g. muda::items::normal::MenuItem vs tray_icon::menu::MenuItem).
+                                        val basePath = if (path.contains("::")) path
+                                            else if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath
+                                            else qualifiedRustType
                                         val lazyRustType = renderResolvedPathType(basePath, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                                         return if (lazy.isSealed) ResolvedType(KneType.SEALED_ENUM(fq, lazy.name), rustType = lazyRustType)
                                         else ResolvedType(KneType.ENUM(fq, lazy.name), rustType = lazyRustType)
                                     }
                                     is LazyResolveResult.AsStruct -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        val basePath = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        // Prefer the public path from the function signature (path) over
+                                        // the internal crate path from the paths table (lazy.fullPath).
+                                        val basePath = if (path.contains("::")) path
+                                            else if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath
+                                            else qualifiedRustType
                                         // Render with generic args from the call site (e.g. PhysicalSize<u32>)
                                         val lazyRustType = renderResolvedPathType(basePath, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                                         // Only create an opaque proxy class for types not already

@@ -244,9 +244,11 @@ class RustBridgeGenerator {
             .map { it.simpleName }
             .toSet()
 
-        // Map from simpleName to full Rust type name (with generics) for callback type resolution
+        // Map from simpleName to full Rust type name for handle casts and callback type resolution.
+        // Includes generics (e.g. PhysicalSize<f64>) and opaque types with qualified paths
+        // (e.g. tray_icon::Icon, tray_icon::menu::MenuItem).
         objectRustTypeNames = module.classes
-            .filter { it.rustTypeName.contains("<") }
+            .filter { it.rustTypeName != it.simpleName }
             .associate { it.simpleName to it.rustTypeName }
         // Map from enum simpleName to its entry names for ZST enum handling
         enumEntryNames = module.enums.associate { it.simpleName to it.entries }
@@ -300,27 +302,8 @@ class RustBridgeGenerator {
         appendLine("use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, BitAndAssign, BitOrAssign, BitXorAssign};")
         appendLine("use std::io::Read;")
         appendLine("use std::io::Seek;")
-        // Import opaque external types so that bridge code can reference them.
-        // Rustdoc JSON resolves types to their internal module paths (e.g. tray_icon::icon::Icon)
-        // but these internal modules are often private. Use crate::SimpleName for non-std types
-        // since crates typically re-export public types at the crate root.
-        val opaqueImports = module.classes
-            .filter { it.isOpaque && it.rustTypeName.contains("::") }
-            .map { rustType ->
-                val base = rustType.rustTypeName.substringBefore('<') // strip generics
-                val parts = base.split("::")
-                if (parts.size > 2 && !base.startsWith("std::") && !base.startsWith("core::") && !base.startsWith("alloc::")) {
-                    // Non-std type with deep path (e.g. tray_icon::icon::Icon) → use crate::SimpleName
-                    "${parts.first()}::${parts.last()}"
-                } else {
-                    base
-                }
-            }
-            .distinct()
-            .sorted()
-        for (importPath in opaqueImports) {
-            appendLine("use $importPath;")
-        }
+        // No `use` imports needed for opaque external types — the bridge uses fully
+        // qualified paths in dispose and inferred casts (*const _, *mut _) elsewhere.
         appendLine()
         appendLine("// dyn Trait registry: stores fat pointer components as [usize; 2]")
         appendLine("// Box<dyn Trait> is a fat pointer (data + vtable). We transmute it to [usize; 2] for storage.")
@@ -476,11 +459,8 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         appendLine("pub extern \"C\" fn ${baseSym}_dispose(handle: i64) {")
         appendLine("    if handle != 0 {")
-        if (requiresInferredObjectCast(rustTypeName)) {
-            appendLine("        unsafe { drop(Box::from_raw(handle as *mut ${rustTypeName.substringAfterLast("::")})); }")
-        } else {
-            appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustTypeName)); }")
-        }
+        // Use the full qualified path — avoids needing `use` imports for external types
+        appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustTypeName)); }")
         appendLine("    }")
         appendLine("}")
         appendLine()
@@ -3102,12 +3082,15 @@ class RustBridgeGenerator {
     }
 
     private fun rustHandleTypeName(type: KneType, rustType: String?): String {
-        val normalized = unwrapRustWrapperType(rustType)
-        if (normalized != null) return normalized
-        // For OBJECT types, look up the class's full rustTypeName (which includes generics like PhysicalSize<f64>)
+        // For OBJECT types, prefer the class's full rustTypeName (includes qualified paths
+        // like tray_icon::Icon and generics like PhysicalSize<f64>).
+        // This must come before unwrapRustWrapperType, which would strip the qualifier
+        // from a simple "&Icon" to just "Icon" without the full path.
         if (type is KneType.OBJECT) {
             objectRustTypeNames[type.simpleName]?.let { return it }
         }
+        val normalized = unwrapRustWrapperType(rustType)
+        if (normalized != null) return normalized
         return when (type) {
             is KneType.OBJECT -> type.simpleName
             is KneType.INTERFACE -> type.simpleName

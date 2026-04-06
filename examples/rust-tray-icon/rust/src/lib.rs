@@ -185,6 +185,75 @@ pub fn on_menu_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
     }
 }
 
+// ── MenuItem management ────────────────────────────────────────────────────
+
+/// Creates a new menu item with the given label and enabled state.
+/// Returns an opaque `MenuItem` handle that can be passed to `add_menu_item`, etc.
+pub fn create_menu_item(label: &str, enabled: bool) -> tray_icon::menu::MenuItem {
+    MenuItem::new(label, enabled, None)
+}
+
+/// Adds a menu item to the current tray context menu.
+pub fn add_menu_item(item: &tray_icon::menu::MenuItem) {
+    // SAFETY: on_main_sync is synchronous — the reference stays valid for the entire call.
+    let ptr = item as *const tray_icon::menu::MenuItem as usize;
+    on_main_sync(move || {
+        let item = unsafe { &*(ptr as *const tray_icon::menu::MenuItem) };
+        MENU.with(|cell| {
+            if let Some(ref menu) = *cell.borrow() {
+                let _ = menu.append(item);
+            }
+        });
+    });
+}
+
+/// Removes a menu item from the current tray context menu.
+pub fn remove_menu_item(item: &tray_icon::menu::MenuItem) {
+    // SAFETY: on_main_sync is synchronous — the reference stays valid for the entire call.
+    let ptr = item as *const tray_icon::menu::MenuItem as usize;
+    on_main_sync(move || {
+        let item = unsafe { &*(ptr as *const tray_icon::menu::MenuItem) };
+        MENU.with(|cell| {
+            if let Some(ref menu) = *cell.borrow() {
+                let _ = menu.remove(item);
+            }
+        });
+    });
+}
+
+/// Adds a separator to the current tray context menu.
+pub fn add_separator() {
+    on_main_sync(|| {
+        MENU.with(|cell| {
+            if let Some(ref menu) = *cell.borrow() {
+                let _ = menu.append(&PredefinedMenuItem::separator());
+            }
+        });
+    });
+}
+
+/// Returns the text of a menu item.
+pub fn get_menu_item_text(item: &tray_icon::menu::MenuItem) -> String {
+    item.text()
+}
+
+/// Sets the text of a menu item.
+pub fn set_menu_item_text(item: &tray_icon::menu::MenuItem, text: &str) {
+    item.set_text(text);
+}
+
+/// Returns whether a menu item is enabled.
+pub fn is_menu_item_enabled(item: &tray_icon::menu::MenuItem) -> bool {
+    item.is_enabled()
+}
+
+/// Enables or disables a menu item.
+pub fn set_menu_item_enabled(item: &tray_icon::menu::MenuItem, enabled: bool) {
+    item.set_enabled(enabled);
+}
+
+// ── Icon management ────────────────────────────────────────────────────────
+
 /// Updates the icon color.
 pub fn set_icon_color(r: i32, g: i32, b: i32) {
     on_main_sync(move || {

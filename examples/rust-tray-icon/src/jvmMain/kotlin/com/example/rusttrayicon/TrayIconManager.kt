@@ -77,6 +77,45 @@ class TrayIconManager {
         try { Tray_icon_wrapper.update_icon(icon) } catch (_: Exception) {}
     }
 
+    // ── MenuItem management (opaque MenuItem handles) ──
+
+    /** Creates a new menu item with the given label and enabled state. */
+    fun createMenuItem(label: String, enabled: Boolean = true): MenuItem =
+        Tray_icon_wrapper.create_menu_item(label, enabled)
+
+    /** Adds a menu item to the current tray context menu. */
+    fun addMenuItem(item: MenuItem) {
+        try { Tray_icon_wrapper.add_menu_item(item) } catch (_: Exception) {}
+    }
+
+    /** Removes a menu item from the current tray context menu. */
+    fun removeMenuItem(item: MenuItem) {
+        try { Tray_icon_wrapper.remove_menu_item(item) } catch (_: Exception) {}
+    }
+
+    /** Adds a separator to the current tray context menu. */
+    fun addSeparator() {
+        try { Tray_icon_wrapper.add_separator() } catch (_: Exception) {}
+    }
+
+    /** Gets the text of a menu item. */
+    fun getMenuItemText(item: MenuItem): String =
+        Tray_icon_wrapper.get_menu_item_text(item)
+
+    /** Sets the text of a menu item. */
+    fun setMenuItemText(item: MenuItem, text: String) {
+        try { Tray_icon_wrapper.set_menu_item_text(item, text) } catch (_: Exception) {}
+    }
+
+    /** Returns whether a menu item is enabled. */
+    fun isMenuItemEnabled(item: MenuItem): Boolean =
+        Tray_icon_wrapper.is_menu_item_enabled(item)
+
+    /** Enables or disables a menu item. */
+    fun setMenuItemEnabled(item: MenuItem, enabled: Boolean) {
+        try { Tray_icon_wrapper.set_menu_item_enabled(item, enabled) } catch (_: Exception) {}
+    }
+
     private fun registerEventCallbacks(onEvent: (TrayEvent) -> Unit) {
         Tray_icon_wrapper.on_tray_event { desc ->
             onEvent(TrayEvent(type = "TrayEvent", details = desc))
