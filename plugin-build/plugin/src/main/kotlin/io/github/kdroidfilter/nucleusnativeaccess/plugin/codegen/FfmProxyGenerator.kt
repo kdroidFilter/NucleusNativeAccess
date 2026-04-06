@@ -91,6 +91,18 @@ class FfmProxyGenerator {
         private const val ERR_BUF_SIZE = 8192
         private const val MAX_COLLECTION_SIZE = 4096
 
+        /** Kotlin hard keywords that must be escaped when used as identifiers. */
+        private val KOTLIN_KEYWORDS = setOf(
+            "as", "break", "class", "continue", "do", "else", "false", "for", "fun",
+            "if", "in", "interface", "is", "null", "object", "package", "return",
+            "super", "this", "throw", "true", "try", "typealias", "typeof", "val",
+            "var", "when", "while",
+        )
+
+        /** Sanitizes a param name — appends '_' if it's a Kotlin keyword. */
+        fun sanitizeParamName(name: String): String =
+            if (name in KOTLIN_KEYWORDS) "${name}_" else name
+
         /** Map FFM layout constants to GraalVM reachability-metadata type names. */
         private val LAYOUT_TO_GRAAL = mapOf(
             "JAVA_INT" to "int",
@@ -3960,7 +3972,11 @@ class FfmProxyGenerator {
         }
         appendLine()
 
-        fns.forEach { fn ->
+        fns.forEach { origFn ->
+            // Sanitize param names that are Kotlin keywords (e.g. "val" → "val_")
+            val fn = if (origFn.params.any { it.name in KOTLIN_KEYWORDS }) {
+                origFn.copy(params = origFn.params.map { it.copy(name = sanitizeParamName(it.name)) })
+            } else origFn
             val handleName = "${fn.name.uppercase()}_HANDLE"
             val params = fn.params.joinToString(", ") { p ->
                 "${p.name}: ${paramJvmTypeName(p.type)}"
