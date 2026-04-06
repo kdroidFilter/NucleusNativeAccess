@@ -146,6 +146,8 @@ data class KneFunction(
     val returnsBorrowed: Boolean = false,
     val returnRustType: String? = null,
     val isUnsafe: Boolean = false,
+    /** True if the Rust method is `async fn`. The bridge must wrap the call with `pollster::block_on()`. */
+    val isAsync: Boolean = false,
     /** Rust expression suffix for `impl Trait` return conversion (e.g. `.collect::<Vec<_>>()`). */
     val returnConversion: String? = null,
     /** Generic type parameters that require monomorphisation.

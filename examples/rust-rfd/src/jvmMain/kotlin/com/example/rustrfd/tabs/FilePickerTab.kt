@@ -24,33 +24,50 @@ fun FilePickerTab(onResult: (DialogResult) -> Unit) {
         SectionHeader("Pick Single File")
 
         InfoCard {
-            Text("Open a native file picker to select one file.", style = MaterialTheme.typography.body2)
+            Text("Open a native file picker with optional filters (via add_filter).", style = MaterialTheme.typography.body2)
             Spacer(Modifier.height(4.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton("Pick File", enabled = !busy, onClick = {
+                ActionButton("Any File", enabled = !busy, onClick = {
                     busy = true
                     scope.launch {
-                        val r = pickFile(title = "Select a file")
+                        val r = pickFile(title = "Select any file")
                         lastResult = r; onResult(r); busy = false
                     }
                 })
-                ActionButton("From Home", enabled = !busy, color = AppColors.cyan, onClick = {
+                ActionButton("Images", enabled = !busy, color = AppColors.green, onClick = {
                     busy = true
                     scope.launch {
                         val r = pickFile(
-                            title = "Select a file",
-                            directory = System.getProperty("user.home"),
+                            title = "Select an image",
+                            filters = listOf("Images" to listOf("png", "jpg", "jpeg", "gif", "webp", "bmp")),
                         )
                         lastResult = r; onResult(r); busy = false
                     }
                 })
-                ActionButton("From Desktop", enabled = !busy, color = AppColors.purple, onClick = {
+                ActionButton("Documents", enabled = !busy, color = AppColors.purple, onClick = {
                     busy = true
                     scope.launch {
                         val r = pickFile(
-                            title = "Select a file",
-                            directory = System.getProperty("user.home") + "/Desktop",
+                            title = "Select a document",
+                            filters = listOf(
+                                "Documents" to listOf("pdf", "doc", "docx", "txt", "md"),
+                                "Spreadsheets" to listOf("xls", "xlsx", "csv"),
+                            ),
+                        )
+                        lastResult = r; onResult(r); busy = false
+                    }
+                })
+                ActionButton("Source Code", enabled = !busy, color = AppColors.cyan, onClick = {
+                    busy = true
+                    scope.launch {
+                        val r = pickFile(
+                            title = "Select source code",
+                            filters = listOf(
+                                "Rust" to listOf("rs", "toml"),
+                                "Kotlin" to listOf("kt", "kts"),
+                                "All Source" to listOf("rs", "kt", "java", "py", "js", "ts"),
+                            ),
                         )
                         lastResult = r; onResult(r); busy = false
                     }
@@ -61,14 +78,24 @@ fun FilePickerTab(onResult: (DialogResult) -> Unit) {
         SectionHeader("Pick Multiple Files")
 
         InfoCard {
-            Text("Open a native file picker to select multiple files.", style = MaterialTheme.typography.body2)
+            Text("Select multiple files with filters.", style = MaterialTheme.typography.body2)
             Spacer(Modifier.height(4.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton("Pick Files", enabled = !busy, onClick = {
+                ActionButton("Any Files", enabled = !busy, onClick = {
                     busy = true
                     scope.launch {
                         val r = pickFiles(title = "Select files")
+                        lastResult = r; onResult(r); busy = false
+                    }
+                })
+                ActionButton("Images", enabled = !busy, color = AppColors.green, onClick = {
+                    busy = true
+                    scope.launch {
+                        val r = pickFiles(
+                            title = "Select images",
+                            filters = listOf("Images" to listOf("png", "jpg", "jpeg", "gif", "webp")),
+                        )
                         lastResult = r; onResult(r); busy = false
                     }
                 })
@@ -78,18 +105,18 @@ fun FilePickerTab(onResult: (DialogResult) -> Unit) {
         SectionHeader("Pick File or Folder")
 
         InfoCard {
-            Text("Open a native picker allowing both files and folders.", style = MaterialTheme.typography.body2)
+            Text("Native picker allowing both files and folders.", style = MaterialTheme.typography.body2)
             Spacer(Modifier.height(4.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton("File or Folder", enabled = !busy, color = AppColors.green, onClick = {
+                ActionButton("File or Folder", enabled = !busy, color = AppColors.orange, onClick = {
                     busy = true
                     scope.launch {
                         val r = pickFileOrFolder(title = "Select a file or folder")
                         lastResult = r; onResult(r); busy = false
                     }
                 })
-                ActionButton("Files or Folders", enabled = !busy, color = AppColors.green, onClick = {
+                ActionButton("Files or Folders", enabled = !busy, color = AppColors.orange, onClick = {
                     busy = true
                     scope.launch {
                         val r = pickFilesOrFolders(title = "Select files or folders")
@@ -99,7 +126,6 @@ fun FilePickerTab(onResult: (DialogResult) -> Unit) {
             }
         }
 
-        // Last result display
         lastResult?.let { result ->
             SectionHeader("Last Result")
             InfoCard {

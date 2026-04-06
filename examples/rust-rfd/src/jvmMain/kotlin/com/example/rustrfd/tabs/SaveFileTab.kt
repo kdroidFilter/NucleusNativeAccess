@@ -25,7 +25,7 @@ fun SaveFileTab(onResult: (DialogResult) -> Unit) {
 
         InfoCard {
             Text(
-                "Open a native save dialog. Demonstrates set_file_name, set_directory, and set_can_create_directories.",
+                "Native save dialog with set_file_name, set_directory, and add_filter.",
                 style = MaterialTheme.typography.body2,
             )
             Spacer(Modifier.height(4.dp))
@@ -41,21 +41,37 @@ fun SaveFileTab(onResult: (DialogResult) -> Unit) {
                 ActionButton("Save .txt", enabled = !busy, color = AppColors.green, onClick = {
                     busy = true
                     scope.launch {
-                        val r = saveFile(title = "Save text file", fileName = "untitled.txt")
+                        val r = saveFile(
+                            title = "Save text file",
+                            fileName = "untitled.txt",
+                            filters = listOf("Text Files" to listOf("txt", "md")),
+                        )
                         lastResult = r; onResult(r); busy = false
                     }
                 })
                 ActionButton("Save .json", enabled = !busy, color = AppColors.cyan, onClick = {
                     busy = true
                     scope.launch {
-                        val r = saveFile(title = "Save JSON", fileName = "data.json")
+                        val r = saveFile(
+                            title = "Save JSON",
+                            fileName = "data.json",
+                            filters = listOf("JSON" to listOf("json")),
+                        )
                         lastResult = r; onResult(r); busy = false
                     }
                 })
-                ActionButton("Save .png", enabled = !busy, color = AppColors.purple, onClick = {
+                ActionButton("Save Image", enabled = !busy, color = AppColors.purple, onClick = {
                     busy = true
                     scope.launch {
-                        val r = saveFile(title = "Save image", fileName = "screenshot.png")
+                        val r = saveFile(
+                            title = "Save image",
+                            fileName = "screenshot.png",
+                            filters = listOf(
+                                "PNG" to listOf("png"),
+                                "JPEG" to listOf("jpg", "jpeg"),
+                                "All Images" to listOf("png", "jpg", "jpeg", "webp", "bmp"),
+                            ),
+                        )
                         lastResult = r; onResult(r); busy = false
                     }
                 })
@@ -76,6 +92,7 @@ fun SaveFileTab(onResult: (DialogResult) -> Unit) {
                             title = "Save to home directory",
                             fileName = "export.csv",
                             directory = System.getProperty("user.home"),
+                            filters = listOf("CSV" to listOf("csv")),
                         )
                         lastResult = r; onResult(r); busy = false
                     }
@@ -87,6 +104,7 @@ fun SaveFileTab(onResult: (DialogResult) -> Unit) {
                             title = "Save to desktop",
                             fileName = "report.pdf",
                             directory = System.getProperty("user.home") + "/Desktop",
+                            filters = listOf("PDF" to listOf("pdf")),
                         )
                         lastResult = r; onResult(r); busy = false
                     }

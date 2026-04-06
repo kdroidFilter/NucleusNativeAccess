@@ -614,9 +614,8 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapExprWithMutObjectSliceWriteback(
-                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params, "    "
-            )
+            val rawCall = wrapCallForAsync(wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.isAsync)
+            val expr = wrapExprWithMutObjectSliceWriteback(rawCall, fn.params, "    ")
             appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
             appendLine("        $expr")
             appendLine("    })) {")
@@ -630,8 +629,8 @@ class RustBridgeGenerator {
                 appendParamConversion(p)
             }
             val callArgs = fn.params.joinToString(", ") { p -> convertedParamName(p) }
-            val expr = wrapExprWithMutObjectSliceWriteback(
-                wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.params
+            val rawCall = wrapCallForAsync(wrapCallForSafety("obj.${rustCallName(fn)}($callArgs)", fn.isUnsafe), fn.isAsync)
+            val expr = wrapExprWithMutObjectSliceWriteback(rawCall, fn.params
             )
             if (fn.canFail) {
                 appendFallibleReturnHandling(expr, fn.returnType, fn.returnRustType, fn.returnsBorrowed, fn.returnConversion)
@@ -2796,7 +2795,14 @@ class RustBridgeGenerator {
             val isObjectLike = elemType is KneType.OBJECT || elemType is KneType.INTERFACE || elemType is KneType.SEALED_ENUM
             val isEnumLike = elemType is KneType.ENUM
             when {
-                isStringLike -> "${p.name}_ptr"
+                isStringLike -> {
+                    val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
+                    when {
+                        p.rustType?.contains("&mut ") == true -> "&mut ${p.name}_vec"
+                        isBorrowedSlice -> "&${p.name}_vec"
+                        else -> "${p.name}_ptr"
+                    }
+                }
                 isEnumLike -> {
                     val isBorrowedSlice = p.rustType?.trimStart()?.startsWith("&") == true
                     when {
@@ -2997,6 +3003,10 @@ class RustBridgeGenerator {
 
     private fun wrapCallForSafety(expr: String, isUnsafe: Boolean): String =
         if (isUnsafe) "unsafe { $expr }" else expr
+
+    /** Wraps an async Rust call with `pollster::block_on()` so it blocks synchronously in the bridge. */
+    private fun wrapCallForAsync(expr: String, isAsync: Boolean): String =
+        if (isAsync) "pollster::block_on($expr)" else expr
 
     private fun primitiveCastType(type: KneType, rustType: String?): String? {
         val normalized = normalizeRustType(rustType) ?: return null

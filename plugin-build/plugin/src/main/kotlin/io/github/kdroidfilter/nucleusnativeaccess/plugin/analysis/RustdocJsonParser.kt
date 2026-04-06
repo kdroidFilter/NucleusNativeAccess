@@ -87,6 +87,8 @@ class RustdocJsonParser {
         val rustType: String? = null,
         /** Rust expression suffix to apply in bridge code for `impl Trait` return types (e.g. `.collect::<Vec<_>>()`). */
         val implTraitConversion: String? = null,
+        /** True when the return type was `impl Future<Output = T>` — the bridge must block on the future. */
+        val isFuture: Boolean = false,
     )
 
     /**
@@ -763,6 +765,9 @@ class RustdocJsonParser {
             val kind = paramObj.getAsJsonObject("kind") ?: continue
             if (kind.has("lifetime")) continue
             val typeKind = kind.getAsJsonObject("type") ?: continue
+            // Skip synthetic generics created by `impl Trait` params (e.g., `impl Into<String>`, `impl ToString`).
+            // These are desugared by rustdoc; the actual types are resolved via `impl_trait` in the signature.
+            if (typeKind.get("is_synthetic")?.asBoolean == true) continue
             val result = resolveGenericMappingFromBoundsWithTracking(typeKind, knownStructs, knownEnums, knownDataClasses, resolved, selfType)
             if (result.resolvedType != null) {
                 resolved[name] = result.resolvedType
@@ -872,7 +877,11 @@ class RustdocJsonParser {
             val kind = paramObj.getAsJsonObject("kind") ?: continue
             when {
                 kind.has("lifetime") -> continue
-                kind.has("type") -> if (name !in resolved && name !in unresolved) return true
+                kind.has("type") -> {
+                    val typeKind = kind.getAsJsonObject("type")
+                    if (typeKind?.get("is_synthetic")?.asBoolean == true) continue
+                    if (name !in resolved && name !in unresolved) return true
+                }
                 else -> return true
             }
         }
@@ -1068,6 +1077,7 @@ class RustdocJsonParser {
             returnsBorrowed = returnResolved.isBorrowed,
             returnRustType = returnResolved.rustType,
             isUnsafe = inner.getAsJsonObject("header")?.get("is_unsafe")?.asBoolean == true,
+            isAsync = inner.getAsJsonObject("header")?.get("is_async")?.asBoolean == true || returnResolved.isFuture,
             returnConversion = returnResolved.implTraitConversion,
             genericParams = genericParams,
         ).let { method ->
@@ -1680,6 +1690,19 @@ class RustdocJsonParser {
                     val rustType = "Vec<${itemType.rustType ?: renderRustType(itemType.type)}>"
                     val kneType = if (itemType.type == KneType.BYTE) KneType.BYTE_ARRAY else KneType.LIST(itemType.type)
                     return ResolvedType(kneType, rustType = rustType, implTraitConversion = ".into_iter().collect::<Vec<_>>()")
+                }
+
+                "Future" -> {
+                    val outputType = extractAssociatedTypeBinding(
+                        args, "Output", knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    ) ?: return null
+                    return ResolvedType(
+                        outputType.type,
+                        isBorrowed = outputType.isBorrowed,
+                        rustType = outputType.rustType,
+                        implTraitConversion = outputType.implTraitConversion,
+                        isFuture = true,
+                    )
                 }
 
                 "Display", "ToString" -> {

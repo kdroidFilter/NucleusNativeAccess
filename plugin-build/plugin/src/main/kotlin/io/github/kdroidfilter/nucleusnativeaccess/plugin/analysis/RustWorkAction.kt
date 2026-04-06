@@ -197,6 +197,8 @@ object RustWorkAction {
                     crate.gitUrl != null -> appendLine("${crate.name} = { git = \"${crate.gitUrl}\", branch = \"${crate.gitBranch}\"$featuresList }")
                 }
             }
+            // pollster is used by generated bridges to block on async Rust methods
+            appendLine("pollster = \"0.4\"")
         }
         rustProjectDir.resolve("Cargo.toml").writeText(cargoToml)
 

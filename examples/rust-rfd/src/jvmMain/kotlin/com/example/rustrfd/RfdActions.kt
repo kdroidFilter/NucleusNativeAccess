@@ -4,48 +4,42 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 // All rfd dialog calls run on IO to avoid blocking the UI thread.
-// The rfd crate internally dispatches to the appropriate thread for native dialogs.
+
+private fun FileDialog.applyCommon(
+    title: String,
+    directory: String?,
+    filters: List<Pair<String, List<String>>>,
+): FileDialog {
+    var d = set_title(title)
+    if (directory != null) d = d.set_directory(directory)
+    for ((name, extensions) in filters) {
+        d = d.add_filter(name, extensions)
+    }
+    return d
+}
 
 suspend fun pickFile(
     title: String = "Select a file",
     directory: String? = null,
+    filters: List<Pair<String, List<String>>> = emptyList(),
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
-        val path = dialog.pick_file()
-        if (path != null) {
-            DialogResult(type = DialogType.PickFile, paths = listOf(path))
-        } else {
-            DialogResult(type = DialogType.PickFile, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFile, cancelled = true)
-    }
+        val path = FileDialog().applyCommon(title, directory, filters).pick_file()
+        if (path != null) DialogResult(type = DialogType.PickFile, paths = listOf(path))
+        else DialogResult(type = DialogType.PickFile, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFile, cancelled = true) }
 }
 
 suspend fun pickFiles(
     title: String = "Select files",
     directory: String? = null,
+    filters: List<Pair<String, List<String>>> = emptyList(),
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
-        val paths = dialog.pick_files()
-        if (!paths.isNullOrEmpty()) {
-            DialogResult(type = DialogType.PickFiles, paths = paths)
-        } else {
-            DialogResult(type = DialogType.PickFiles, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFiles, cancelled = true)
-    }
+        val paths = FileDialog().applyCommon(title, directory, filters).pick_files()
+        if (!paths.isNullOrEmpty()) DialogResult(type = DialogType.PickFiles, paths = paths)
+        else DialogResult(type = DialogType.PickFiles, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFiles, cancelled = true) }
 }
 
 suspend fun pickFolder(
@@ -53,20 +47,12 @@ suspend fun pickFolder(
     directory: String? = null,
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
+        var dialog = FileDialog().set_title(title)
+        if (directory != null) dialog = dialog.set_directory(directory)
         val path = dialog.pick_folder()
-        if (path != null) {
-            DialogResult(type = DialogType.PickFolder, paths = listOf(path))
-        } else {
-            DialogResult(type = DialogType.PickFolder, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFolder, cancelled = true)
-    }
+        if (path != null) DialogResult(type = DialogType.PickFolder, paths = listOf(path))
+        else DialogResult(type = DialogType.PickFolder, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFolder, cancelled = true) }
 }
 
 suspend fun pickFolders(
@@ -74,20 +60,12 @@ suspend fun pickFolders(
     directory: String? = null,
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
+        var dialog = FileDialog().set_title(title)
+        if (directory != null) dialog = dialog.set_directory(directory)
         val paths = dialog.pick_folders()
-        if (!paths.isNullOrEmpty()) {
-            DialogResult(type = DialogType.PickFolders, paths = paths)
-        } else {
-            DialogResult(type = DialogType.PickFolders, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFolders, cancelled = true)
-    }
+        if (!paths.isNullOrEmpty()) DialogResult(type = DialogType.PickFolders, paths = paths)
+        else DialogResult(type = DialogType.PickFolders, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFolders, cancelled = true) }
 }
 
 suspend fun pickFileOrFolder(
@@ -95,20 +73,12 @@ suspend fun pickFileOrFolder(
     directory: String? = null,
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
+        var dialog = FileDialog().set_title(title)
+        if (directory != null) dialog = dialog.set_directory(directory)
         val path = dialog.pick_file_or_folder()
-        if (path != null) {
-            DialogResult(type = DialogType.PickFile, paths = listOf(path))
-        } else {
-            DialogResult(type = DialogType.PickFile, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFile, cancelled = true)
-    }
+        if (path != null) DialogResult(type = DialogType.PickFile, paths = listOf(path))
+        else DialogResult(type = DialogType.PickFile, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFile, cancelled = true) }
 }
 
 suspend fun pickFilesOrFolders(
@@ -116,45 +86,27 @@ suspend fun pickFilesOrFolders(
     directory: String? = null,
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
+        var dialog = FileDialog().set_title(title)
+        if (directory != null) dialog = dialog.set_directory(directory)
         val paths = dialog.pick_files_or_folders()
-        if (!paths.isNullOrEmpty()) {
-            DialogResult(type = DialogType.PickFiles, paths = paths)
-        } else {
-            DialogResult(type = DialogType.PickFiles, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.PickFiles, cancelled = true)
-    }
+        if (!paths.isNullOrEmpty()) DialogResult(type = DialogType.PickFiles, paths = paths)
+        else DialogResult(type = DialogType.PickFiles, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.PickFiles, cancelled = true) }
 }
 
 suspend fun saveFile(
     title: String = "Save file",
     fileName: String? = null,
     directory: String? = null,
+    filters: List<Pair<String, List<String>>> = emptyList(),
 ): DialogResult = withContext(Dispatchers.IO) {
     runCatching {
-        var dialog = FileDialog()
-        dialog = dialog.set_title(title)
-        if (fileName != null) {
-            dialog = dialog.set_file_name(fileName)
-        }
-        if (directory != null) {
-            dialog = dialog.set_directory(directory)
-        }
+        var dialog = FileDialog().applyCommon(title, directory, filters)
+        if (fileName != null) dialog = dialog.set_file_name(fileName)
         val path = dialog.save_file()
-        if (path != null) {
-            DialogResult(type = DialogType.SaveFile, paths = listOf(path))
-        } else {
-            DialogResult(type = DialogType.SaveFile, cancelled = true)
-        }
-    }.getOrElse {
-        DialogResult(type = DialogType.SaveFile, cancelled = true)
-    }
+        if (path != null) DialogResult(type = DialogType.SaveFile, paths = listOf(path))
+        else DialogResult(type = DialogType.SaveFile, cancelled = true)
+    }.getOrElse { DialogResult(type = DialogType.SaveFile, cancelled = true) }
 }
 
 suspend fun showMessage(
