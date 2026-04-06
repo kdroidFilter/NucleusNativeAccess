@@ -1462,8 +1462,11 @@ class RustdocJsonParser {
                     // (std::io::Error, std::time::Duration, etc.) to avoid ambiguity.
                     // For all other types, use the simple name — they are accessible via
                     // pub use re-exports in the wrapper lib.rs.
-                    val qualifiedRustType = if (id != null) lookupFullPath(id) ?: pathSegment
+                    val basePath = if (id != null) lookupFullPath(id) ?: pathSegment
                         else pathSegment
+                    // Render with generic args from the call site to preserve type params
+                    // (e.g. PhysicalSize<u32>, PhysicalPosition<f64>)
+                    val qualifiedRustType = renderResolvedPathType(basePath, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                     when {
                         id != null && knownEnums.containsKey(id) -> {
                             val name = knownEnums[id]!!
@@ -1494,14 +1497,16 @@ class RustdocJsonParser {
                                     }
                                     is LazyResolveResult.AsEnum -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        // Use the full path from paths table when available for qualified rustType
-                                        val lazyRustType = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        val basePath = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        val lazyRustType = renderResolvedPathType(basePath, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                                         return if (lazy.isSealed) ResolvedType(KneType.SEALED_ENUM(fq, lazy.name), rustType = lazyRustType)
                                         else ResolvedType(KneType.ENUM(fq, lazy.name), rustType = lazyRustType)
                                     }
                                     is LazyResolveResult.AsStruct -> {
                                         val fq = "$currentCrateName.${lazy.name}"
-                                        val lazyRustType = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        val basePath = if (lazy.fullPath != null && lazy.fullPath.contains("::")) lazy.fullPath else qualifiedRustType
+                                        // Render with generic args from the call site (e.g. PhysicalSize<u32>)
+                                        val lazyRustType = renderResolvedPathType(basePath, args, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
                                         // Only create an opaque proxy class for types not already
                                         // in knownStructs (to avoid shadowing richer versions from sub-crates)
                                         recordOpaqueClass(lazy.name, fq, lazyRustType)

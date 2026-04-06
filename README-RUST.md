@@ -488,6 +488,93 @@ Full Compose Desktop app with live preview, format selection, and camera control
 
 ---
 
+### System tray icon &mdash; `tray-icon 0.19`
+
+[tray-icon](https://crates.io/crates/tray-icon) provides cross-platform system tray icons with context menus (Windows, macOS, Linux/GTK).
+
+This example demonstrates the **limits of direct crate import** and the **local wrapper crate** pattern to work around them.
+
+#### Why a local wrapper?
+
+Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but hits several bridge limitations at runtime:
+
+| Problem | Root cause | Impact |
+|---------|-----------|--------|
+| `Icon::from_rgba` not bridged | `Icon` has private fields &rarr; classified as opaque &rarr; no methods generated | Cannot create icons from Kotlin |
+| `MenuItem::new` not bridged | Constructor takes `impl ToString` + `Option<Accelerator>` &rarr; unsupported param types | Cannot create menu items from Kotlin |
+| `TrayIconBuilder.with_icon()` not bridged | Takes `Icon` (opaque type) &rarr; Rust bridge function not generated | Cannot set icon via builder |
+| `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
+| `MenuEvent::set_event_handler` not bridged | Takes `Option<impl Fn(MenuEvent)>` &rarr; nullable closure unsupported | No event callbacks from Rust to Kotlin |
+| macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
+
+The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
+1. Exposes a flat API of top-level functions (no trait objects, no opaque types in params)
+2. Manages the `TrayIcon` lifecycle internally via `thread_local!`
+3. Dispatches all calls to the macOS main thread via `dispatch_sync_f`
+4. Exposes event polling via `poll_tray_event()` / `poll_menu_event()` returning strings
+
+```kotlin
+// build.gradle.kts
+rustImport {
+    libraryName = "tray_icon_wrapper"
+    jvmPackage = "com.example.rusttrayicon"
+    cratePath("tray-icon-wrapper", "${projectDir}/rust")
+}
+```
+
+```rust
+// rust/src/lib.rs — simplified excerpt
+pub fn create_tray(icon_r: i32, icon_g: i32, icon_b: i32,
+                   tooltip: Option<&str>, title: Option<&str>,
+                   menu_items: Option<&str>) -> Result<(), String> {
+    on_main_sync(move || {
+        let icon = make_icon(icon_r as u8, icon_g as u8, icon_b as u8, 32);
+        let mut builder = TrayIconBuilder::new().with_icon(icon);
+        // ... build menu from |-separated labels ...
+        TRAY.with(|cell| *cell.borrow_mut() = Some(builder.build()?));
+        Ok(())
+    })
+}
+
+pub fn poll_tray_event() -> Option<String> {
+    TrayIconEvent::receiver().try_recv().ok().map(|e| format!("{:?}", e))
+}
+```
+
+```kotlin
+// Kotlin usage — clean top-level function calls
+Tray_icon_wrapper.create_tray(108, 142, 255, "My App", null, "Open|Settings|Quit")
+Tray_icon_wrapper.set_visible(true)
+
+// Poll events from a coroutine
+val event = Tray_icon_wrapper.poll_tray_event()   // "click|Left|Released"
+val menu = Tray_icon_wrapper.poll_menu_event()     // "Settings"
+```
+
+#### Lessons learned
+
+This example surfaces important architectural insights about the NNA bridge:
+
+1. **No Rust-to-Kotlin callbacks**: The bridge is one-way (Kotlin calls Rust). Rust event handlers (`set_event_handler`) can't invoke Kotlin lambdas. Workaround: **polling** via `try_recv()`.
+
+2. **Opaque types block method generation**: Types with private fields (like `Icon`) become opaque handles with only `dispose()`. Their constructors and methods are not bridged. Workaround: **wrap in a Rust function** that creates and uses the type internally.
+
+3. **`impl Trait` params are unsupported**: `MenuItem::new(text: impl ToString, ...)` can't be bridged because the bridge can't monomorphise `impl Trait` in argument position for non-method functions. Workaround: **call from Rust**.
+
+4. **`Box<dyn Trait>` in struct fields blocks constructors**: `TrayIconAttributes.menu: Option<Box<dyn ContextMenu>>` makes the struct constructor unbridgeable. Workaround: **use the builder or wrap in Rust**.
+
+5. **Platform thread constraints need Rust-level solutions**: macOS requires AppKit main thread for tray icons. The JVM's AWT EDT is not the macOS main thread. Workaround: **`dispatch_sync_f` from Rust** to the main queue.
+
+6. **Event polling vs callbacks**: Without Rust-to-Kotlin callbacks, the only way to receive native events is polling. The Compose app uses `LaunchedEffect` with `delay(100)` to poll every 100ms.
+
+Full Compose Desktop app with tray icon control, color picker, context menu, and native event log: [`examples/rust-tray-icon/`](examples/rust-tray-icon/).
+
+```bash
+./gradlew :examples:rust-tray-icon:run
+```
+
+---
+
 ## What's supported
 
 | Rust construct | Mapped to | Notes |
@@ -555,6 +642,12 @@ Excluded functions are logged at generation time (stderr), so you know exactly w
 | **Concurrency** | `Send` / `Sync` bounds | Not enforced on JVM side | Be careful with multithreaded access |
 | **Lifetimes** | Explicit lifetime parameters on structs (`struct Ref<'a>`) | Entire struct skipped with log message | Remove lifetime parameters or use owned types |
 | **Mutability** | `&mut T` parameters on standalone `pub fn` | Treated as `&T` (immutable borrow) | Use `impl` methods with `&mut self` instead |
+| **Opaque types** | Structs with private fields (e.g. `Icon`) | Only `dispose()` generated &mdash; no constructors or methods | Wrap in a Rust function that creates and uses the type internally |
+| **Callbacks** | Rust-to-Kotlin callbacks (`set_event_handler(impl Fn)`) | Bridge is one-way: Kotlin &rarr; Rust only. `Option<impl Fn(T)>` params are skipped | Use polling (`try_recv()`) or return events as strings |
+| **Nullable collections** | `Option<Vec<String>>` parameters | `appendNullableParamConversion` has no code path &mdash; method skipped | Use non-nullable params or wrap in Rust |
+| **`Box<dyn Trait>` fields** | Struct fields typed `Box<dyn Trait>` (e.g. `TrayIconAttributes.menu`) | Constructor skipped because param is unbridgeable | Use the builder pattern or wrap in a Rust function |
+| **`impl Trait` params** | `fn new(text: impl ToString, ...)` | Not monomorphisable in argument position for free functions | Call from Rust side |
+| **Thread affinity** | APIs requiring specific threads (e.g. macOS AppKit main thread) | JVM main thread is not the OS main thread | Use `dispatch_sync_f` or equivalent from Rust |
 
 ## Benchmarks — Rust (FFM) vs Pure JVM
 

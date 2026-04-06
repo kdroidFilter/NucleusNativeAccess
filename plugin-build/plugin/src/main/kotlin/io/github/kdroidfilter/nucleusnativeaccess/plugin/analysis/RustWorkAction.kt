@@ -351,7 +351,9 @@ object RustWorkAction {
         docDir: File,
         logger: org.gradle.api.logging.Logger,
     ) {
-        // Helper: recursively collect all module paths from a rustdoc JSON index
+        // Helper: recursively collect all module paths from a rustdoc JSON index.
+        // Also follows glob re-exports (`pub use crate::*;`) into their target crate's JSON
+        // to discover submodules that are re-exported through the current module.
         fun collectModulePaths(index: com.google.gson.JsonObject, items: com.google.gson.JsonArray, parentPath: String): List<String> {
             val paths = mutableListOf<String>()
             for (itemId in items) {
@@ -364,6 +366,25 @@ object RustWorkAction {
                     val subItems = inner.getAsJsonObject("module")?.getAsJsonArray("items")
                     if (subItems != null) {
                         paths.addAll(collectModulePaths(index, subItems, path))
+                    }
+                } else if (inner.has("use")) {
+                    // Handle glob re-exports like `pub use muda::*;` inside a module
+                    val useItem = inner.getAsJsonObject("use")
+                    val isGlob = useItem.get("is_glob")?.asBoolean == true
+                    if (isGlob) {
+                        val source = useItem.get("source")?.let { if (it.isJsonNull) null else it.asString } ?: continue
+                        val subCrateName = source.replace('-', '_')
+                        val subJson = docDir.resolve("$subCrateName.json")
+                        if (subJson.exists()) {
+                            // Parse the glob-re-exported crate's modules under the current path
+                            val subDoc = com.google.gson.JsonParser.parseString(subJson.readText()).asJsonObject
+                            val subIndex = subDoc.getAsJsonObject("index") ?: continue
+                            val subRootId = subDoc.get("root")?.asInt?.toString() ?: continue
+                            val subRoot = subIndex.get(subRootId)?.asJsonObject ?: continue
+                            val subItems = subRoot.getAsJsonObject("inner")
+                                ?.getAsJsonObject("module")?.getAsJsonArray("items") ?: continue
+                            paths.addAll(collectModulePaths(subIndex, subItems, parentPath))
+                        }
                     }
                 }
             }
@@ -397,9 +418,10 @@ object RustWorkAction {
                 useStatements.add("pub use ${primaryCrateName}::${modPath}::*;")
             }
 
-            // Detect re-exported sub-crates (e.g. `pub use symphonia_core;` → accessible as ::core)
+            // Detect re-exported sub-crates and modules (e.g. `pub use symphonia_core;` or `pub use muda::dpi;`)
             val mainJson = com.google.gson.JsonParser.parseString(mainJsonFile.readText()).asJsonObject
             val mainIndex = mainJson.getAsJsonObject("index")
+            val mainPaths = mainJson.getAsJsonObject("paths")
             val rootId = mainJson.get("root")?.asInt?.toString()
             val rootItems = rootId?.let { mainIndex?.get(it)?.asJsonObject }
                 ?.getAsJsonObject("inner")?.getAsJsonObject("module")?.getAsJsonArray("items")
@@ -412,6 +434,19 @@ object RustWorkAction {
                         val sourceElem = useItem.get("source")
                         if (sourceElem == null || sourceElem.isJsonNull) continue
                         val source = sourceElem.asString
+
+                        // Check if target is a module (via paths map) — handles `pub use muda::dpi;`
+                        val targetId = useItem.get("id")?.asInt?.toString()
+                        val targetPath = targetId?.let { mainPaths?.get(it)?.asJsonObject }
+                        val targetKind = targetPath?.get("kind")?.asString
+                        val useAlias = useItem.get("name")?.let { if (it.isJsonNull) null else it.asString }
+
+                        if (targetKind == "module" && useAlias != null) {
+                            // Module re-export: add `pub use primary::alias::*;`
+                            useStatements.add("pub use ${primaryCrateName}::${useAlias}::*;")
+                            continue
+                        }
+
                         // Re-exported crate: source is the crate name (e.g. "symphonia_core")
                         // The alias in the parent crate is derived from the crate name
                         // e.g. symphonia_core is accessible as symphonia::core

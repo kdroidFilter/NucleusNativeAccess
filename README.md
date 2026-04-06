@@ -72,6 +72,7 @@ Then follow the guide for your use case:
 | [`benchmark/`](examples/benchmark/) | Kotlin/Native | Performance benchmarks: native vs JVM |
 | [`rust-calculator/`](examples/rust-calculator/) | Rust | Calculator with Compose Desktop UI &mdash; same API as the Kotlin/Native calculator |
 | [`rust-benchmark/`](examples/rust-benchmark/) | Rust | Performance benchmarks: Rust vs JVM |
+| [`rust-tray-icon/`](examples/rust-tray-icon/) | Rust (local wrapper) | macOS/Windows/Linux system tray icon via `tray-icon 0.19` &mdash; demonstrates `dispatch_sync` main-thread bridging and event polling |
 
 ```bash
 # Kotlin/Native examples
@@ -81,6 +82,7 @@ Then follow the guide for your use case:
 # Rust examples
 ./gradlew :examples:rust-calculator:run           # Compose Desktop UI powered by Rust
 ./gradlew :examples:rust-benchmark:jvmTest        # Rust performance benchmarks
+./gradlew :examples:rust-tray-icon:run            # System tray icon via Rust
 ```
 
 ## Architecture

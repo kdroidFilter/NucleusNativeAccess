@@ -111,6 +111,14 @@ class RustBridgeGenerator {
         if (rt.contains("Box<dyn ") && p.type !is KneType.INTERFACE) return true
         // Bare Box without type params (missing generic info)
         if (rt == "Box" || rt.endsWith("::Box")) return true
+        // Nullable wrapping a collection or function — appendNullableParamConversion
+        // only handles primitives, strings, enums, objects, and data classes.
+        // NULLABLE(LIST/SET/MAP/FUNCTION) falls through to the else branch which
+        // produces `Some(i64)` instead of the correct Rust type.
+        if (p.type is KneType.NULLABLE) {
+            val inner = (p.type as KneType.NULLABLE).inner
+            if (inner is KneType.LIST || inner is KneType.SET || inner is KneType.MAP || inner is KneType.FUNCTION) return true
+        }
         return false
     }
 
@@ -3060,11 +3068,16 @@ class RustBridgeGenerator {
 
     private fun rustHandleTypeName(type: KneType, rustType: String?): String {
         val normalized = unwrapRustWrapperType(rustType)
+        if (normalized != null) return normalized
+        // For OBJECT types, look up the class's full rustTypeName (which includes generics like PhysicalSize<f64>)
+        if (type is KneType.OBJECT) {
+            objectRustTypeNames[type.simpleName]?.let { return it }
+        }
         return when (type) {
-            is KneType.OBJECT -> normalized ?: type.simpleName
-            is KneType.INTERFACE -> normalized ?: type.simpleName
-            is KneType.SEALED_ENUM -> normalized ?: type.simpleName
-            else -> normalized ?: error("Expected handle-backed type, got $type")
+            is KneType.OBJECT -> type.simpleName
+            is KneType.INTERFACE -> type.simpleName
+            is KneType.SEALED_ENUM -> type.simpleName
+            else -> error("Expected handle-backed type, got $type")
         }
     }
 

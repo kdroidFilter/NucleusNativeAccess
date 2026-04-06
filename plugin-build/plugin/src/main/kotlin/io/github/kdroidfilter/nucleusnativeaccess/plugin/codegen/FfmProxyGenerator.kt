@@ -1441,7 +1441,9 @@ class FfmProxyGenerator {
         }
         appendLine()
 
-        val companionHasCallbacks = cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
+        val companionHasCallbacks = cls.companionMethods.any { fn -> fn.params.any {
+            it.type is KneType.FUNCTION || (it.type is KneType.NULLABLE && (it.type as KneType.NULLABLE).inner is KneType.FUNCTION)
+        } }
 
         // Companion: MethodHandles + factory
         appendLine("    companion object {")
@@ -4758,6 +4760,11 @@ class FfmProxyGenerator {
             is KneType.OBJECT -> {
                 appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
                 appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), v.handle) }")
+            }
+            is KneType.INTERFACE -> {
+                val wrapper = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName
+                appendLine("${indent}val ${name}Seg = arena.allocate(JAVA_LONG, $srcExpr.size.toLong())")
+                appendLine("${indent}$srcExpr.forEachIndexed { i, v -> ${name}Seg.setAtIndex(JAVA_LONG, i.toLong(), (v as $wrapper).handle) }")
             }
             KneType.BYTE_ARRAY -> {
                 // ByteArray elements: wrap each as StableRef handle via wrap bridge
