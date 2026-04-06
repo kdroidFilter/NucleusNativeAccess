@@ -32,17 +32,18 @@ class CrossCrateReexportTest {
     }
 
     @Test
-    fun `Camera has get_resolution method`() {
+    fun `Camera has get_resolution property`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.find { it.name == "get_resolution" }
-        assertNotNull("get_resolution method should exist", method)
+        // get_resolution is a no-arg getter, promoted to a property
+        val prop = camera.properties.find { it.name == "resolution" }
+        assertNotNull("get_resolution property should exist, properties: ${camera.properties.map { it.name }}", prop)
     }
 
     @Test
     fun `Resolution from sub-crate is resolved as data class`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.find { it.name == "get_resolution" }!!
-        val returnType = method.returnType
+        val prop = camera.properties.find { it.name == "resolution" }!!
+        val returnType = prop.type
         assertTrue(
             "Resolution should be DATA_CLASS, got $returnType",
             returnType is KneType.DATA_CLASS
@@ -107,9 +108,9 @@ class CrossCrateReexportTest {
     @Test
     fun `CameraFormat from sub-crate is resolved as data class`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.find { it.name == "get_camera_format" }
-        assertNotNull("get_camera_format method should exist", method)
-        val returnType = method!!.returnType
+        val prop = camera.properties.find { it.name == "camera_format" }
+        assertNotNull("get_camera_format property should exist", prop)
+        val returnType = prop!!.type
         assertTrue(
             "CameraFormat should be DATA_CLASS, got $returnType",
             returnType is KneType.DATA_CLASS
@@ -119,8 +120,8 @@ class CrossCrateReexportTest {
     @Test
     fun `CameraFormat has resolution field as nested data class`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.first { it.name == "get_camera_format" }
-        val dc = method.returnType as KneType.DATA_CLASS
+        val prop = camera.properties.first { it.name == "camera_format" }
+        val dc = prop.type as KneType.DATA_CLASS
         assertEquals("CameraFormat", dc.simpleName)
         assertEquals(3, dc.fields.size)
 
@@ -138,8 +139,8 @@ class CrossCrateReexportTest {
     @Test
     fun `CameraFormat has format field as enum`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.first { it.name == "get_camera_format" }
-        val dc = method.returnType as KneType.DATA_CLASS
+        val prop = camera.properties.first { it.name == "camera_format" }
+        val dc = prop.type as KneType.DATA_CLASS
 
         val formatField = dc.fields.find { it.name == "format" }
         assertNotNull("format field should exist", formatField)
@@ -153,8 +154,8 @@ class CrossCrateReexportTest {
     @Test
     fun `CameraFormat has frame_rate field as primitive`() {
         val camera = module.classes.first { it.simpleName == "Camera" }
-        val method = camera.methods.first { it.name == "get_camera_format" }
-        val dc = method.returnType as KneType.DATA_CLASS
+        val prop = camera.properties.first { it.name == "camera_format" }
+        val dc = prop.type as KneType.DATA_CLASS
 
         val frameRateField = dc.fields.find { it.name == "frame_rate" }
         assertNotNull("frame_rate field should exist", frameRateField)

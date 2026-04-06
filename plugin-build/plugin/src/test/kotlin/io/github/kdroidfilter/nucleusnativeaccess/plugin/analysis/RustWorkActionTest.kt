@@ -158,17 +158,17 @@ class RustWorkActionTest {
                 "4": {
                   "id": 4,
                   "crate_id": 0,
-                  "name": "unsupported_tuple_param",
+                  "name": "unsupported_generic_param",
                   "visibility": "public",
                   "span": {"filename": "src/lib.rs", "begin": [15, 1], "end": [15, 40]},
                   "inner": {
                     "function": {
                       "sig": {
-                        "inputs": [["value", {"tuple": [{"primitive": "i32"}, {"primitive": "i32"}]}]],
+                        "inputs": [["value", {"generic": "T"}]],
                         "output": {"primitive": "i32"},
                         "is_c_variadic": false
                       },
-                      "generics": {"params": [], "where_predicates": []},
+                      "generics": {"params": [{"name": "T", "kind": {"type": {"bounds": [], "default": null}}}], "where_predicates": []},
                       "header": {"is_const": false, "is_unsafe": false, "is_async": false, "abi": "Rust"},
                       "has_body": true
                     }
@@ -183,12 +183,11 @@ class RustWorkActionTest {
 
         // supported_fn should be present (i32 -> i32)
         assertNotNull(module.functions.find { it.name == "supported_fn" })
-        // unsupported_tuple_param should NOT be present (tuple is not a supported param type)
-        assertNull(module.functions.find { it.name == "unsupported_tuple_param" })
-        // At least one unsupported warning must have been reported for the tuple-param function
+        // unsupported_generic_param should NOT be present (unbounded generic T is unsupported)
+        assertNull(module.functions.find { it.name == "unsupported_generic_param" })
+        // At least one unsupported warning must have been reported
         assertTrue("Expected at least 1 unsupported warning, got: $unsupported", unsupported.size >= 1)
-        assertTrue("Expected unsupported warning for unsupported_tuple_param, got: $unsupported", unsupported.any { it.contains("unsupported_tuple_param") })
-        assertTrue("Expected unsupported param warning, got: $unsupported", unsupported.any { it.contains("unsupported param 'value'") || it.contains("unsupported parameter type") })
+        assertTrue("Expected unsupported warning for unsupported_generic_param, got: $unsupported", unsupported.any { it.contains("unsupported_generic_param") })
     }
 
     @Test

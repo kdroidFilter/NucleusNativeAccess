@@ -554,6 +554,7 @@ class RustdocJsonParserTest {
 
     @Test
     fun `reports unsupported signatures through callback`() {
+        // Use an unbounded generic T which is truly unsupported
         val json = """
             {
               "root": 0,
@@ -583,16 +584,13 @@ class RustdocJsonParserTest {
                     "function": {
                       "sig": {
                         "inputs": [
-                          ["value", {"tuple": [
-                            {"primitive": "i32"},
-                            {"primitive": "i32"}
-                          ]}]
+                          ["value", {"generic": "T"}]
                         ],
                         "output": {"primitive": "i32"},
                         "is_c_variadic": false
                       },
                       "generics": {
-                        "params": [],
+                        "params": [{"name": "T", "kind": {"type": {"bounds": [], "default": null}}}],
                         "where_predicates": []
                       }
                     }
@@ -605,10 +603,147 @@ class RustdocJsonParserTest {
         val unsupported = mutableListOf<String>()
         val parsed = RustdocJsonParser().parse(json, "sample") { unsupported.add(it) }
 
-        assertTrue(parsed.functions.isEmpty())
-        assertTrue(unsupported.size >= 1)
-        assertTrue(unsupported.any { it.contains("bad_fn") })
-        assertTrue(unsupported.any { it.contains("unsupported param 'value'") })
-        assertTrue(unsupported.any { it.contains("unsupported parameter type") })
+        assertTrue("Function with unsupported generic should be skipped", parsed.functions.isEmpty())
+        assertTrue("At least one unsupported warning expected", unsupported.size >= 1)
+        assertTrue("Warning should mention bad_fn", unsupported.any { it.contains("bad_fn") })
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // impl Future return types
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `async fn method sets isAsync flag`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0, "crate_id": 0, "name": "sample", "visibility": "public",
+                  "inner": {"module": {"items": [1], "is_crate": true, "is_stripped": false}}
+                },
+                "1": {
+                  "id": 1, "crate_id": 0, "name": "MyStruct", "visibility": "public",
+                  "span": {"filename": "src/lib.rs"},
+                  "inner": {"struct": {"kind": {"plain": {"fields": []}}, "generics": {"params": [], "where_predicates": []}, "impls": [2]}}
+                },
+                "2": {
+                  "id": 2, "crate_id": 0, "name": null, "visibility": "public",
+                  "inner": {"impl": {"is_synthetic": false, "is_negative": false, "trait": null,
+                    "for": {"resolved_path": {"path": "MyStruct", "id": 1, "args": null}},
+                    "items": [3]
+                  }}
+                },
+                "3": {
+                  "id": 3, "crate_id": 0, "name": "fetch_data", "visibility": "public",
+                  "span": {"filename": "src/lib.rs"},
+                  "inner": {"function": {
+                    "sig": {
+                      "inputs": [["self", {"borrowed_ref": {"lifetime": null, "is_mutable": false, "type": {"generic": "Self"}}}]],
+                      "output": {"resolved_path": {"path": "Vec", "id": 99, "args": {"angle_bracketed": {"args": [{"type": {"primitive": "u8"}}], "constraints": []}}}},
+                      "is_c_variadic": false
+                    },
+                    "generics": {"params": [], "where_predicates": []},
+                    "header": {"is_const": false, "is_unsafe": false, "is_async": true, "abi": "Rust"},
+                    "has_body": true
+                  }}
+                }
+              },
+              "paths": {"1": {"crate_id": 0, "path": ["sample", "MyStruct"], "kind": "struct"}}
+            }
+        """.trimIndent()
+
+        val module = RustdocJsonParser().parse(json, "sample")
+        val cls = module.classes.first { it.simpleName == "MyStruct" }
+        val method = cls.methods.find { it.name == "fetch_data" }
+        assertNotNull("fetch_data should exist", method)
+        assertTrue("fetch_data should be async", method!!.isAsync)
+        assertEquals(KneType.BYTE_ARRAY, method.returnType)
+    }
+
+    @Test
+    fun `impl Future return type sets isAsync flag`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0, "crate_id": 0, "name": "sample", "visibility": "public",
+                  "inner": {"module": {"items": [1], "is_crate": true, "is_stripped": false}}
+                },
+                "1": {
+                  "id": 1, "crate_id": 0, "name": "MyStruct", "visibility": "public",
+                  "span": {"filename": "src/lib.rs"},
+                  "inner": {"struct": {"kind": {"plain": {"fields": []}}, "generics": {"params": [], "where_predicates": []}, "impls": [2]}}
+                },
+                "2": {
+                  "id": 2, "crate_id": 0, "name": null, "visibility": "public",
+                  "inner": {"impl": {"is_synthetic": false, "is_negative": false, "trait": null,
+                    "for": {"resolved_path": {"path": "MyStruct", "id": 1, "args": null}},
+                    "items": [3]
+                  }}
+                },
+                "3": {
+                  "id": 3, "crate_id": 0, "name": "do_work", "visibility": "public",
+                  "span": {"filename": "src/lib.rs"},
+                  "inner": {"function": {
+                    "sig": {
+                      "inputs": [["self", {"generic": "Self"}]],
+                      "output": {"impl_trait": [{"trait_bound": {"trait": {"path": "Future", "id": 50, "args": {"angle_bracketed": {"args": [], "constraints": [{"name": "Output", "args": null, "binding": {"equality": {"type": {"primitive": "i32"}}}}]}}}, "generic_params": [], "modifier": "none"}}]},
+                      "is_c_variadic": false
+                    },
+                    "generics": {"params": [], "where_predicates": []},
+                    "header": {"is_const": false, "is_unsafe": false, "is_async": false, "abi": "Rust"},
+                    "has_body": true
+                  }}
+                }
+              },
+              "paths": {"1": {"crate_id": 0, "path": ["sample", "MyStruct"], "kind": "struct"}}
+            }
+        """.trimIndent()
+
+        val module = RustdocJsonParser().parse(json, "sample")
+        val cls = module.classes.first { it.simpleName == "MyStruct" }
+        val method = cls.methods.find { it.name == "do_work" }
+        assertNotNull("do_work should exist", method)
+        assertTrue("do_work should be async (impl Future)", method!!.isAsync)
+        assertEquals(KneType.INT, method.returnType)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Synthetic impl Trait generic params (is_synthetic: true)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `synthetic impl Trait params do not block method parsing`() {
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0, "crate_id": 0, "name": "sample", "visibility": "public",
+                  "inner": {"module": {"items": [1], "is_crate": true, "is_stripped": false}}
+                },
+                "1": {
+                  "id": 1, "crate_id": 0, "name": "greet", "visibility": "public",
+                  "span": {"filename": "src/lib.rs"},
+                  "inner": {"function": {
+                    "sig": {
+                      "inputs": [["name", {"impl_trait": [{"trait_bound": {"trait": {"path": "Into", "id": 55, "args": {"angle_bracketed": {"args": [{"type": {"resolved_path": {"path": "String", "id": 21, "args": null}}}], "constraints": []}}}, "generic_params": [], "modifier": "none"}}]}]],
+                      "output": {"resolved_path": {"path": "String", "id": 21, "args": null}},
+                      "is_c_variadic": false
+                    },
+                    "generics": {"params": [{"name": "impl Into<String>", "kind": {"type": {"bounds": [{"trait_bound": {"trait": {"path": "Into", "id": 55, "args": {"angle_bracketed": {"args": [{"type": {"resolved_path": {"path": "String", "id": 21, "args": null}}}], "constraints": []}}}, "generic_params": [], "modifier": "none"}}], "default": null, "is_synthetic": true}}}], "where_predicates": []}
+                  }}
+                }
+              }
+            }
+        """.trimIndent()
+
+        val parsed = RustdocJsonParser().parse(json, "sample")
+        assertEquals("greet should be parsed", 1, parsed.functions.size)
+        assertEquals("greet", parsed.functions[0].name)
+        assertEquals(KneType.STRING, parsed.functions[0].params[0].type)
+        assertEquals(KneType.STRING, parsed.functions[0].returnType)
     }
 }

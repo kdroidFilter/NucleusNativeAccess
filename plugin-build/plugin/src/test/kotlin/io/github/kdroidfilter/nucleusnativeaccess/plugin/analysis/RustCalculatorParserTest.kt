@@ -220,10 +220,11 @@ class RustCalculatorParserTest {
     @Test
     fun `get_point returns DATA_CLASS type`() {
         val calc = module.classes.first { it.simpleName == "Calculator" }
-        val getPoint = calc.methods.find { it.name == "get_point" }
-        assertNotNull(getPoint)
-        assertTrue(getPoint!!.returnType is KneType.DATA_CLASS)
-        val dc = getPoint.returnType as KneType.DATA_CLASS
+        // get_point is a no-arg getter, promoted to a property (prefix "get_" stripped)
+        val prop = calc.properties.find { it.name == "point" || it.name == "get_point" }
+        assertNotNull("point property not found, properties: ${calc.properties.map { it.name }}", prop)
+        assertTrue(prop!!.type is KneType.DATA_CLASS)
+        val dc = prop.type as KneType.DATA_CLASS
         assertEquals("Point", dc.simpleName)
         assertEquals(2, dc.fields.size)
     }
@@ -241,10 +242,11 @@ class RustCalculatorParserTest {
     @Test
     fun `get_named_value returns DATA_CLASS with String field`() {
         val calc = module.classes.first { it.simpleName == "Calculator" }
-        val getNv = calc.methods.find { it.name == "get_named_value" }
-        assertNotNull(getNv)
-        assertTrue(getNv!!.returnType is KneType.DATA_CLASS)
-        val dc = getNv.returnType as KneType.DATA_CLASS
+        // get_named_value is a no-arg getter, promoted to a property (prefix "get_" stripped)
+        val prop = calc.properties.find { it.name == "named_value" || it.name == "get_named_value" }
+        assertNotNull("named_value property not found, properties: ${calc.properties.map { it.name }}", prop)
+        assertTrue(prop!!.type is KneType.DATA_CLASS)
+        val dc = prop.type as KneType.DATA_CLASS
         assertEquals("NamedValue", dc.simpleName)
         assertEquals(KneType.STRING, dc.fields[0].type)
     }

@@ -215,7 +215,9 @@ fun main() {
 | `impl Iterator<Item=T>` return | `List<T>` | Collected via `.collect()` in bridge; also `ExactSizeIterator`, `IntoIterator`, `DoubleEndedIterator` |
 | `impl Display` / `impl ToString` return | `String` | Materialized via `.to_string()` in bridge |
 | `impl Into<T>` return | `T` | Converted via `.into()` in bridge |
-| `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator) |
+| `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator, Future) |
+| `async fn` / `impl Future<Output=T>` | `T` (sync, blocked) | Bridged via `pollster::block_on()`; both `async fn` methods and explicit `impl Future` returns are supported |
+| `impl Into<T>` / `impl ToString` params | `String` | Synthetic `impl Trait` params in argument position are resolved; `&[impl ToString]` → `List<String>` |
 | Trait objects (`dyn Trait`) | **Supported** | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` params via handle + transmute |
 | `fn(A) -> B` callbacks | **Supported** | Function pointers and `impl Fn`/`FnOnce` with primitive, enum, object, sealed enum, and `dyn Trait` types |
 | Callbacks with handle types | **Supported** | `impl FnOnce(Object) -> SealedEnum`, `impl FnOnce(i32) -> Box<dyn Trait>`, etc. Handle-backed types use Box/trait-registry bridging |
@@ -266,6 +268,8 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | `&[T]` return (borrowed slices) | Materialized to `List<T>` | Borrowed slice is copied into a `Vec<T>` in the bridge; safe but allocates |
 | `impl Into<T>` return | Mapped to `T` | Converted via `.into()` in bridge |
 | `Result<impl Trait, E>` return | Combined with above | Result unwrapped first, then impl Trait conversion applied |
+| `async fn` methods | Blocked via `pollster::block_on()` | Return type is the inner `Output` type; both `async fn` and explicit `impl Future<Output=T>` returns supported |
+| `impl Into<T>` / `impl ToString` params | Resolved to concrete type | Synthetic generic params (`is_synthetic: true`) are skipped; `&[impl ToString]` becomes `List<String>` |
 
 ### 5. Run
 
