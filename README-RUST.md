@@ -502,7 +502,7 @@ Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codege
 |---------|-----------|--------|
 | `Icon::from_rgba` not bridged | `Icon` has private fields &rarr; classified as opaque &rarr; no methods generated | Cannot create icons from Kotlin |
 | `MenuItem::new` not bridged | Constructor takes `impl ToString` + `Option<Accelerator>` &rarr; unsupported param types | Cannot create menu items from Kotlin |
-| `TrayIconBuilder.with_icon()` not bridged | Takes `Icon` (opaque type) &rarr; Rust bridge function not generated | Cannot set icon via builder |
+| `TrayIconBuilder.with_icon()` not bridged | Takes `Icon` (opaque type) &rarr; bridge generated but `Icon` has no constructor | Can pass opaque handles but cannot create `Icon` from Kotlin |
 | `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
 | macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
 

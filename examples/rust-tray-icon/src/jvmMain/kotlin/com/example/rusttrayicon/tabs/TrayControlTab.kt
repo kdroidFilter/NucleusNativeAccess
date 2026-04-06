@@ -60,7 +60,7 @@ fun TrayControlTab(manager: TrayIconManager, onEvent: (TrayEvent) -> Unit) {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(
-                    text = "Create Tray Icon",
+                    text = "Create (RGB)",
                     color = AppColors.green,
                     enabled = !manager.isActive,
                     onClick = {
@@ -70,6 +70,24 @@ fun TrayControlTab(manager: TrayIconManager, onEvent: (TrayEvent) -> Unit) {
                             menuItems = menuItems,
                             onEvent = onEvent,
                         )
+                    },
+                )
+                ActionButton(
+                    text = "Create (Icon)",
+                    color = AppColors.accent,
+                    enabled = !manager.isActive,
+                    onClick = {
+                        // Demonstrates opaque type bridging:
+                        // make_icon returns an opaque Icon handle, passed to create_tray_with_icon
+                        Tray_icon_wrapper.make_icon(108, 142, 255, 32).use { icon ->
+                            manager.createWithIcon(
+                                icon = icon,
+                                tooltip = tooltip,
+                                title = title,
+                                menuItems = menuItems,
+                                onEvent = onEvent,
+                            )
+                        }
                     },
                 )
                 ActionButton(
@@ -142,18 +160,37 @@ fun TrayControlTab(manager: TrayIconManager, onEvent: (TrayEvent) -> Unit) {
                 })
             }
             Spacer(Modifier.height(4.dp))
+            MiniLabel("Via set_icon_color (flat API)")
+            Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(text = "Red", color = AppColors.red, enabled = manager.isActive, onClick = {
                     manager.setIconColor(239, 68, 68)
-                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Red"))
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Red (flat)"))
                 })
                 ActionButton(text = "Green", color = AppColors.green, enabled = manager.isActive, onClick = {
                     manager.setIconColor(74, 222, 128)
-                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Green"))
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Green (flat)"))
                 })
                 ActionButton(text = "Blue", color = AppColors.accent, enabled = manager.isActive, onClick = {
                     manager.setIconColor(108, 142, 255)
-                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Blue"))
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Blue (flat)"))
+                })
+            }
+            Spacer(Modifier.height(4.dp))
+            MiniLabel("Via update_icon (opaque Icon handle)")
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ActionButton(text = "Red", color = AppColors.red, enabled = manager.isActive, onClick = {
+                    Tray_icon_wrapper.make_icon(239, 68, 68, 32).use { manager.updateIcon(it) }
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Red (opaque)"))
+                })
+                ActionButton(text = "Green", color = AppColors.green, enabled = manager.isActive, onClick = {
+                    Tray_icon_wrapper.make_icon(74, 222, 128, 32).use { manager.updateIcon(it) }
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Green (opaque)"))
+                })
+                ActionButton(text = "Blue", color = AppColors.accent, enabled = manager.isActive, onClick = {
+                    Tray_icon_wrapper.make_icon(108, 142, 255, 32).use { manager.updateIcon(it) }
+                    onEvent(TrayEvent(type = "Icon", details = "Color changed to Blue (opaque)"))
                 })
             }
         }

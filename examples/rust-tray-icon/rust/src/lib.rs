@@ -6,10 +6,16 @@ thread_local! {
     static MENU: std::cell::RefCell<Option<Menu>> = const { std::cell::RefCell::new(None) };
 }
 
-fn make_icon(r: u8, g: u8, b: u8, size: u32) -> tray_icon::Icon {
-    let pixel = [r, g, b, 255u8];
-    let rgba: Vec<u8> = pixel.iter().copied().cycle().take((size * size * 4) as usize).collect();
-    tray_icon::Icon::from_rgba(rgba, size, size).expect("valid icon")
+/// Creates an icon from RGBA color values with the given pixel size.
+/// Returns an opaque `Icon` handle that can be passed to `create_tray_with_icon` or `update_icon`.
+pub fn make_icon(r: i32, g: i32, b: i32, size: i32) -> tray_icon::Icon {
+    let pixel = [r as u8, g as u8, b as u8, 255u8];
+    let rgba: Vec<u8> = pixel.iter().copied().cycle().take((size as usize * size as usize * 4) as usize).collect();
+    tray_icon::Icon::from_rgba(rgba, size as u32, size as u32).expect("valid icon")
+}
+
+fn make_icon_internal(r: u8, g: u8, b: u8, size: u32) -> tray_icon::Icon {
+    make_icon(r as i32, g as i32, b as i32, size as i32)
 }
 
 /// Creates a tray icon with icon, tooltip, title, and a context menu.
@@ -27,7 +33,7 @@ pub fn create_tray(
     let menu_items = menu_items.map(|s| s.to_string());
 
     on_main_sync(move || {
-        let icon = make_icon(icon_r as u8, icon_g as u8, icon_b as u8, 32);
+        let icon = make_icon_internal(icon_r as u8, icon_g as u8, icon_b as u8, 32);
         let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
         if let Some(ref t) = tooltip {
             builder = builder.with_tooltip(t);
@@ -55,6 +61,59 @@ pub fn create_tray(
         TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
         Ok(())
     })
+}
+
+/// Creates a tray icon using an opaque `Icon` handle (from `make_icon`).
+pub fn create_tray_with_icon(
+    icon: &tray_icon::Icon,
+    tooltip: Option<&str>,
+    title: Option<&str>,
+    menu_items: Option<&str>,
+) -> Result<(), String> {
+    let icon = icon.clone();
+    let tooltip = tooltip.map(|s| s.to_string());
+    let title = title.map(|s| s.to_string());
+    let menu_items = menu_items.map(|s| s.to_string());
+
+    on_main_sync(move || {
+        let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
+        if let Some(ref t) = tooltip {
+            builder = builder.with_tooltip(t);
+        }
+        if let Some(ref t) = title {
+            builder = builder.with_title(t);
+        }
+
+        let menu = Menu::new();
+        if let Some(ref items_str) = menu_items {
+            for label in items_str.split('|') {
+                let label = label.trim();
+                if !label.is_empty() {
+                    let _ = menu.append(&MenuItem::new(label, true, None));
+                }
+            }
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+        let _ = menu.append(&MenuItem::new("Quit", true, None));
+        builder = builder.with_menu(Box::new(menu.clone()));
+        MENU.with(|cell| *cell.borrow_mut() = Some(menu));
+
+        let tray = builder.build().map_err(|e| e.to_string())?;
+        TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
+        Ok(())
+    })
+}
+
+/// Updates the tray icon using an opaque `Icon` handle (from `make_icon`).
+pub fn update_icon(icon: &tray_icon::Icon) {
+    let icon = icon.clone();
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() {
+                let _ = tray.set_icon(Some(icon));
+            }
+        });
+    });
 }
 
 /// Destroys the current tray icon.
@@ -131,7 +190,7 @@ pub fn set_icon_color(r: i32, g: i32, b: i32) {
     on_main_sync(move || {
         TRAY.with(|cell| {
             if let Some(ref tray) = *cell.borrow() {
-                let icon = make_icon(r as u8, g as u8, b as u8, 32);
+                let icon = make_icon_internal(r as u8, g as u8, b as u8, 32);
                 let _ = tray.set_icon(Some(icon));
             }
         });
