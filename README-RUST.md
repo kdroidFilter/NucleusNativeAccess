@@ -187,13 +187,13 @@ fun dynamicStateFlow(interval: Duration = 2.seconds): Flow<DynamicState> = flow 
             val disks = diskList.list().map { disk ->
                 DiskInfo(name = disk.name(), mountPoint = disk.mount_point(), totalSpace = disk.total_space(), availableSpace = disk.available_space())
             }
-            diskList.close()
+            diskList.close() // recommended: created every 2s in a loop — don't wait for GC
 
             emit(DynamicState(memory = memory, cpus = cpus, processes = processes, disks = disks, globalCpuUsage = sys.global_cpu_usage()))
             delay(interval)
         }
     } finally {
-        sys.close()
+        sys.close() // recommended: long-lived resource, release as soon as the Flow is cancelled
     }
 }.flowOn(Dispatchers.IO)
 ```
@@ -289,7 +289,9 @@ rustImport {
 }
 ```
 
-The plugin maps `FileDialog`, `MessageDialog`, `MessageLevel`, `MessageButtons`, and `MessageDialogResult`. All dialog methods are `async fn` on the Rust side → automatically mapped to `suspend fun`. In Compose, call them from a `rememberCoroutineScope`:
+The plugin maps `FileDialog`, `MessageDialog`, `MessageLevel`, `MessageButtons`, and `MessageDialogResult`. All dialog methods are `async fn` on the Rust side → automatically mapped to `suspend fun`. In Compose, call them from a `rememberCoroutineScope`.
+
+`FileDialog` and `MessageDialog` are short-lived objects — no `close()` needed, the GC handles them automatically.
 
 ```kotlin
 @Composable
@@ -433,7 +435,7 @@ fun cameraStateFlow(): Flow<CameraState> = channelFlow {
         }
     } finally {
         camera.stop_stream()
-        camera.close()
+        camera.close() // recommended: holds an open hardware stream — release on cancellation
     }
 }.flowOn(Dispatchers.IO)
 ```
