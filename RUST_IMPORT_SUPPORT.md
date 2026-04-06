@@ -27,7 +27,7 @@ Status of the `rustImport { crate(...) }` feature that auto-generates Kotlin bin
 | Enums (with data) | `sealed class` | Supported |
 | Traits (as interfaces) | `interface` | Supported |
 | `dyn Trait` returns | `DynXxx` wrapper class | Supported |
-| `Box<dyn Trait>` params | — | Not supported |
+| `Box<dyn Trait>` params | Supported | Registry-based handle passing |
 | Generics (`Struct<T>`) | Monomorphized variants | Supported |
 | `async fn` | `suspend fun` | Supported |
 | Streams / iterators | `Flow<T>` | Supported |
@@ -61,13 +61,13 @@ Status of the `rustImport { crate(...) }` feature that auto-generates Kotlin bin
 
 ## Trait / Interface Features
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Trait → Kotlin interface | Supported | Methods as abstract declarations |
-| `dyn Trait` return types | Supported | `DynXxx` wrapper class with `fromNativeHandle` |
-| `dyn Trait` as param | Not supported | Interface params don't have `.handle` |
+| Feature                   | Status | Notes |
+|---------------------------|--------|-------|
+| Trait → Kotlin interface  | Supported | Methods as abstract declarations |
+| `dyn Trait` return types  | Supported | `DynXxx` wrapper class with `fromNativeHandle` |
+| `dyn Trait` as param      | Supported | DynWrapper type used in signatures, registry-based handle passing |
 | Trait with associated types | Not supported | Skipped |
-| Super-traits | Partial | Interface inheritance not chained |
+| Super-traits              | Partial | Interface inheritance not chained |
 
 ## Callback / Function Pointer Features
 
@@ -96,9 +96,7 @@ Status of the `rustImport { crate(...) }` feature that auto-generates Kotlin bin
 
 ### Not Yet Bridgeable
 
-1. **`dyn Trait` as function parameter** — Rust trait objects used as params (`Box<dyn MediaSource>`) require dynamic dispatch that the C bridge can't express. Constructors and methods with trait-object params are skipped.
-
-2. **Top-level functions** — Free functions like `fn default_host()` or `fn get_probe()` are only bridged when they have supported param/return types. Functions returning `impl Trait` or taking `dyn Trait` are skipped.
+1. **Top-level functions** — Free functions like `fn default_host()` or `fn get_probe()` are only bridged when they have supported param/return types. Functions returning `impl Trait` are skipped.
 
 3. **Generic types without concrete instantiation** — If a generic struct `Foo<T>` has no trait impl that binds `T` to a concrete type, it stays unresolved and is skipped.
 

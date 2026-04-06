@@ -98,7 +98,8 @@ class RustBridgeGenerator {
         // fn(...) in rustType with complex arg types
         if (rt.startsWith("fn(") && (rt.contains("&[") || rt.contains("&mut ") || rt.contains("dyn "))) return true
         // Box<dyn T> fields (fat pointers, cannot be passed as i64 handle)
-        if (rt.contains("Box<dyn ")) return true
+        // Exception: INTERFACE types are handled via registry-based fat pointer reconstruction
+        if (rt.contains("Box<dyn ") && p.type !is KneType.INTERFACE) return true
         // Bare Box without type params (missing generic info)
         if (rt == "Box" || rt.endsWith("::Box")) return true
         return false
@@ -2266,7 +2267,16 @@ class RustBridgeGenerator {
                 appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
             }
             is KneType.INTERFACE -> {
-                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+                // Reconstruct &dyn Trait / &mut dyn Trait from registry via transmute
+                val traitName = (p.type as KneType.INTERFACE).simpleName
+                val rt = p.rustType ?: ""
+                val isMut = rt.contains("&mut ")
+                val mutKw = if (isMut) "mut " else ""
+                val refKw = if (isMut) "&mut " else "&"
+                appendLine("${indent}let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                appendLine("${indent}    *reg.borrow().get(&(${p.name} as u64)).expect(\"Invalid trait handle\")")
+                appendLine("${indent}});")
+                appendLine("${indent}let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
             }
             is KneType.SEALED_ENUM -> {
                 appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
@@ -2767,7 +2777,8 @@ class RustBridgeGenerator {
         KneType.BOOLEAN -> "${p.name}_conv"
         is KneType.FUNCTION -> "${p.name}_fn"
         is KneType.ENUM -> if (p.isBorrowed) "&${p.name}_conv" else "${p.name}_conv"
-        is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM ->
+        is KneType.INTERFACE -> "${p.name}_ref"
+        is KneType.OBJECT, is KneType.SEALED_ENUM ->
             if (p.isBorrowed) "${p.name}_borrowed" else "${p.name}_owned"
         is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
         is KneType.TUPLE -> "${p.name}_tuple"

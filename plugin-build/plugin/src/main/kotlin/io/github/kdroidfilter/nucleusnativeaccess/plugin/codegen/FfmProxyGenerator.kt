@@ -32,6 +32,13 @@ class FfmProxyGenerator {
     /** Maps interface fqName → dyn wrapper class simpleName (e.g. "crate.Describable" → "DynDescribable"). */
     private var dynWrapperLookup: Map<String, String> = emptyMap()
 
+    /** Resolves the JVM type name for a param, using DynWrapper for INTERFACE types (which have .handle). */
+    private fun paramJvmTypeName(type: KneType): String = if (type is KneType.INTERFACE) {
+        dynWrapperLookup[type.fqName] ?: type.jvmTypeName
+    } else {
+        type.jvmTypeName
+    }
+
     /** Set of all type names in the current module — used to skip methods referencing unknown types. */
     private var knownTypes: Set<String> = emptySet()
     private var enumTypeNames: Set<String> = emptySet()
@@ -394,9 +401,8 @@ class FfmProxyGenerator {
 
         module.classes.filter { !it.isCommon }.forEach { cls ->
             // Filter out methods/properties referencing external types not in the module
-            // Disable constructor if any param has unknown types or is an interface (no .handle access)
             val ctorHasUnknownTypes = cls.constructor.params.any {
-                !isKnownType(it.type) || it.type is KneType.INTERFACE
+                !isKnownType(it.type)
             }
             val filteredCls = cls.copy(
                 methods = cls.methods.filter { hasOnlyKnownTypes(it) },
@@ -1772,7 +1778,7 @@ class FfmProxyGenerator {
 
         // Factory (only for instantiable classes)
         if (canConstruct) {
-            val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            val ctorParams = cls.constructor.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
             appendLine()
             appendLine("        operator fun invoke($ctorParams): $n {")
             appendCtorInvokeBody("            ", cls.constructor.params, "NEW_HANDLE")
@@ -1784,7 +1790,7 @@ class FfmProxyGenerator {
             for (drop in 1..trailingDefaults) {
                 val requiredParams = cls.constructor.params.dropLast(drop)
                 val suffix = requiredParams.size.toString()
-                val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+                val overloadParams = requiredParams.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
                 appendLine()
                 appendLine("        operator fun invoke($overloadParams): $n {")
                 appendCtorInvokeBody("            ", requiredParams, "NEW_HANDLE_$suffix")
@@ -1978,7 +1984,7 @@ class FfmProxyGenerator {
                 else -> return@forEach
             }
             val handleName = "EXT_${receiverSimpleName.uppercase()}_${fn.name.uppercase()}_HANDLE"
-            val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+            val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
             val returnDecl = if (fn.returnType == KneType.UNIT) "" else ": ${fn.returnType.jvmTypeName}"
 
             appendLine("fun $receiverSimpleName.${fn.name}($params)$returnDecl {")
@@ -2131,7 +2137,7 @@ class FfmProxyGenerator {
         val handleName = "${fn.name.uppercase()}_HANDLE"
         val flowType = fn.returnType as KneType.FLOW
         val elemType = flowType.elementType
-        val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+        val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
 
         appendLine("    fun ${fn.name}($params): Flow<${elemType.jvmTypeName}> = channelFlow {")
         appendLine("        _suspendInFlight.incrementAndGet()")
@@ -2332,7 +2338,7 @@ class FfmProxyGenerator {
     /** Generate a suspend method proxy using suspendCancellableCoroutine. */
     private fun StringBuilder.appendSuspendMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
         val handleName = "${fn.name.uppercase()}_HANDLE"
-        val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+        val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
         val retType = fn.returnType.jvmTypeName
         val overrideMod = if (fn.isOverride) "override " else ""
         val openMod = if (!fn.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
@@ -2591,7 +2597,7 @@ class FfmProxyGenerator {
 
     private fun StringBuilder.appendMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
         val handleName = "${fn.name.uppercase()}_HANDLE"
-        val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+        val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
         val overrideMod = if (fn.isOverride) "override " else ""
         val openMod = if (!fn.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
 
@@ -3288,7 +3294,7 @@ class FfmProxyGenerator {
 
     private fun StringBuilder.appendCompanionMethodProxy(fn: KneFunction) {
         val handleName = "COMPANION_${fn.name.uppercase()}_HANDLE"
-        val params = fn.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+        val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
 
         appendLine()
         appendLine("        fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
@@ -3639,7 +3645,7 @@ class FfmProxyGenerator {
                 appendLine("            return ${escapeSealedVariantName(variant.name)}(h)")
                 appendLine("        }")
             } else {
-                val params = variant.fields.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
+                val params = variant.fields.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
                 appendLine("        fun ${variant.name.replaceFirstChar { it.lowercase() }}($params): ${escapeSealedVariantName(variant.name)} {")
                 val hasCallbacks = variant.fields.any { it.type.isFunctionType() }
                 val needsArena = needsConfinedArena(variant.fields, KneType.UNIT) ||
@@ -3957,13 +3963,7 @@ class FfmProxyGenerator {
         fns.forEach { fn ->
             val handleName = "${fn.name.uppercase()}_HANDLE"
             val params = fn.params.joinToString(", ") { p ->
-                val typeName = if (p.type is KneType.INTERFACE) {
-                    // Use DynWrapper class for &dyn Trait params (has handle property)
-                    dynWrapperLookup[(p.type as KneType.INTERFACE).fqName] ?: p.type.jvmTypeName
-                } else {
-                    p.type.jvmTypeName
-                }
-                "${p.name}: $typeName"
+                "${p.name}: ${paramJvmTypeName(p.type)}"
             }
             appendLine("    fun ${fn.name}($params): ${fn.returnType.jvmTypeName} {")
 

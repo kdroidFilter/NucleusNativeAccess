@@ -980,6 +980,37 @@ pub fn try_create_describable(initial: i32) -> Result<Box<dyn Describable>, Stri
     }
 }
 
+// ── TraitConsumer: struct with dyn Trait constructor/method params ─────────
+
+/// A struct that stores a description obtained from a dyn Describable param.
+pub struct TraitConsumer {
+    description: String,
+}
+
+impl TraitConsumer {
+    /// Constructor taking &dyn Describable — exercises dyn Trait as constructor param.
+    pub fn new(source: &dyn Describable) -> Self {
+        TraitConsumer {
+            description: source.describe_self(),
+        }
+    }
+
+    /// Returns the stored description.
+    pub fn get_description(&self) -> String {
+        self.description.clone()
+    }
+
+    /// Method taking &dyn Describable — exercises dyn Trait as method param.
+    pub fn update_from(&mut self, source: &dyn Describable) {
+        self.description = source.describe_self();
+    }
+
+    /// Method taking &dyn Measurable — exercises different trait as method param.
+    pub fn measure_from(&self, source: &dyn Measurable) -> String {
+        format!("{}: {} {}", self.description, source.measure(), source.unit())
+    }
+}
+
 // ── DataPayload factory functions ──────────────────────────────────────────
 
 /// Creates a Scores payload from a slice of ints.

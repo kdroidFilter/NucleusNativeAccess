@@ -225,4 +225,158 @@ class InterfaceTest {
         threads.forEach { it.start() }
         threads.forEach { it.join() }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TraitConsumer: dyn Trait as constructor and method params
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `dyn param - constructor with &dyn Describable`() {
+        val source = Rustcalc.create_describable(42) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            val desc = consumer.description
+            assertTrue(desc.contains("42"), "Should contain source value, got: $desc")
+        }
+    }
+
+    @Test fun `dyn param - update_from method with &dyn Describable`() {
+        val source1 = Rustcalc.create_describable(10) as DynDescribable
+        val source2 = Rustcalc.create_describable(99) as DynDescribable
+        TraitConsumer(source1).use { consumer ->
+            assertTrue(consumer.description.contains("10"))
+            consumer.update_from(source2)
+            assertTrue(consumer.description.contains("99"), "Should be updated to 99")
+        }
+    }
+
+    @Test fun `dyn param - measure_from method with &dyn Measurable`() {
+        val describable = Rustcalc.create_describable(5) as DynDescribable
+        val measurable = Rustcalc.create_measurable(7) as DynMeasurable
+        TraitConsumer(describable).use { consumer ->
+            val result = consumer.measure_from(measurable)
+            assertTrue(result.contains("7"), "Should contain measurement, got: $result")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TraitConsumer edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `edge dyn param - constructor with zero value source`() {
+        val source = Rustcalc.create_describable(0) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            assertTrue(consumer.description.contains("0"))
+        }
+    }
+
+    @Test fun `edge dyn param - constructor with negative value source`() {
+        val source = Rustcalc.create_describable(-500) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            assertTrue(consumer.description.contains("-500"))
+        }
+    }
+
+    @Test fun `edge dyn param - constructor with MAX_VALUE source`() {
+        val source = Rustcalc.create_describable(Int.MAX_VALUE) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            assertTrue(consumer.description.contains("${Int.MAX_VALUE}"))
+        }
+    }
+
+    @Test fun `edge dyn param - constructor with MIN_VALUE source`() {
+        val source = Rustcalc.create_describable(Int.MIN_VALUE) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            assertTrue(consumer.description.contains("${Int.MIN_VALUE}"))
+        }
+    }
+
+    @Test fun `edge dyn param - multiple update_from calls`() {
+        val source = Rustcalc.create_describable(1) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            repeat(10) { i ->
+                val newSource = Rustcalc.create_describable((i + 1) * 100) as DynDescribable
+                consumer.update_from(newSource)
+                assertTrue(consumer.description.contains("${(i + 1) * 100}"))
+            }
+        }
+    }
+
+    @Test fun `edge dyn param - different trait types on same consumer`() {
+        val desc = Rustcalc.create_describable(42) as DynDescribable
+        val meas = Rustcalc.create_measurable(7) as DynMeasurable
+        TraitConsumer(desc).use { consumer ->
+            val result = consumer.measure_from(meas)
+            assertTrue(result.contains("42"), "Should contain description, got: $result")
+            assertTrue(result.contains("7"), "Should contain measurement, got: $result")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TraitConsumer load tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `load - 100K TraitConsumer constructor calls`() {
+        val source = Rustcalc.create_describable(42) as DynDescribable
+        repeat(100_000) {
+            TraitConsumer(source).use { consumer ->
+                assertTrue(consumer.description.contains("42"))
+            }
+        }
+    }
+
+    @Test fun `load - 100K update_from calls on single instance`() {
+        val source = Rustcalc.create_describable(7) as DynDescribable
+        TraitConsumer(source).use { consumer ->
+            repeat(100_000) {
+                consumer.update_from(source)
+                assertTrue(consumer.description.contains("7"))
+            }
+        }
+    }
+
+    @Test fun `load - 100K measure_from calls on single instance`() {
+        val source = Rustcalc.create_describable(1) as DynDescribable
+        val meas = Rustcalc.create_measurable(2) as DynMeasurable
+        TraitConsumer(source).use { consumer ->
+            repeat(100_000) {
+                val result = consumer.measure_from(meas)
+                assertTrue(result.contains("2"))
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TraitConsumer concurrency tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `concurrent - 10 threads x 10K TraitConsumer constructions`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                val source = Rustcalc.create_describable(tid * 100) as DynDescribable
+                repeat(10_000) {
+                    TraitConsumer(source).use { consumer ->
+                        assertTrue(consumer.description.contains("${tid * 100}"))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K measure_from calls`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                val desc = Rustcalc.create_describable(tid) as DynDescribable
+                val meas = Rustcalc.create_measurable(tid * 10) as DynMeasurable
+                TraitConsumer(desc).use { consumer ->
+                    repeat(10_000) {
+                        val result = consumer.measure_from(meas)
+                        assertTrue(result.contains("${tid * 10}"))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }
