@@ -106,66 +106,127 @@ rustImport {
 }
 ```
 
-The plugin maps `System`, `Disks`, `Networks`, `Components`, `Users`, `Groups`, and `Process` directly from the sysinfo API. Usage from Kotlin:
+The plugin maps `System`, `Disks`, `Networks`, `Components`, `Users`, `Groups`, and `Process` directly from the sysinfo API.
+
+**Data flow**: a Kotlin `Flow` polls `System.new_all()` every 2 seconds and emits structured state. The Compose UI collects it with `collectAsState`.
 
 ```kotlin
-// One-time static info (OS name, kernel, hostname, architecture…)
-val info = SystemInfo(
-    name = System.name() ?: "Unknown",
-    osVersion = System.os_version() ?: "Unknown",
-    kernelVersion = System.kernel_version() ?: "Unknown",
-    hostname = System.host_name() ?: "Unknown",
-    cpuArch = System.cpu_arch(),
-    uptime = System.uptime(),
-    physicalCores = System.physical_core_count(),
-)
+// Polling flow — runs on Dispatchers.IO
+fun dynamicStateFlow(interval: Duration = 2.seconds): Flow<DynamicState> = flow {
+    val sys = System.new_all()
+    try {
+        while (true) {
+            sys.refresh_all()
 
-// Live polling loop — refresh every 2 seconds
-val sys = System.new_all()
-sys.refresh_all()
+            val cpus = sys.cpus().map { cpu ->
+                CpuInfo(name = cpu.name(), brand = cpu.brand(), usage = cpu.cpu_usage(), frequency = cpu.frequency())
+            }
+            val memory = MemoryInfo(
+                totalMemory = sys.total_memory(),
+                usedMemory = sys.used_memory(),
+                availableMemory = sys.available_memory(),
+                totalSwap = sys.total_swap(),
+                usedSwap = sys.used_swap(),
+            )
+            val processes = sys.processes().values
+                .sortedByDescending { it.cpu_usage() }
+                .take(30)
+                .map { proc ->
+                    ProcessInfo(
+                        pid = proc.pid().as_u32().toLong(),
+                        name = proc.name(),
+                        cpuUsage = proc.cpu_usage(),
+                        memory = proc.memory(),
+                        status = proc.status().tag.name,
+                        cmd = proc.cmd(),
+                    )
+                }
+            val diskList = Disks.new_with_refreshed_list()
+            val disks = diskList.list().map { disk ->
+                DiskInfo(name = disk.name(), mountPoint = disk.mount_point(), totalSpace = disk.total_space(), availableSpace = disk.available_space())
+            }
+            diskList.close()
 
-val cpus = sys.cpus().map { cpu ->
-    CpuInfo(name = cpu.name(), usage = cpu.cpu_usage(), frequency = cpu.frequency())
-}
-val memory = MemoryInfo(
-    totalMemory = sys.total_memory(),
-    usedMemory = sys.used_memory(),
-    availableMemory = sys.available_memory(),
-    totalSwap = sys.total_swap(),
-    usedSwap = sys.used_swap(),
-)
-
-// Processes — sorted by CPU usage
-val processes = sys.processes().values
-    .sortedByDescending { it.cpu_usage() }
-    .take(30)
-    .map { proc ->
-        ProcessInfo(
-            pid = proc.pid().as_u32().toLong(),
-            name = proc.name(),
-            cpuUsage = proc.cpu_usage(),
-            memory = proc.memory(),
-            status = proc.status().tag.name,
-        )
+            emit(DynamicState(memory = memory, cpus = cpus, processes = processes, disks = disks, globalCpuUsage = sys.global_cpu_usage()))
+            delay(interval)
+        }
+    } finally {
+        sys.close()
     }
-
-// Disks, networks, sensors, users — same pattern
-val diskList = Disks.new_with_refreshed_list()
-val disks = diskList.list().map { disk ->
-    DiskInfo(
-        name = disk.name(),
-        mountPoint = disk.mount_point(),
-        totalSpace = disk.total_space(),
-        availableSpace = disk.available_space(),
-        fileSystem = disk.file_system(),
-    )
-}
-diskList.close()
-
-sys.close()
+}.flowOn(Dispatchers.IO)
 ```
 
-The full Compose Desktop app with 9 tabs (System, CPU, Memory, Disks, Network, Processes, Sensors, Users, Groups) is in [`examples/rust-sysinfo/`](examples/rust-sysinfo/).
+**Compose UI** — the state flows into `collectAsState` and drives the UI directly:
+
+```kotlin
+@Composable
+fun App() {
+    val state by remember { dynamicStateFlow() }.collectAsState(initial = null)
+
+    when (selected) {
+        NavItem.Cpu    -> CpuTab(state?.cpus ?: emptyList(), state?.globalCpuUsage ?: 0f)
+        NavItem.Memory -> MemoryTab(state?.memory)
+        NavItem.Disks  -> DisksTab(state?.disks ?: emptyList())
+        NavItem.Processes -> ProcessesTab(state?.processes ?: emptyList())
+        // …
+    }
+}
+
+@Composable
+fun CpuTab(cpus: List<CpuInfo>, globalUsage: Float) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatBox("Total Usage", "%.1f%%".format(globalUsage), Modifier.weight(1f))
+                StatBox("Cores", "${cpus.size}", Modifier.weight(1f))
+                StatBox("Frequency", "${cpus.firstOrNull()?.frequency} MHz", Modifier.weight(1f))
+            }
+        }
+        items(cpus) { cpu ->
+            GaugeBar(label = cpu.name, fraction = cpu.usage / 100f, detail = "%.1f%% @ %d MHz".format(cpu.usage, cpu.frequency))
+        }
+    }
+}
+
+@Composable
+fun MemoryTab(info: MemoryInfo?) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatBox("Total", formatBytes(info.totalMemory), Modifier.weight(1f))
+                StatBox("Used",  formatBytes(info.usedMemory),  Modifier.weight(1f))
+                StatBox("Free",  formatBytes(info.availableMemory), Modifier.weight(1f))
+            }
+        }
+        item {
+            val usedPct = info.usedMemory.toFloat() / info.totalMemory
+            GaugeBar("RAM", usedPct, "${formatBytes(info.usedMemory)} / ${formatBytes(info.totalMemory)}")
+        }
+    }
+}
+
+@Composable
+fun ProcessesTab(processes: List<ProcessInfo>) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        items(processes) { proc ->
+            Column {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(proc.name, fontWeight = FontWeight.Bold)
+                    Text("PID ${proc.pid}")
+                }
+                GaugeBar("CPU", proc.cpuUsage / 100f, "%.1f%%".format(proc.cpuUsage))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    StatBox("Memory",  formatBytes(proc.memory),        Modifier.weight(1f))
+                    StatBox("Virtual", formatBytes(proc.virtualMemory), Modifier.weight(1f))
+                }
+                Badge(proc.status)
+            }
+        }
+    }
+}
+```
+
+Full Compose Desktop app with 9 tabs (System, CPU, Memory, Disks, Network, Processes, Sensors, Users, Groups): [`examples/rust-sysinfo/`](examples/rust-sysinfo/).
 
 ```bash
 ./gradlew :examples:rust-sysinfo:run
@@ -175,7 +236,7 @@ The full Compose Desktop app with 9 tabs (System, CPU, Memory, Disks, Network, P
 
 ### Native file dialogs — `rfd 0.17`
 
-[rfd](https://crates.io/crates/rfd) (Rusty File Dialogs) opens native OS file pickers and message dialogs on Linux (GTK), macOS, and Windows — no Java AWT, no Swing.
+[rfd](https://crates.io/crates/rfd) opens native OS file pickers and message dialogs on Linux (GTK), macOS, and Windows — no AWT, no Swing.
 
 ```kotlin
 // build.gradle.kts
@@ -186,49 +247,101 @@ rustImport {
 }
 ```
 
-The plugin maps `FileDialog`, `AsyncFileDialog`, `MessageDialog`, `FileHandle`, `MessageLevel`, `MessageButtons`, and `MessageDialogResult`. All dialog methods are `async fn` on the Rust side, so they are automatically mapped to `suspend fun` — no dispatcher wiring needed:
+The plugin maps `FileDialog`, `MessageDialog`, `MessageLevel`, `MessageButtons`, and `MessageDialogResult`. All dialog methods are `async fn` on the Rust side → automatically mapped to `suspend fun`. In Compose, call them from a `rememberCoroutineScope`:
 
 ```kotlin
-// Pick a single file — suspend fun, runs off the main thread automatically
-val path: String? = FileDialog()
-    .set_title("Select an image")
-    .add_filter("Images", listOf("png", "jpg", "jpeg", "gif"))
-    .set_directory("/home/user/pictures")
-    .pick_file()
+@Composable
+fun FilePickerTab() {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
 
-// Pick multiple files
-val paths: List<String>? = FileDialog()
-    .set_title("Select files")
-    .add_filter("Kotlin", listOf("kt", "kts"))
-    .pick_files()
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
 
-// Pick a folder
-val folder: String? = FileDialog()
-    .set_title("Select a folder")
-    .pick_folder()
+        // Single file picker with filters
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    val path = FileDialog()
+                        .set_title("Select an image")
+                        .add_filter("Images", listOf("png", "jpg", "jpeg", "gif"))
+                        .pick_file()
+                    result = path ?: "Cancelled"
+                    busy = false
+                }
+            }) { Text("Pick Image") }
 
-// Save dialog
-val savePath: String? = FileDialog()
-    .set_title("Save as")
-    .set_file_name("output.txt")
-    .add_filter("Text", listOf("txt"))
-    .save_file()
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    val paths = FileDialog()
+                        .set_title("Select source files")
+                        .add_filter("Kotlin", listOf("kt", "kts"))
+                        .add_filter("Rust", listOf("rs", "toml"))
+                        .pick_files()
+                    result = paths?.joinToString("\n") ?: "Cancelled"
+                    busy = false
+                }
+            }) { Text("Pick Sources") }
 
-// Native message dialog with result
-val result = MessageDialog()
-    .set_title("Confirm")
-    .set_description("Delete this file?")
-    .set_level(MessageLevel.Warning)
-    .set_buttons(MessageButtons.OkCancel)
-    .show()
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    val path = FileDialog()
+                        .set_title("Save as")
+                        .set_file_name("output.txt")
+                        .add_filter("Text", listOf("txt"))
+                        .save_file()
+                    result = path ?: "Cancelled"
+                    busy = false
+                }
+            }) { Text("Save File") }
+        }
 
-when (result.tag.name) {
-    "Ok" -> println("Confirmed")
-    "Cancel" -> println("Cancelled")
+        result?.let { Text(it) }
+    }
+}
+
+@Composable
+fun MessageTab() {
+    val scope = rememberCoroutineScope()
+    var answer by remember { mutableStateOf<String?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+        // Warning dialog — Yes/No/Cancel
+        Button(onClick = {
+            scope.launch {
+                val r = MessageDialog()
+                    .set_title("Save Changes?")
+                    .set_description("You have unsaved changes. Do you want to save before closing?")
+                    .set_level(MessageLevel.Warning)
+                    .set_buttons(MessageButtons.yesNoCancelCustom("Save", "Discard", "Go Back"))
+                    .show()
+                answer = r.tag.name  // "Yes", "No", or "Cancel"
+            }
+        }) { Text("Unsaved changes…") }
+
+        // Error dialog
+        Button(onClick = {
+            scope.launch {
+                val r = MessageDialog()
+                    .set_title("Critical Error")
+                    .set_description("A critical error was detected. Would you like to try again?")
+                    .set_level(MessageLevel.Error)
+                    .set_buttons(MessageButtons.okCancel())
+                    .show()
+                answer = r.tag.name
+            }
+        }) { Text("Show Error") }
+
+        answer?.let { Text("Result: $it") }
+    }
 }
 ```
 
-The full Compose Desktop app with file picker, folder picker, save dialog, and message dialog tabs is in [`examples/rust-rfd/`](examples/rust-rfd/).
+Full Compose Desktop app with file picker, folder picker, save dialog, and message dialog tabs: [`examples/rust-rfd/`](examples/rust-rfd/).
 
 ```bash
 ./gradlew :examples:rust-rfd:run
@@ -249,39 +362,81 @@ rustImport {
 }
 ```
 
-The plugin maps `Camera`, `CameraInfo`, `CameraIndex`, `CameraFormat`, `Resolution`, `RequestedFormat`, `ApiBackend`, and the format enums (`RgbFormat`, `YuyvFormat`, `LumaFormat`…). Usage:
+The plugin maps `Camera`, `CameraInfo`, `CameraIndex`, `CameraFormat`, `Resolution`, `RequestedFormat`, `ApiBackend`, and format enums (`RgbFormat`, `YuyvFormat`, `LumaFormat`…).
+
+**Data flow**: a `channelFlow` opens the camera, captures frames continuously, and emits `CameraState`. The Compose UI renders the live feed via `Image(bitmap = ...)`.
 
 ```kotlin
-// List available cameras
-val cameras: List<CameraInfo> = Rustcamera.query_devices(ApiBackend.Auto)
+fun cameraStateFlow(): Flow<CameraState> = channelFlow {
+    val index  = CameraIndex.new_idx(0)
+    val format = RequestedFormat.new_with(RequestedFormatType.AbsoluteHighestResolution)
+    val camera = Camera.new(index, format)
+    camera.open_stream()
 
-// Open first camera at default format
-val index = CameraIndex.new_idx(0)
-val format = RequestedFormat.new_with(RequestedFormatType.AbsoluteHighestResolution)
-val camera = Camera.new(index, format)
-camera.open_stream()
+    try {
+        while (isActive) {
+            val buffer = camera.frame_raw()
+            val fmt    = camera.camera_format()
+            val w      = fmt.width_x()
+            val h      = fmt.height_y()
 
-// Capture a frame as raw RGB bytes → decode to BufferedImage
-val buffer: ByteArray = camera.frame_raw()
-val width = camera.resolution().width_x()
-val height = camera.resolution().height_y()
-val image = BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR).also {
-    it.raster.setDataElements(0, 0, width, height, buffer)
-}
-
-// Inspect format info
-val currentFormat = camera.camera_format()
-println("${currentFormat.width_x()}x${currentFormat.height_y()} @ ${currentFormat.frame_rate()} fps")
-println("Format: ${currentFormat.format().tag.name}")
-
-// Compatible formats
-val formats: List<CameraFormat> = camera.compatible_camera_formats()
-
-camera.stop_stream()
-camera.close()
+            val image = BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR).also {
+                it.raster.setDataElements(0, 0, w, h, buffer)
+            }
+            send(CameraState(
+                isOpen        = true,
+                frame         = image,
+                currentFormat = FormatInfo(w, h, fmt.frame_rate(), fmt.format().tag.name),
+            ))
+        }
+    } finally {
+        camera.stop_stream()
+        camera.close()
+    }
+}.flowOn(Dispatchers.IO)
 ```
 
-The full Compose Desktop app with live preview, format selection, and camera controls is in [`examples/rust-camera/`](examples/rust-camera/).
+**Compose UI** — the live frame is rendered as a `Bitmap`, format info displayed alongside:
+
+```kotlin
+@Composable
+fun App() {
+    val state by remember { cameraStateFlow() }.collectAsState(initial = null)
+    PreviewTab(state)
+}
+
+@Composable
+fun PreviewTab(state: CameraState?) {
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+
+        // Stats bar
+        state?.currentFormat?.let { fmt ->
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatBox("Resolution", "${fmt.width}x${fmt.height}", Modifier.weight(1f))
+                StatBox("Frame Rate", "${fmt.frameRate} fps",        Modifier.weight(1f))
+                StatBox("Format",     fmt.format,                    Modifier.weight(1f))
+            }
+        }
+
+        // Live feed — BufferedImage → Compose ImageBitmap
+        state?.frame?.let { frame ->
+            Image(
+                bitmap           = frame.toComposeImageBitmap(),
+                contentDescription = "Camera Feed",
+                modifier         = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
+                contentScale     = ContentScale.Fit,
+            )
+        }
+
+        // Stream status
+        state?.let {
+            MetricRow("Stream", if (it.isOpen) "Active" else "Closed")
+        }
+    }
+}
+```
+
+Full Compose Desktop app with live preview, format selection, and camera controls: [`examples/rust-camera/`](examples/rust-camera/).
 
 ```bash
 ./gradlew :examples:rust-camera:run
