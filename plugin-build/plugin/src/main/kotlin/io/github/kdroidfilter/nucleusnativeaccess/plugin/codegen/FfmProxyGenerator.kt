@@ -1342,6 +1342,11 @@ class FfmProxyGenerator {
             appendLine("import kotlinx.coroutines.flow.channelFlow")
             appendLine("import kotlinx.coroutines.channels.awaitClose")
         }
+        val classHasAsync = cls.methods.any { it.isAsync && !it.isSuspend } || cls.companionMethods.any { it.isAsync && !it.isSuspend }
+        if (classHasAsync) {
+            appendLine("import kotlinx.coroutines.Dispatchers")
+            appendLine("import kotlinx.coroutines.withContext")
+        }
         appendLine()
 
         appendLine("/**")
@@ -1888,6 +1893,7 @@ class FfmProxyGenerator {
                 method.copy(isOverride = false) else method
             if (fixedMethod.isSuspend) appendSuspendMethodProxy(fixedMethod, cls, p)
             else if (fixedMethod.returnType is KneType.FLOW) appendFlowMethodProxy(fixedMethod, cls, p)
+            else if (fixedMethod.isAsync) appendAsyncMethodProxy(fixedMethod, cls, p)
             else appendMethodProxy(fixedMethod, cls, p)
         }
         cls.properties.forEach { prop ->
@@ -1942,7 +1948,7 @@ class FfmProxyGenerator {
         iface.methods.forEach { method ->
             val params = method.params.joinToString(", ") { "${it.name}: ${it.type.jvmTypeName}" }
             val returnDecl = if (method.returnType == KneType.UNIT) "" else ": ${method.returnType.jvmTypeName}"
-            val suspendMod = if (method.isSuspend) "suspend " else ""
+            val suspendMod = if (method.isSuspend || method.isAsync) "suspend " else ""
             appendLine("    ${suspendMod}fun ${method.name}($params)$returnDecl")
         }
         // Interface properties as abstract declarations
@@ -2648,6 +2654,69 @@ class FfmProxyGenerator {
             appendCallAndReturn("        ", fn.returnType, handleName, invokeArgs, fn.returnsBorrowed)
         }
 
+        appendLine("    }")
+        appendLine()
+    }
+
+    /**
+     * Generate a suspend fun wrapper for Rust async methods.
+     * Emits the sync method as private, then a public suspend fun that calls it via withContext(Dispatchers.IO).
+     */
+    private fun StringBuilder.appendAsyncMethodProxy(fn: KneFunction, cls: KneClass, prefix: String) {
+        // Generate the sync implementation as a private method
+        val syncName = "_${fn.name}_blocking"
+        val syncFn = fn.copy(name = syncName, isOverride = false, isAsync = false)
+        val params = fn.params.joinToString(", ") { "${it.name}: ${paramJvmTypeName(it.type)}" }
+        val handleName = "${syncName.uppercase()}_HANDLE"
+
+        // Emit private sync method (reuse appendMethodProxy logic but with private visibility)
+        val overrideMod = if (fn.isOverride) "override " else ""
+        val openMod = if (!fn.isOverride && (cls.isOpen || cls.isAbstract)) "open " else ""
+
+        // We need to rename the handle reference — just generate the sync body inline as private
+        appendLine("    private fun $syncName($params): ${fn.returnType.jvmTypeName} {")
+        appendCallbackStubAlloc("        ", fn.params, "_callbackArena")
+
+        val returnDc = extractDataClass(fn.returnType)
+        val returnsNullableDc = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.DATA_CLASS
+        val returnsTuple = fn.returnType is KneType.TUPLE
+        val returnsNullableTuple = fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.TUPLE
+        val hasAnyDcParams = fn.params.any { extractDataClass(it.type) != null }
+        val returnsCollection = fn.returnType.isCollection()
+        val needsConfinedArena = needsConfinedArena(fn.params, fn.returnType) || returnDc != null || returnsTuple ||
+            hasAnyDcParams && fn.params.any { dc -> val d = extractDataClass(dc.type); d != null && d.fields.any { f -> f.type == KneType.STRING } }
+
+        // Use the ORIGINAL method name for the handle (not the sync alias)
+        val realHandleName = "${fn.name.uppercase()}_HANDLE"
+
+        if (needsConfinedArena || returnDc != null || returnsTuple || returnsCollection) {
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendStringInvokeArgsAlloc("            ", fn.params)
+            appendCollectionParamAlloc("            ", fn.params)
+            if (returnDc != null) {
+                appendDataClassReturnProxy("            ", fn, realHandleName, returnsNullableDc)
+            } else if (returnsTuple) {
+                appendTupleReturnProxy("            ", fn, realHandleName, returnsNullableTuple)
+            } else if (returnsCollection) {
+                appendCollectionReturnProxy("            ", fn, realHandleName)
+            } else {
+                val invokeArgs = buildClassInvokeArgsExpanded(fn)
+                appendCallAndReturn("            ", fn.returnType, realHandleName, invokeArgs, fn.returnsBorrowed)
+                appendByteArrayCopyBack("            ", fn.params)
+            }
+            appendLine("        }")
+        } else {
+            val invokeArgs = buildClassInvokeArgsExpandedDirect(fn)
+            appendCallAndReturn("        ", fn.returnType, realHandleName, invokeArgs, fn.returnsBorrowed)
+        }
+
+        appendLine("    }")
+        appendLine()
+
+        // Emit public suspend fun wrapper
+        val callArgs = fn.params.joinToString(", ") { it.name }
+        appendLine("    ${overrideMod}${openMod}suspend fun ${fn.name}($params): ${fn.returnType.jvmTypeName} = withContext(Dispatchers.IO) {")
+        appendLine("        $syncName($callArgs)")
         appendLine("    }")
         appendLine()
     }

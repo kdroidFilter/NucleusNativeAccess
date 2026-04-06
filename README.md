@@ -216,7 +216,7 @@ fun main() {
 | `impl Display` / `impl ToString` return | `String` | Materialized via `.to_string()` in bridge |
 | `impl Into<T>` return | `T` | Converted via `.into()` in bridge |
 | `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator, Future) |
-| `async fn` / `impl Future<Output=T>` | `T` (sync, blocked) | Bridged via `pollster::block_on()`; both `async fn` methods and explicit `impl Future` returns are supported |
+| `async fn` / `impl Future<Output=T>` | `suspend fun` returning `T` | Rust side: `pollster::block_on()`; Kotlin side: `suspend fun` with `withContext(Dispatchers.IO)` |
 | `impl Into<T>` / `impl ToString` params | `String` | Synthetic `impl Trait` params in argument position are resolved; `&[impl ToString]` → `List<String>` |
 | Trait objects (`dyn Trait`) | **Supported** | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` params via handle + transmute |
 | `fn(A) -> B` callbacks | **Supported** | Function pointers and `impl Fn`/`FnOnce` with primitive, enum, object, sealed enum, and `dyn Trait` types |
@@ -268,7 +268,7 @@ The Rust import pipeline is experimental. The following Rust constructs are **no
 | `&[T]` return (borrowed slices) | Materialized to `List<T>` | Borrowed slice is copied into a `Vec<T>` in the bridge; safe but allocates |
 | `impl Into<T>` return | Mapped to `T` | Converted via `.into()` in bridge |
 | `Result<impl Trait, E>` return | Combined with above | Result unwrapped first, then impl Trait conversion applied |
-| `async fn` methods | Blocked via `pollster::block_on()` | Return type is the inner `Output` type; both `async fn` and explicit `impl Future<Output=T>` returns supported |
+| `async fn` methods | `suspend fun` with `withContext(Dispatchers.IO)` | Rust bridge uses `pollster::block_on()`; Kotlin proxy emits private sync method + public `suspend fun` wrapper. Both `async fn` and explicit `impl Future<Output=T>` supported |
 | `impl Into<T>` / `impl ToString` params | Resolved to concrete type | Synthetic generic params (`is_synthetic: true`) are skipped; `&[impl ToString]` becomes `List<String>` |
 
 ### 5. Run
