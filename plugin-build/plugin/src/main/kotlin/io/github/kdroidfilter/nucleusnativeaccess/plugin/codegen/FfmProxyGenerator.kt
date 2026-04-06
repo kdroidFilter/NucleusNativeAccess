@@ -4180,6 +4180,8 @@ class FfmProxyGenerator {
                     add("ADDRESS"); add("JAVA_INT")
                 } else if (p.type is KneType.LIST || p.type is KneType.SET) {
                     add("ADDRESS"); add("JAVA_INT")
+                } else if (p.type is KneType.OBJECT && (p.type as KneType.OBJECT).simpleName in simpleEnumTypeNames) {
+                    add("JAVA_INT") // OBJECT→ENUM redirect: use ordinal layout
                 } else {
                     add(p.type.ffmLayout)
                 }
@@ -4226,12 +4228,21 @@ class FfmProxyGenerator {
             val ce = when (ci) { is KneType.LIST -> ci.elementType; is KneType.SET -> ci.elementType; else -> null }
             ce is KneType.DATA_CLASS
         }
+        // OBJECT→ENUM redirect: if the return type is OBJECT but it's actually an enum,
+        // the Rust bridge returns i32 (ordinal), so use ENUM layout in the descriptor.
+        val redirectedReturn = when {
+            fn.returnType is KneType.OBJECT && (fn.returnType as KneType.OBJECT).simpleName in simpleEnumTypeNames ->
+                KneType.ENUM((fn.returnType as KneType.OBJECT).fqName, (fn.returnType as KneType.OBJECT).simpleName)
+            fn.returnType is KneType.NULLABLE && fn.returnType.inner is KneType.OBJECT && (fn.returnType.inner as KneType.OBJECT).simpleName in simpleEnumTypeNames ->
+                KneType.NULLABLE(KneType.ENUM((fn.returnType.inner as KneType.OBJECT).fqName, (fn.returnType.inner as KneType.OBJECT).simpleName))
+            else -> fn.returnType
+        }
         val effectiveReturn = when {
             returnDc != null -> KneType.UNIT
             isDcColl -> KneType.LONG // opaque handle
-            fn.returnType.isCollection() -> KneType.INT // element count
-            fn.returnType == KneType.NEVER -> KneType.UNIT // diverging - never returns normally
-            else -> fn.returnType
+            redirectedReturn.isCollection() -> KneType.INT // element count
+            redirectedReturn == KneType.NEVER -> KneType.UNIT // diverging - never returns normally
+            else -> redirectedReturn
         }
         return buildDescriptor(effectiveReturn, paramLayouts)
     }
@@ -4289,7 +4300,7 @@ class FfmProxyGenerator {
         KneType.STRING -> "${name}Seg"
         KneType.BYTE_ARRAY -> "${name}Seg"
         KneType.BOOLEAN -> "if ($name) 1 else 0"
-        is KneType.OBJECT -> buildOwnedHandleArg(name, isBorrowed)
+        is KneType.OBJECT -> if (type.simpleName in simpleEnumTypeNames) "$name.ordinal" else buildOwnedHandleArg(name, isBorrowed)
         is KneType.INTERFACE -> "$name.handle" // dyn Trait param: pass registry handle
         is KneType.SEALED_ENUM -> buildOwnedHandleArg(name, isBorrowed)
         is KneType.ENUM -> "$name.ordinal"
@@ -4310,7 +4321,7 @@ class FfmProxyGenerator {
         KneType.BYTE -> "$name?.toInt() ?: Int.MIN_VALUE"
         KneType.FLOAT -> "if ($name != null) $name.toRawBits().toLong() else Long.MIN_VALUE"
         KneType.DOUBLE -> "if ($name != null) $name.toRawBits() else Long.MIN_VALUE"
-        is KneType.OBJECT -> if (isBorrowed) "$name?.handle ?: 0L" else "$name?._consumeHandle() ?: 0L"
+        is KneType.OBJECT -> if ((type.inner as KneType.OBJECT).simpleName in simpleEnumTypeNames) "$name?.ordinal ?: -1" else if (isBorrowed) "$name?.handle ?: 0L" else "$name?._consumeHandle() ?: 0L"
         is KneType.SEALED_ENUM -> if (isBorrowed) "$name?.handle ?: 0L" else "$name?._consumeHandle() ?: 0L"
         is KneType.ENUM -> "$name?.ordinal ?: -1"
         is KneType.FUNCTION -> "${name}Stub"
@@ -5273,19 +5284,26 @@ class FfmProxyGenerator {
                 appendLine("${indent}return if (raw == Long.MIN_VALUE) null else Double.fromBits(raw)")
             }
             is KneType.OBJECT, is KneType.INTERFACE -> {
-                val innerName = when (val inner = type.inner) {
-                    is KneType.INTERFACE -> dynWrapperLookup[inner.fqName] ?: inner.simpleName
-                    is KneType.OBJECT -> inner.simpleName
-                    else -> error("Nullable OBJECT/INTERFACE inner must be OBJECT or INTERFACE, got ${type.inner}")
-                }
-                appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
-                appendLine("${indent}KneRuntime.checkError()")
-                val factory = if (returnsBorrowed) {
-                    "$innerName.fromBorrowedHandle"
+                // Redirect OBJECT types that are actually enums (cross-crate type mismatch)
+                if (type.inner is KneType.OBJECT && (type.inner as KneType.OBJECT).simpleName in simpleEnumTypeNames) {
+                    appendLine("${indent}val raw = $handleName.invoke($invokeArgs) as Int")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    appendLine("${indent}return if (raw < 0) null else ${(type.inner as KneType.OBJECT).simpleName}.entries[raw]")
                 } else {
-                    "$innerName.fromNativeHandle"
+                    val innerName = when (val inner = type.inner) {
+                        is KneType.INTERFACE -> dynWrapperLookup[inner.fqName] ?: inner.simpleName
+                        is KneType.OBJECT -> inner.simpleName
+                        else -> error("Nullable OBJECT/INTERFACE inner must be OBJECT or INTERFACE, got ${type.inner}")
+                    }
+                    appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")
+                    appendLine("${indent}KneRuntime.checkError()")
+                    val factory = if (returnsBorrowed) {
+                        "$innerName.fromBorrowedHandle"
+                    } else {
+                        "$innerName.fromNativeHandle"
+                    }
+                    appendLine("${indent}return if (resultHandle == 0L) null else $factory(resultHandle)")
                 }
-                appendLine("${indent}return if (resultHandle == 0L) null else $factory(resultHandle)")
             }
             is KneType.SEALED_ENUM -> {
                 appendLine("${indent}val resultHandle = $handleName.invoke($invokeArgs) as Long")

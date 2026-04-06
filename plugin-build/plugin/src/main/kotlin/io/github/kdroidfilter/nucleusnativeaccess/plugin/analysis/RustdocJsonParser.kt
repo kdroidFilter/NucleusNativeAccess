@@ -474,8 +474,15 @@ class RustdocJsonParser {
             ?.getAsJsonObject("module")
             ?.getAsJsonArray("items") ?: JsonArray()
         val topLevelFunctions = mutableListOf<KneFunction>()
-        for (itemId in rootItems) {
-            val item = index.get(itemId.asInt.toString())?.asJsonObject ?: continue
+        // Use rootExportedIds (which traverses submodules via pub use) to find
+        // functions that are accessible from the crate root, not just direct root items.
+        val functionItemIds: Iterable<Int> = if (rootExportedIds.isNotEmpty()) {
+            rootExportedIds
+        } else {
+            rootItems.map { it.asInt }
+        }
+        for (itemId in functionItemIds) {
+            val item = index.get(itemId.toString())?.asJsonObject ?: continue
             val inner = item.getAsJsonObject("inner") ?: continue
             if (!inner.has("function")) continue
             if (isGeneratedBridgeFunction(item)) continue
@@ -2174,7 +2181,7 @@ class RustdocJsonParser {
             if (item.get("visibility").safeString() != "public") continue
             val inner = item.getAsJsonObject("inner") ?: continue
             when {
-                inner.has("struct") || inner.has("enum") || inner.has("trait") -> result.add(itemId)
+                inner.has("struct") || inner.has("enum") || inner.has("trait") || inner.has("function") -> result.add(itemId)
                 inner.has("use") -> {
                     val useData = inner.getAsJsonObject("use")
                     val isGlob = useData.get("is_glob")?.asBoolean ?: false
@@ -2215,7 +2222,7 @@ class RustdocJsonParser {
             if (item.get("visibility").safeString() != "public") continue
             val inner = item.getAsJsonObject("inner") ?: continue
             when {
-                inner.has("struct") || inner.has("enum") || inner.has("trait") -> result.add(itemId)
+                inner.has("struct") || inner.has("enum") || inner.has("trait") || inner.has("function") -> result.add(itemId)
                 inner.has("use") -> {
                     val useData = inner.getAsJsonObject("use")
                     val isGlob = useData.get("is_glob")?.asBoolean ?: false
