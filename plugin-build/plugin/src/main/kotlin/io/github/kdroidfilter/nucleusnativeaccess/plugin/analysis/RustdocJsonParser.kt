@@ -1634,11 +1634,23 @@ class RustdocJsonParser {
                     currentKnownTraits[traitId]!!
                 } else {
                     val seg = lastPathSegment(traitPath)
-                    if (currentKnownTraits.values.contains(seg)) seg else continue
+                    if (currentKnownTraits.values.contains(seg)) seg else null
                 }
-                dynTraitNames.add(traitName)
-                val fqName = "$currentCrateName.$traitName"
-                return ResolvedType(KneType.INTERFACE(fqName, traitName), rustType = "dyn $traitName")
+                if (traitName != null) {
+                    dynTraitNames.add(traitName)
+                    val fqName = "$currentCrateName.$traitName"
+                    return ResolvedType(KneType.INTERFACE(fqName, traitName), rustType = "dyn $traitName")
+                }
+                // Fallback: check traitImpls for external traits (e.g., Box<dyn ExternalTrait>)
+                // If a concrete type implements this trait, resolve as that concrete type instead
+                val traitSimpleName = lastPathSegment(traitPath)
+                val implementors = traitImpls.entries
+                    .filter { (key, _) -> lastPathSegment(key.replace("::", ".")) == traitSimpleName }
+                    .flatMap { it.value }
+                    .distinct()
+                if (implementors.size == 1) {
+                    return ResolvedType(implementors.first(), rustType = "dyn $traitSimpleName")
+                }
             }
             return null
         }

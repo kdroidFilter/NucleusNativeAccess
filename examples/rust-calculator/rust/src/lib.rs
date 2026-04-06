@@ -951,6 +951,28 @@ pub fn try_format(a: i32, b: i32) -> Result<impl std::fmt::Display, String> {
     }
 }
 
+// ── impl Trait parameter functions ─────────────────────────────────────
+
+/// Takes impl ToString as parameter — exercises impl Trait param bridging.
+pub fn greet_impl(name: impl ToString) -> String {
+    format!("Hello, {}!", name.to_string())
+}
+
+/// Takes impl Into<String> as parameter.
+pub fn into_upper(text: impl Into<String>) -> String {
+    text.into().to_uppercase()
+}
+
+/// Takes impl AsRef<str> as parameter.
+pub fn count_chars(text: impl AsRef<str>) -> i32 {
+    text.as_ref().len() as i32
+}
+
+/// Takes a Box<dyn Describable> — exercises ownership transfer of trait object.
+pub fn consume_describable(obj: Box<dyn Describable>) -> String {
+    format!("consumed: {}", obj.describe_self())
+}
+
 // ── dyn Trait functions (trait objects) ──────────────────────────────────
 
 /// Creates a Describable trait object from a Calculator.

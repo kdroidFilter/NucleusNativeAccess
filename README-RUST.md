@@ -498,11 +498,11 @@ This example demonstrates the **limits of direct crate import** and the **local 
 
 Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but hits bridge limitations at runtime:
 
-| Problem | Root cause | Wrapper solution |
-|---------|-----------|-----------------|
-| `MenuItem::new` takes unbridgeable params | `impl ToString` + `Option<Accelerator>` | `create_menu_item(label: &str, enabled: bool)` wrapper |
-| `TrayIconBuilder.with_menu()` unbridgeable | Takes `Box<dyn ContextMenu>` | Menu created internally; modified via `add_menu_item()` / `remove_menu_item()` |
-| macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `dispatch_sync_f` from Rust |
+| Problem | Root cause | Status |
+|---------|-----------|--------|
+| `MenuItem::new` takes `impl ToString` | `impl Trait` params | **Now bridged** &mdash; resolved to concrete types (e.g., `String`) |
+| `TrayIconBuilder.with_menu()` takes `Box<dyn ContextMenu>` | External trait object | **Now bridged** &mdash; monomorphized to concrete implementor |
+| macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | Requires wrapper (`dispatch_sync_f`) |
 
 All limitations are resolved by the wrapper crate. `Icon` and `MenuItem` are bridged as opaque handles &mdash; create them via Rust wrapper functions (`make_icon`, `create_menu_item`), pass them to methods like `create_tray_with_icon`, `add_menu_item`, `set_menu_item_text`, etc.
 
@@ -559,9 +559,9 @@ This example surfaces important architectural insights about the NNA bridge:
 
 2. **Opaque types block method generation**: Types with private fields (like `Icon`, `MenuItem`) become opaque handles with only `dispose()`. Their constructors and methods are not bridged. Workaround: **wrap in Rust functions** that accept simple types (`&str`, `bool`) and delegate to the opaque type's methods. See `create_menu_item`, `set_menu_item_text`, etc.
 
-3. **`impl Trait` params need wrapping**: `MenuItem::new(text: impl ToString, ...)` can't be bridged directly because the external constructor uses `impl Trait` in argument position. Workaround: **wrap in a Rust function** that accepts a concrete type (e.g., `&str`) and calls the constructor internally.
+3. **`impl Trait` params are now bridged**: `impl ToString`, `impl Into<T>`, `impl AsRef<str>`, etc. are resolved to concrete types at the bridge level. For example, `impl ToString` becomes `String`, which satisfies the trait bound. No wrapper needed.
 
-4. **`Box<dyn Trait>` params can't cross FFI**: `TrayIconBuilder.with_menu(Box<dyn ContextMenu>)` is unbridgeable. Workaround: **call from Rust** and expose imperative APIs instead (`add_menu_item`, `remove_menu_item`). The trait object stays on the Rust side; Kotlin only sees opaque handles.
+4. **`Box<dyn Trait>` params are now bridged for external traits**: When a concrete type implements the trait, the bridge monomorphizes the function &mdash; accepting the concrete type's opaque handle and upcasting to `Box<dyn Trait>` in Rust. For local traits, the existing registry-based mechanism handles ownership transfer.
 
 5. **Platform thread constraints need Rust-level solutions**: macOS requires AppKit main thread for tray icons. The JVM's AWT EDT is not the macOS main thread. Workaround: **`dispatch_sync_f` from Rust** to the main queue.
 
@@ -602,7 +602,7 @@ Full Compose Desktop app with tray icon control, color picker, context menu, and
 | `impl Trait` return | `T` | Resolved via known trait map (Display, ToString, IntoIterator, Iterator, ExactSizeIterator, DoubleEndedIterator, Future) |
 | `async fn` / `impl Future<Output=T>` | `suspend fun` returning `T` | Rust side: `pollster::block_on()`; Kotlin side: `suspend fun` with `withContext(Dispatchers.IO)` |
 | `impl Into<T>` / `impl ToString` params | `String` | Synthetic `impl Trait` params in argument position are resolved; `&[impl ToString]` → `List<String>` |
-| Trait objects (`dyn Trait`) | Supported | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` params via handle + transmute |
+| Trait objects (`dyn Trait`) | Supported | `Box<dyn Trait>` returns via registry; `&dyn Trait` / `&mut dyn Trait` / `Box<dyn Trait>` params via handle; external traits monomorphized to concrete implementor |
 | `fn(A) -> B` callbacks | Supported | Function pointers and `impl Fn`/`FnOnce` with primitive, enum, object, sealed enum, and `dyn Trait` types |
 | Callbacks with handle types | Supported | `impl FnOnce(Object) -> SealedEnum`, `impl FnOnce(i32) -> Box<dyn Trait>`, etc. |
 

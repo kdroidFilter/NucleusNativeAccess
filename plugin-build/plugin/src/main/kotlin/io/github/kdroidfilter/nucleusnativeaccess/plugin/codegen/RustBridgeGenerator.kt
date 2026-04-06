@@ -108,7 +108,8 @@ class RustBridgeGenerator {
         if (rt.startsWith("fn(") && (rt.contains("&[") || rt.contains("&mut ") || rt.contains("dyn "))) return true
         // Box<dyn T> fields (fat pointers, cannot be passed as i64 handle)
         // Exception: INTERFACE types are handled via registry-based fat pointer reconstruction
-        if (rt.contains("Box<dyn ") && p.type !is KneType.INTERFACE) return true
+        // Exception: OBJECT types with Box<dyn> are monomorphized concrete implementations
+        if (rt.contains("Box<dyn ") && p.type !is KneType.INTERFACE && p.type !is KneType.OBJECT) return true
         // Bare Box without type params (missing generic info)
         if (rt == "Box" || rt.endsWith("::Box")) return true
         // Nullable wrapping a collection — appendNullableParamConversion
@@ -1987,28 +1988,39 @@ class RustBridgeGenerator {
                 appendLine("pub extern \"C\" fn $sym(${allParams.joinToString(", ")}) -> ${rustCReturnType(returnType)} {")
                 appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
                 appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
-                // Reconstruct &dyn Trait / &mut dyn Trait from registry via transmute
+                // Reconstruct dyn Trait from registry via transmute
                 for (p in traitHandleParams) {
                     val traitName = (p.type as KneType.INTERFACE).simpleName
                     val rt = p.rustType ?: ""
-                    val isMut = rt.contains("&mut ")
-                    val mutKw = if (isMut) "mut " else ""
-                    val refKw = if (isMut) "&mut " else "&"
-                    appendLine("        let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
-                    appendLine("            *reg.borrow().get(&(${p.name}_handle as u64)).expect(\"Invalid trait handle\")")
-                    appendLine("        });")
-                    appendLine("        let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
+                    if (rt.startsWith("Box<dyn ")) {
+                        // Box<dyn Trait>: ownership transfer — remove from registry and transmute to Box
+                        appendLine("        let ${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                        appendLine("            reg.borrow_mut().remove(&(${p.name}_handle as u64)).expect(\"Invalid trait handle\")")
+                        appendLine("        });")
+                        appendLine("        let ${p.name}_owned: Box<dyn $traitName> = unsafe { std::mem::transmute(${p.name}_words) };")
+                    } else {
+                        // &dyn Trait / &mut dyn Trait: borrow from registry
+                        val isMut = rt.contains("&mut ")
+                        val mutKw = if (isMut) "mut " else ""
+                        val refKw = if (isMut) "&mut " else "&"
+                        appendLine("        let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                        appendLine("            *reg.borrow().get(&(${p.name}_handle as u64)).expect(\"Invalid trait handle\")")
+                        appendLine("        });")
+                        appendLine("        let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
+                    }
                 }
-                // Slice params
+                // Non-trait param conversions (strings, booleans, slices, objects, etc.)
                 for (p in params) {
-                    if (p.type is KneType.LIST || p.type == KneType.BYTE_ARRAY) {
-                        appendLine("        let ${p.name}_slice = unsafe { std::slice::from_raw_parts(${p.name}_ptr, ${p.name}_len as usize) };")
+                    if (!traitHandleParams.contains(p)) {
+                        appendParamConversion(p)
                     }
                 }
                 // Build call args
                 val callArgs = params.joinToString(", ") { p ->
-                    if (traitHandleParams.contains(p)) "${p.name}_ref"
-                    else convertedParamName(p)
+                    if (traitHandleParams.contains(p)) {
+                        if ((p.rustType ?: "").startsWith("Box<dyn ")) "${p.name}_owned"
+                        else "${p.name}_ref"
+                    } else convertedParamName(p)
                 }
                 appendLine("        let result = ${rustCallName(fn)}($callArgs);")
                 // Handle return value
@@ -2306,7 +2318,15 @@ class RustBridgeGenerator {
                 }
             }
             is KneType.OBJECT -> {
-                appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+                val rt = p.rustType ?: ""
+                if (rt.startsWith("Box<dyn ")) {
+                    // Box<dyn Trait> with concrete implementor: reconstruct Box without dereference
+                    // Rust unsize coercion will upcast Box<Concrete> to Box<dyn Trait> at the call site
+                    val concreteType = rustHandleTypeName(p.type, null)
+                    appendLine("${indent}let ${p.name}_owned = unsafe { Box::from_raw(${p.name} as *mut $concreteType) };")
+                } else {
+                    appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
+                }
             }
             is KneType.INTERFACE -> {
                 val traitName = (p.type as KneType.INTERFACE).simpleName
