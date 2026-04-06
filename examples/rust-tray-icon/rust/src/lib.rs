@@ -6,43 +6,33 @@ thread_local! {
     static MENU: std::cell::RefCell<Option<Menu>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Creates an icon from RGBA color values with the given pixel size.
-/// Returns an opaque `Icon` handle that can be passed to `create_tray_with_icon` or `update_icon`.
+// ── Icon factory ───────────────────────────────────────────────────────────
+
+/// Creates a solid-color RGBA icon. Returns an opaque `Icon` handle.
 pub fn make_icon(r: i32, g: i32, b: i32, size: i32) -> tray_icon::Icon {
     let pixel = [r as u8, g as u8, b as u8, 255u8];
     let rgba: Vec<u8> = pixel.iter().copied().cycle().take((size as usize * size as usize * 4) as usize).collect();
     tray_icon::Icon::from_rgba(rgba, size as u32, size as u32).expect("valid icon")
 }
 
-fn make_icon_internal(r: u8, g: u8, b: u8, size: u32) -> tray_icon::Icon {
-    make_icon(r as i32, g as i32, b as i32, size as i32)
-}
+// ── Tray lifecycle (all dispatch_sync — macOS main thread required) ────────
 
-/// Creates a tray icon with icon, tooltip, title, and a context menu.
-/// menu_items is a |-separated list of labels (e.g. "Open|Settings|About").
+/// Creates a tray icon from RGB values with optional tooltip, title, and menu.
+/// menu_items: |-separated labels (e.g. "Open|Settings|About").
 pub fn create_tray(
-    icon_r: i32,
-    icon_g: i32,
-    icon_b: i32,
-    tooltip: Option<&str>,
-    title: Option<&str>,
-    menu_items: Option<&str>,
+    icon_r: i32, icon_g: i32, icon_b: i32,
+    tooltip: Option<&str>, title: Option<&str>, menu_items: Option<&str>,
 ) -> Result<(), String> {
     let tooltip = tooltip.map(|s| s.to_string());
     let title = title.map(|s| s.to_string());
     let menu_items = menu_items.map(|s| s.to_string());
 
     on_main_sync(move || {
-        let icon = make_icon_internal(icon_r as u8, icon_g as u8, icon_b as u8, 32);
+        let icon = make_icon(icon_r, icon_g, icon_b, 32);
         let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
-        if let Some(ref t) = tooltip {
-            builder = builder.with_tooltip(t);
-        }
-        if let Some(ref t) = title {
-            builder = builder.with_title(t);
-        }
+        if let Some(ref t) = tooltip { builder = builder.with_tooltip(t); }
+        if let Some(ref t) = title { builder = builder.with_title(t); }
 
-        // Build context menu
         let menu = Menu::new();
         if let Some(ref items_str) = menu_items {
             for label in items_str.split('|') {
@@ -63,12 +53,10 @@ pub fn create_tray(
     })
 }
 
-/// Creates a tray icon using an opaque `Icon` handle (from `make_icon`).
+/// Creates a tray icon using an opaque `Icon` handle.
 pub fn create_tray_with_icon(
     icon: &tray_icon::Icon,
-    tooltip: Option<&str>,
-    title: Option<&str>,
-    menu_items: Option<&str>,
+    tooltip: Option<&str>, title: Option<&str>, menu_items: Option<&str>,
 ) -> Result<(), String> {
     let icon = icon.clone();
     let tooltip = tooltip.map(|s| s.to_string());
@@ -77,12 +65,8 @@ pub fn create_tray_with_icon(
 
     on_main_sync(move || {
         let mut builder = tray_icon::TrayIconBuilder::new().with_icon(icon);
-        if let Some(ref t) = tooltip {
-            builder = builder.with_tooltip(t);
-        }
-        if let Some(ref t) = title {
-            builder = builder.with_title(t);
-        }
+        if let Some(ref t) = tooltip { builder = builder.with_tooltip(t); }
+        if let Some(ref t) = title { builder = builder.with_title(t); }
 
         let menu = Menu::new();
         if let Some(ref items_str) = menu_items {
@@ -104,19 +88,6 @@ pub fn create_tray_with_icon(
     })
 }
 
-/// Updates the tray icon using an opaque `Icon` handle (from `make_icon`).
-pub fn update_icon(icon: &tray_icon::Icon) {
-    let icon = icon.clone();
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                let _ = tray.set_icon(Some(icon));
-            }
-        });
-    });
-}
-
-/// Destroys the current tray icon.
 pub fn destroy_tray() {
     on_main_sync(|| {
         TRAY.with(|cell| *cell.borrow_mut() = None);
@@ -124,13 +95,69 @@ pub fn destroy_tray() {
     });
 }
 
-/// Returns true if a tray icon is currently active.
 pub fn is_active() -> bool {
     on_main_sync(|| TRAY.with(|cell| cell.borrow().is_some()))
 }
 
-/// Registers a callback for tray icon events (click, double_click, enter, leave, move).
-/// The callback receives a description string. Pass None to clear the handler.
+pub fn update_icon(icon: &tray_icon::Icon) {
+    let icon = icon.clone();
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() { let _ = tray.set_icon(Some(icon)); }
+        });
+    });
+}
+
+pub fn set_icon_color(r: i32, g: i32, b: i32) {
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() {
+                let icon = make_icon(r, g, b, 32);
+                let _ = tray.set_icon(Some(icon));
+            }
+        });
+    });
+}
+
+pub fn set_tooltip(tooltip: &str) -> Result<(), String> {
+    let s = tooltip.to_string();
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() {
+                tray.set_tooltip(Some(s)).map_err(|e| e.to_string())
+            } else { Ok(()) }
+        })
+    })
+}
+
+pub fn set_title(title: &str) {
+    let s = if title.is_empty() { None } else { Some(title.to_string()) };
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() { tray.set_title(s.as_deref()); }
+        });
+    });
+}
+
+pub fn set_visible(visible: bool) {
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() { tray.set_visible(visible); }
+        });
+    });
+}
+
+pub fn set_icon_as_template(is_template: bool) {
+    on_main_sync(move || {
+        TRAY.with(|cell| {
+            if let Some(ref tray) = *cell.borrow() { tray.set_icon_as_template(is_template); }
+        });
+    });
+}
+
+// ── Event callbacks ────────────────────────────────────────────────────────
+
+/// Registers a callback for tray icon events. Receives a description string.
 pub fn on_tray_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
     match handler {
         Some(h) => {
@@ -148,14 +175,11 @@ pub fn on_tray_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
                 h(desc);
             }));
         }
-        None => {
-            TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
-        }
+        None => { TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>); }
     }
 }
 
-/// Registers a callback for menu item clicks.
-/// The callback receives the menu item label. Pass None to clear the handler.
+/// Registers a callback for menu item clicks. Receives the menu item label.
 pub fn on_menu_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
     match handler {
         Some(h) => {
@@ -179,49 +203,41 @@ pub fn on_menu_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
                 h(label);
             }));
         }
-        None => {
-            MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
-        }
+        None => { MenuEvent::set_event_handler(None::<fn(MenuEvent)>); }
     }
 }
 
-// ── MenuItem management ────────────────────────────────────────────────────
+// ── MenuItem management (dispatch_sync for menu mutations) ─────────────────
 
-/// Creates a new menu item with the given label and enabled state.
-/// Returns an opaque `MenuItem` handle that can be passed to `add_menu_item`, etc.
+/// Creates a menu item. Wrapper provides None for the Accelerator param.
 pub fn create_menu_item(label: &str, enabled: bool) -> tray_icon::menu::MenuItem {
     MenuItem::new(label, enabled, None)
 }
 
-/// Adds a menu item to the current tray context menu.
+/// Adds a menu item to the live context menu (dispatch_sync).
 pub fn add_menu_item(item: &tray_icon::menu::MenuItem) {
-    // SAFETY: on_main_sync is synchronous — the reference stays valid for the entire call.
+    // SAFETY: on_main_sync is synchronous — the reference stays valid.
     let ptr = item as *const tray_icon::menu::MenuItem as usize;
     on_main_sync(move || {
         let item = unsafe { &*(ptr as *const tray_icon::menu::MenuItem) };
         MENU.with(|cell| {
-            if let Some(ref menu) = *cell.borrow() {
-                let _ = menu.append(item);
-            }
+            if let Some(ref menu) = *cell.borrow() { let _ = menu.append(item); }
         });
     });
 }
 
-/// Removes a menu item from the current tray context menu.
+/// Removes a menu item from the live context menu (dispatch_sync).
 pub fn remove_menu_item(item: &tray_icon::menu::MenuItem) {
-    // SAFETY: on_main_sync is synchronous — the reference stays valid for the entire call.
     let ptr = item as *const tray_icon::menu::MenuItem as usize;
     on_main_sync(move || {
         let item = unsafe { &*(ptr as *const tray_icon::menu::MenuItem) };
         MENU.with(|cell| {
-            if let Some(ref menu) = *cell.borrow() {
-                let _ = menu.remove(item);
-            }
+            if let Some(ref menu) = *cell.borrow() { let _ = menu.remove(item); }
         });
     });
 }
 
-/// Adds a separator to the current tray context menu.
+/// Adds a separator to the live context menu (dispatch_sync).
 pub fn add_separator() {
     on_main_sync(|| {
         MENU.with(|cell| {
@@ -232,89 +248,13 @@ pub fn add_separator() {
     });
 }
 
-/// Returns the text of a menu item.
-pub fn get_menu_item_text(item: &tray_icon::menu::MenuItem) -> String {
-    item.text()
-}
+/// MenuItem accessors — thin wrappers so the bridge can call them on the opaque handle.
+pub fn get_menu_item_text(item: &tray_icon::menu::MenuItem) -> String { item.text() }
+pub fn set_menu_item_text(item: &tray_icon::menu::MenuItem, text: &str) { item.set_text(text); }
+pub fn is_menu_item_enabled(item: &tray_icon::menu::MenuItem) -> bool { item.is_enabled() }
+pub fn set_menu_item_enabled(item: &tray_icon::menu::MenuItem, enabled: bool) { item.set_enabled(enabled); }
 
-/// Sets the text of a menu item.
-pub fn set_menu_item_text(item: &tray_icon::menu::MenuItem, text: &str) {
-    item.set_text(text);
-}
-
-/// Returns whether a menu item is enabled.
-pub fn is_menu_item_enabled(item: &tray_icon::menu::MenuItem) -> bool {
-    item.is_enabled()
-}
-
-/// Enables or disables a menu item.
-pub fn set_menu_item_enabled(item: &tray_icon::menu::MenuItem, enabled: bool) {
-    item.set_enabled(enabled);
-}
-
-// ── Icon management ────────────────────────────────────────────────────────
-
-/// Updates the icon color.
-pub fn set_icon_color(r: i32, g: i32, b: i32) {
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                let icon = make_icon_internal(r as u8, g as u8, b as u8, 32);
-                let _ = tray.set_icon(Some(icon));
-            }
-        });
-    });
-}
-
-/// Updates the tooltip.
-pub fn set_tooltip(tooltip: &str) -> Result<(), String> {
-    let s = tooltip.to_string();
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                tray.set_tooltip(Some(s)).map_err(|e| e.to_string())
-            } else {
-                Ok(())
-            }
-        })
-    })
-}
-
-/// Updates the title.
-pub fn set_title(title: &str) {
-    let s = if title.is_empty() { None } else { Some(title.to_string()) };
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                tray.set_title(s.as_deref());
-            }
-        });
-    });
-}
-
-/// Shows or hides the tray icon.
-pub fn set_visible(visible: bool) {
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                tray.set_visible(visible);
-            }
-        });
-    });
-}
-
-/// Sets the icon as template (macOS).
-pub fn set_icon_as_template(is_template: bool) {
-    on_main_sync(move || {
-        TRAY.with(|cell| {
-            if let Some(ref tray) = *cell.borrow() {
-                tray.set_icon_as_template(is_template);
-            }
-        });
-    });
-}
-
-// -- macOS: dispatch_sync on the main queue --
+// ── macOS: dispatch_sync on the main queue ─────────────────────────────────
 
 #[cfg(target_os = "macos")]
 fn on_main_sync<F, R>(f: F) -> R
