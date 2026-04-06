@@ -72,6 +72,8 @@ class RustBridgeGenerator {
         is KneType.INTERFACE -> elemType.simpleName in knownTypeNames
         is KneType.SEALED_ENUM -> elemType.simpleName in knownTypeNames
         is KneType.ENUM -> true
+        is KneType.LIST -> isSupportedCollectionElementForBridge(elemType.elementType)
+        is KneType.SET -> isSupportedCollectionElementForBridge(elemType.elementType)
         else -> false
     }
 
@@ -260,6 +262,9 @@ class RustBridgeGenerator {
         sb.appendPreamble(module)
         sb.appendErrorInfra(prefix)
         sb.appendFreeBuf(prefix)
+        if (moduleHasNestedCollections(module)) {
+            sb.appendBoxedListHelpers(prefix)
+        }
 
         // Check if any class or top-level function uses suspend or flow
         val hasSuspend = module.classes.any { c -> c.methods.any { it.isSuspend } } ||
@@ -400,6 +405,120 @@ class RustBridgeGenerator {
         appendLine("            let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr as *mut u8, size as usize));")
         appendLine("        }")
         appendLine("    }")
+        appendLine("}")
+        appendLine()
+    }
+
+    private fun moduleHasNestedCollections(module: KneModule): Boolean {
+        fun typeHasNestedCollection(type: KneType): Boolean = when (type) {
+            is KneType.MAP -> type.valueType is KneType.LIST || type.valueType is KneType.SET || type.valueType is KneType.MAP
+            is KneType.LIST -> type.elementType is KneType.LIST || type.elementType is KneType.SET || type.elementType is KneType.MAP
+            is KneType.SET -> type.elementType is KneType.LIST || type.elementType is KneType.SET || type.elementType is KneType.MAP
+            is KneType.TUPLE -> type.elementTypes.any { typeHasNestedCollection(it) }
+            is KneType.NULLABLE -> typeHasNestedCollection(type.inner)
+            else -> false
+        }
+        fun fnHasNestedCollection(fn: KneFunction) =
+            typeHasNestedCollection(fn.returnType) || fn.params.any { typeHasNestedCollection(it.type) }
+        return module.functions.any { fnHasNestedCollection(it) } ||
+            module.classes.any { cls ->
+                cls.methods.any { fnHasNestedCollection(it) } ||
+                cls.companionMethods.any { fnHasNestedCollection(it) }
+            }
+    }
+
+    private fun StringBuilder.appendBoxedListHelpers(prefix: String) {
+        appendLine("// ── Boxed list reader helpers ─────────────────────────────────────────────")
+        appendLine()
+        // i32
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_i32(handle: i64, out_buf: *mut i32, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<i32>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // i64
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_i64(handle: i64, out_buf: *mut i64, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<i64>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // f32
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_f32(handle: i64, out_buf: *mut f32, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<f32>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // f64
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_f64(handle: i64, out_buf: *mut f64, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<f64>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // bool (stored as i32 in JVM)
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_bool(handle: i64, out_buf: *mut i32, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<bool>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    for (i, v) in vec.iter().take(count as usize).enumerate() {")
+        appendLine("        unsafe { *(out_buf.add(i)) = if *v { 1 } else { 0 }; }")
+        appendLine("    }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // i16
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_i16(handle: i64, out_buf: *mut i16, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<i16>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // i8
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_i8(handle: i64, out_buf: *mut i8, max_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<i8>) };")
+        appendLine("    let count = vec.len().min(max_len as usize) as i32;")
+        appendLine("    unsafe { std::ptr::copy_nonoverlapping(vec.as_ptr(), out_buf, count as usize); }")
+        appendLine("    count")
+        appendLine("}")
+        appendLine()
+        // String (packed null-terminated)
+        appendLine("#[no_mangle]")
+        appendLine("pub extern \"C\" fn ${prefix}_kne_read_box_list_string(handle: i64, out_buf: *mut u8, buf_len: i32) -> i32 {")
+        appendLine("    if handle == 0 { return 0; }")
+        appendLine("    let vec = unsafe { Box::from_raw(handle as *mut Vec<String>) };")
+        appendLine("    let count = vec.len() as i32;")
+        appendLine("    let mut offset = 0usize;")
+        appendLine("    for s in vec.iter() {")
+        appendLine("        let bytes = s.as_bytes();")
+        appendLine("        if offset + bytes.len() + 1 > buf_len as usize { break; }")
+        appendLine("        unsafe {")
+        appendLine("            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.add(offset), bytes.len());")
+        appendLine("            *out_buf.add(offset + bytes.len()) = 0;")
+        appendLine("        }")
+        appendLine("        offset += bytes.len() + 1;")
+        appendLine("    }")
+        appendLine("    count")
         appendLine("}")
         appendLine()
     }
@@ -636,7 +755,7 @@ class RustBridgeGenerator {
                     is KneType.MAP -> {
                         append(", out_t_${idx}_keys: *mut u8, out_t_${idx}_keys_len: i32")
                         append(", out_t_${idx}_values: *mut u8, out_t_${idx}_values_len: i32")
-                        append(", out_t_${idx}_len: i32")
+                        append(", out_t_${idx}_len: *mut i32")
                     }
                     else -> {
                         append(", out_t_$idx: *mut ${rustCType(elemType)}")
@@ -846,7 +965,8 @@ class RustBridgeGenerator {
         appendLine("    KNE_LAST_ERROR.with(|e| *e.borrow_mut() = None);")
         appendLine("    match catch_unwind(std::panic::AssertUnwindSafe(|| {")
         appendLine("        let obj = unsafe { &*(handle as *const ${cls.rustTypeName}) };")
-        appendMapReturnFromBinding("obj.get_${prop.name}()", mapType, "        ")
+        appendLine("        let _map_result = obj.get_${prop.name}();")
+        appendMapReturnFromBinding("_map_result", mapType, "        ")
         appendLine("    })) {")
         appendLine("        Ok(v) => v,")
         appendLine("        Err(e) => { kne_set_panic_error(e); 0 }")
@@ -873,6 +993,8 @@ class RustBridgeGenerator {
         KneType.INT, KneType.LONG, KneType.DOUBLE, KneType.FLOAT,
         KneType.SHORT, KneType.BYTE, KneType.BOOLEAN, KneType.STRING -> true
         is KneType.ENUM, is KneType.OBJECT, is KneType.SEALED_ENUM -> true
+        is KneType.LIST -> isSupportedCollectionElementForBridge((type as KneType.LIST).elementType)
+        is KneType.SET -> isSupportedCollectionElementForBridge((type as KneType.SET).elementType)
         else -> false
     }
 
@@ -1275,6 +1397,31 @@ class RustBridgeGenerator {
                 appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = v.clone() as i32; }")
                 appendLine("${indent}}")
             }
+            KneType.INT -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
+                appendLine("${indent}}")
+            }
+            KneType.SHORT -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i16).add(i) = *v as i16; }")
+                appendLine("${indent}}")
+            }
+            KneType.BYTE -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i8).add(i) = *v as i8; }")
+                appendLine("${indent}}")
+            }
+            is KneType.LIST, is KneType.SET -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = Box::into_raw(Box::new(v.clone())) as i64; }")
+                appendLine("${indent}}")
+            }
+            is KneType.MAP, is KneType.TUPLE, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> {
+                appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = Box::into_raw(Box::new(v)) as i64; }")
+                appendLine("${indent}}")
+            }
             else -> {
                 appendLine("${indent}for (i, v) in $binding.iter().enumerate() {")
                 appendLine("${indent}    unsafe { *($bufName as *mut i32).add(i) = *v as i32; }")
@@ -1289,13 +1436,10 @@ class RustBridgeGenerator {
         val keyType = mapType.keyType
         val valueType = mapType.valueType
         appendLine("${indent}let _map_len = $binding.len() as i32;")
-        appendLine("${indent}if _map_len <= out_t_${idx}_len {")
-        appendLine("${indent}    let mut _key_offset = 0usize;")
-        appendLine("${indent}    let mut _val_offset = 0usize;")
-        appendLine("${indent}    for (k, v) in $binding.iter().enumerate() {")
-        appendMapElementWrite("Some(k)", keyType, "out_t_${idx}_keys", indent + "        ", null)
-        appendMapElementWrite("Some(v)", valueType, "out_t_${idx}_values", indent + "        ", null)
-        appendLine("${indent}    }")
+        appendLine("${indent}unsafe { *out_t_${idx}_len = _map_len; }")
+        appendLine("${indent}if _map_len <= out_t_${idx}_keys_len && _map_len <= out_t_${idx}_values_len {")
+        appendMapElementWrite("$binding.keys()", keyType, "out_t_${idx}_keys", indent + "    ", null)
+        appendMapElementWrite("$binding.values()", valueType, "out_t_${idx}_values", indent + "    ", null)
         appendLine("${indent}}")
     }
 
@@ -1371,6 +1515,16 @@ class RustBridgeGenerator {
             is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> {
                 appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
                 appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = v as *const _ as i64; }")
+                appendLine("${indent}}")
+            }
+            is KneType.LIST, is KneType.SET -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = Box::into_raw(Box::new(v.clone())) as i64; }")
+                appendLine("${indent}}")
+            }
+            is KneType.TUPLE, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY, is KneType.MAP -> {
+                appendLine("${indent}for (i, v) in $iterExpr.enumerate() {")
+                appendLine("${indent}    unsafe { *($bufName as *mut i64).add(i) = Box::into_raw(Box::new(v)) as i64; }")
                 appendLine("${indent}}")
             }
             else -> {
@@ -3260,6 +3414,7 @@ class RustBridgeGenerator {
         KneType.STRING -> "*mut u8"
         is KneType.ENUM -> "*mut i32"
         is KneType.OBJECT, is KneType.INTERFACE, is KneType.SEALED_ENUM -> "*mut i64"
+        is KneType.LIST, is KneType.SET, is KneType.MAP, is KneType.TUPLE, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> "*mut i64"
         else -> "*mut i32"
     }
 
@@ -3478,6 +3633,9 @@ class RustBridgeGenerator {
                 is KneType.TUPLE -> {
                     val innerBufVar = appendNestedTupleWrite(indent, elem, elemType, counter)
                     appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut usize) = $innerBufVar as usize; }")
+                }
+                is KneType.LIST, is KneType.SET, is KneType.MAP, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> {
+                    appendLine("${indent}unsafe { *($bufVar.add($offset) as *mut i64) = Box::into_raw(Box::new($elem)) as i64; }")
                 }
                 else -> {
                     appendLine("${indent}// TODO: handle ${elemType::class.simpleName} in nested tuple")

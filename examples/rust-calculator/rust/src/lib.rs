@@ -51,11 +51,24 @@ pub enum ErrorInfo {
 /// Demonstrates sealed enum with STRUCT variants (named fields) and enum-typed fields.
 pub enum ProcessingStatus {
     /// Struct variant with three String fields — like ProcessFrameError { src, destination, error }.
-    FrameError { src: String, destination: String, error: String },
+    FrameError {
+        src: String,
+        destination: String,
+        error: String,
+    },
     /// Struct variant with an enum field — tests enum-inside-sealed-variant.
-    OperationFailed { operation: Operation, code: i32, message: String },
+    OperationFailed {
+        operation: Operation,
+        code: i32,
+        message: String,
+    },
     /// Struct variant with mixed primitives and string.
-    Progress { step: i32, total: i32, label: String, done: bool },
+    Progress {
+        step: i32,
+        total: i32,
+        label: String,
+        done: bool,
+    },
     /// Unit variant.
     Idle,
 }
@@ -449,7 +462,11 @@ impl Calculator {
     }
 
     /// Callback taking a CalcResult (sealed enum) and returning a String.
-    pub fn format_result<F: FnOnce(CalcResult) -> String>(&self, result: CalcResult, formatter: F) -> String {
+    pub fn format_result<F: FnOnce(CalcResult) -> String>(
+        &self,
+        result: CalcResult,
+        formatter: F,
+    ) -> String {
         formatter(result)
     }
 
@@ -652,6 +669,37 @@ impl Calculator {
             vec![self.accumulator, self.accumulator * 2, self.accumulator * 3],
             self.label.clone(),
         )
+    }
+
+    /// Returns tuple with metadata map: (count, metadata).
+    pub fn get_with_metadata(&self) -> (i32, std::collections::HashMap<String, i32>) {
+        let mut map = std::collections::HashMap::new();
+        map.insert("current".to_string(), self.accumulator);
+        map.insert("scale".to_string(), self.scale as i32);
+        map.insert("double".to_string(), self.accumulator * 2);
+        (self.accumulator, map)
+    }
+
+    /// Returns metadata map with nested list values.
+    pub fn get_metadata(&self) -> std::collections::HashMap<String, Vec<i32>> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "values".to_string(),
+            vec![self.accumulator, self.accumulator * 2, self.accumulator * 3],
+        );
+        map.insert("factors".to_string(), vec![1, 2, 3, 5]);
+        map
+    }
+
+    /// Returns tuple with map: (label, metadata).
+    pub fn get_with_metadata_map(&self) -> (String, std::collections::HashMap<String, Vec<i32>>) {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "values".to_string(),
+            vec![self.accumulator, self.accumulator * 2],
+        );
+        map.insert("labels".to_string(), vec![1, 2, 3]);
+        (self.label.clone(), map)
     }
 
     // ── Async/suspend-like methods ────────────────────────────────────
@@ -1058,7 +1106,12 @@ impl TraitConsumer {
 
     /// Method taking &dyn Measurable — exercises different trait as method param.
     pub fn measure_from(&self, source: &dyn Measurable) -> String {
-        format!("{}: {} {}", self.description, source.measure(), source.unit())
+        format!(
+            "{}: {} {}",
+            self.description,
+            source.measure(),
+            source.unit()
+        )
     }
 }
 
@@ -1180,7 +1233,10 @@ pub struct Processor<T: ValueTransformer> {
 
 impl<T: ValueTransformer> Processor<T> {
     pub fn new(transformer: T, offset: i32) -> Self {
-        Processor { transformer, offset }
+        Processor {
+            transformer,
+            offset,
+        }
     }
 
     pub fn process(&self, value: i32) -> i32 {
@@ -1196,7 +1252,11 @@ impl<T: ValueTransformer> Processor<T> {
     }
 
     pub fn name(&self) -> String {
-        format!("Processor({}+{})", self.transformer.transformer_name(), self.offset)
+        format!(
+            "Processor({}+{})",
+            self.transformer.transformer_name(),
+            self.offset
+        )
     }
 }
 

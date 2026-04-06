@@ -608,7 +608,7 @@ Full Compose Desktop app with tray icon control, color picker, context menu, and
 
 | Construct | Behaviour | Notes |
 |-----------|-----------|-------|
-| `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; MAP properties now supported via StableRef |
+| `HashMap<K,V>` / `BTreeMap<K,V>` return | Mapped to `Map<K, V>` | Keys/values serialized via dual-buffer pattern; supports nested collections as values (e.g. `HashMap<String, Vec<i32>>` → `Map<String, List<Int>>`) |
 | `HashSet<T>` / `BTreeSet<T>` return | Mapped to `Set<T>` | Serialized as list, deduplicated on JVM side via `.toSet()` |
 | `Option<DataClass>` return | Mapped to `DataClass?` | Uses presence flag (0=null, 1=present) + per-field out-params |
 | `Option<Vec<u8>>` return | Mapped to `ByteArray?` | Uses buffer pattern; returns `-1` for `None`, byte count for `Some` |

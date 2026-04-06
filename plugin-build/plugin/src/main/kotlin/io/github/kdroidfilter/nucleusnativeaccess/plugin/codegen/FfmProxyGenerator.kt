@@ -69,7 +69,27 @@ class FfmProxyGenerator {
         is KneType.INTERFACE -> type.simpleName in knownTypes
         is KneType.SEALED_ENUM -> type.simpleName in knownTypes
         is KneType.ENUM -> true
+        is KneType.LIST -> isBridgeableCollectionElement(type.elementType)
+        is KneType.SET -> isBridgeableCollectionElement(type.elementType)
         else -> false
+    }
+
+    private fun moduleHasNestedCollections(module: KneModule): Boolean {
+        fun typeHasNestedCollection(type: KneType): Boolean = when (type) {
+            is KneType.MAP -> type.valueType is KneType.LIST || type.valueType is KneType.SET
+            is KneType.LIST -> type.elementType is KneType.LIST || type.elementType is KneType.SET || type.elementType is KneType.MAP
+            is KneType.SET -> type.elementType is KneType.LIST || type.elementType is KneType.SET || type.elementType is KneType.MAP
+            is KneType.TUPLE -> type.elementTypes.any { typeHasNestedCollection(it) }
+            is KneType.NULLABLE -> typeHasNestedCollection(type.inner)
+            else -> false
+        }
+        fun fnHasNestedCollection(fn: KneFunction) =
+            typeHasNestedCollection(fn.returnType) || fn.params.any { typeHasNestedCollection(it.type) }
+        return module.functions.any { fnHasNestedCollection(it) } ||
+            module.classes.any { cls ->
+                cls.methods.any { fnHasNestedCollection(it) } ||
+                cls.companionMethods.any { fnHasNestedCollection(it) }
+            }
     }
 
     /** Returns true if a function only references types known in the module
@@ -407,7 +427,7 @@ class FfmProxyGenerator {
         val moduleSuspend = module.classes.any { cls -> cls.methods.any { it.isSuspend } } || module.functions.any { it.isSuspend }
         val moduleFlow = module.classes.any { cls -> cls.methods.any { it.returnType is KneType.FLOW } } || module.functions.any { it.returnType is KneType.FLOW }
         val tupleTypes = collectTupleTypes(module)
-        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend || moduleFlow, moduleFlow, tupleTypes)
+        files["KneRuntime.kt"] = generateRuntime(module.libName, jvmPackage, callbackSignatures, moduleSuspend || moduleFlow, moduleFlow, tupleTypes, moduleHasNestedCollections(module))
         files["KotlinNativeException.kt"] = generateException(jvmPackage)
 
         module.dataClasses.filter { !it.isCommon }.forEach { dc ->
@@ -530,6 +550,7 @@ class FfmProxyGenerator {
         KneType.DOUBLE -> "0.0"
         is KneType.ENUM -> "${type.simpleName}.entries[0]"
         is KneType.LIST, is KneType.SET -> "emptyList<${when (type) { is KneType.LIST -> (type as KneType.LIST).elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }.jvmTypeName}>()"
+        is KneType.MAP -> "emptyMap<${type.keyType.jvmTypeName}, ${type.valueType.jvmTypeName}>()"
         is KneType.TUPLE -> {
             val innerN = type.elementTypes.size
             val innerSig = type.typeId
@@ -562,6 +583,11 @@ class FfmProxyGenerator {
                 val innerSig = type.typeId
                 "readTuple${innerN}_$innerSig($segVar.get(JAVA_LONG, $offset))"
             }
+            is KneType.MAP -> {
+                // MAP in nested tuples is not fully supported - it returns a raw handle
+                // Proper deserialization requires arena context which readTuple functions don't have
+                "$segVar.get(JAVA_LONG, $offset)"
+            }
             else -> "$segVar.get(JAVA_LONG, $offset)"
         }
     }
@@ -583,7 +609,7 @@ class FfmProxyGenerator {
 
         val readExprs = tuple.elementTypes.mapIndexed { idx, type ->
             when (type) {
-                is KneType.LIST, is KneType.SET -> null // Handle specially below
+                is KneType.LIST, is KneType.SET, is KneType.MAP -> null // Handle specially below
                 else -> tupleElementReadExpr(type, "seg", idx)
             }
         }
@@ -593,10 +619,14 @@ class FfmProxyGenerator {
                 is KneType.LIST, is KneType.SET -> {
                     val elemType = when (type) { is KneType.LIST -> type.elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }
                     val collType = if (type is KneType.SET) "Set" else "List"
-                    val layout = KneType.collectionElementLayout(elemType)
                     appendLine("        val _e${idx}_ptr = seg.get(JAVA_LONG, ${idx * 8}L)")
-                    appendLine("        val _e${idx}_size = 0 // LIST size from Rust return, not stored in tuple")
-                    appendLine("        val _e$idx = if (_e${idx}_ptr == 0L) ${if (collType == "Set") "emptySet()" else "emptyList<Int>()"} else List(0) { MemorySegment.ofAddress(_e${idx}_ptr).getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
+                    val defaultVal = if (collType == "Set") "emptySet<${elemType.jvmTypeName}>()" else "emptyList<${elemType.jvmTypeName}>()"
+                    appendLine("        val _e$idx: ${if (collType == "Set") "Set" else "List"}<${elemType.jvmTypeName}> = if (_e${idx}_ptr == 0L) $defaultVal else $defaultVal // TODO: LIST/SET in nested tuples not fully implemented")
+                }
+                is KneType.MAP -> {
+                    val mapType = type as KneType.MAP
+                    appendLine("        val _e${idx}_ptr = seg.get(JAVA_LONG, ${idx * 8}L)")
+                    appendLine("        val _e$idx: Map<${mapType.keyType.jvmTypeName}, ${mapType.valueType.jvmTypeName}> = if (_e${idx}_ptr == 0L) emptyMap() else emptyMap() // TODO: MAP in nested tuples not fully implemented")
                 }
                 else -> appendLine("        val _e$idx = ${readExprs[idx]}")
             }
@@ -654,7 +684,7 @@ class FfmProxyGenerator {
 
     private fun fnInvokeId(fnType: KneType.FUNCTION): String = callbackId(fnType)
 
-    private fun generateRuntime(libName: String, pkg: String, callbackSignatures: Set<KneType.FUNCTION> = emptySet(), hasSuspend: Boolean = false, hasFlow: Boolean = false, tupleTypes: Set<KneType.TUPLE> = emptySet()): String = buildString {
+    private fun generateRuntime(libName: String, pkg: String, callbackSignatures: Set<KneType.FUNCTION> = emptySet(), hasSuspend: Boolean = false, hasFlow: Boolean = false, tupleTypes: Set<KneType.TUPLE> = emptySet(), hasNestedCollections: Boolean = false): String = buildString {
         appendLine("// Auto-generated by kotlin-native-export plugin. Do not modify.")
         appendLine("package $pkg")
         appendLine()
@@ -911,6 +941,107 @@ class FfmProxyGenerator {
             appendLine("    val FLOW_COMPLETE_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid()")
             appendLine("    fun createFlowCompleteStub(fn: () -> Unit, arena: Arena): Long {")
             appendLine("        return linker.upcallStub(FLOW_COMPLETE_MH.bindTo(fn), FLOW_COMPLETE_DESC, arena).address()")
+            appendLine("    }")
+        }
+
+        if (hasNestedCollections) {
+            appendLine()
+            appendLine("    // ── Boxed list reader handles ───────────────────────────────────────────")
+            appendLine()
+            appendLine("    private val KNE_READ_BOX_LIST_I32_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_i32\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_I64_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_i64\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_F32_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_f32\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_F64_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_f64\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_BOOL_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_bool\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_I16_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_i16\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_I8_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_i8\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine("    private val KNE_READ_BOX_LIST_STRING_HANDLE: MethodHandle by lazy {")
+            appendLine("        handle(\"${libName}_kne_read_box_list_string\", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))")
+            appendLine("    }")
+            appendLine()
+            appendLine("    fun readBoxedListI32(h: Long): List<Int> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_INT, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_I32_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_INT, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListI64(h: Long): List<Long> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_LONG, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_I64_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_LONG, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListF32(h: Long): List<Float> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_FLOAT, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_F32_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_FLOAT, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListF64(h: Long): List<Double> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_DOUBLE, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_F64_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_DOUBLE, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListBool(h: Long): List<Boolean> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_INT, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_BOOL_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_INT, it.toLong()) != 0 }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListI16(h: Long): List<Short> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_SHORT, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_I16_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_SHORT, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListI8(h: Long): List<Byte> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate(JAVA_BYTE, $MAX_COLLECTION_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_I8_HANDLE.invoke(h, buf, $MAX_COLLECTION_SIZE) as Int")
+            appendLine("            return List(count) { buf.getAtIndex(JAVA_BYTE, it.toLong()) }")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("    fun readBoxedListString(h: Long): List<String> {")
+            appendLine("        if (h == 0L) return emptyList()")
+            appendLine("        Arena.ofConfined().use { arena ->")
+            appendLine("            val buf = arena.allocate($STRING_BUF_SIZE.toLong())")
+            appendLine("            val count = KNE_READ_BOX_LIST_STRING_HANDLE.invoke(h, buf, $STRING_BUF_SIZE) as Int")
+            appendLine("            val result = mutableListOf<String>()")
+            appendLine("            var off = 0L")
+            appendLine("            repeat(count) {")
+            appendLine("                result.add(buf.getString(off))")
+            appendLine("                off += result.last().toByteArray(Charsets.UTF_8).size + 1")
+            appendLine("            }")
+            appendLine("            return result.toList()")
+            appendLine("        }")
             appendLine("    }")
         }
 
@@ -1736,13 +1867,8 @@ class FfmProxyGenerator {
             }
         }
         cls.companionMethods.forEach { m -> extractDataClass(m.returnType)?.let { scanDcFieldsForCollReaders(it) } }
-        // Also scan properties for MAP types (needed for StableRef-based MAP property getters)
-        cls.properties.forEach { prop ->
-            val inner = when (val t = prop.type) { is KneType.NULLABLE -> t.inner; else -> t }
-            if (inner is KneType.MAP) {
-                suspendMapKeys.add(Pair(suspendCollElemKey(inner.keyType), suspendCollElemKey(inner.valueType)))
-            }
-        }
+        // MAP properties now use the direct out-param approach, not StableRef handles.
+        // No need to scan properties for suspendMapKeys.
         for (key in suspendCollKeys) {
             val uk = key.uppercase()
             val layout = when (key) {
@@ -2797,8 +2923,20 @@ class FfmProxyGenerator {
                     appendLine("${indent}val t_${idx}_buf = arena.allocate($layout, $MAX_COLLECTION_SIZE.toLong())")
                     appendLine("${indent}val t_${idx}_size = arena.allocate(JAVA_INT)")
                 }
-                KneType.BYTE_ARRAY, is KneType.MAP -> {
+                KneType.BYTE_ARRAY -> {
                     appendLine("${indent}val t_${idx}_ptr = arena.allocate(ADDRESS)")
+                    appendLine("${indent}val t_${idx}_size = arena.allocate(JAVA_INT)")
+                }
+                is KneType.MAP -> {
+                    val mapType = type as KneType.MAP
+                    val keyLayout = KneType.collectionElementLayout(mapType.keyType)
+                    val valLayout = KneType.collectionElementLayout(mapType.valueType)
+                    val isKeyString = mapType.keyType == KneType.STRING
+                    val isValString = mapType.valueType == KneType.STRING
+                    if (isKeyString) appendLine("${indent}val t_${idx}_keys = arena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("${indent}val t_${idx}_keys = arena.allocate($keyLayout, $MAX_COLLECTION_SIZE.toLong())")
+                    if (isValString) appendLine("${indent}val t_${idx}_values = arena.allocate($STRING_BUF_SIZE.toLong())")
+                    else appendLine("${indent}val t_${idx}_values = arena.allocate($valLayout, $MAX_COLLECTION_SIZE.toLong())")
                     appendLine("${indent}val t_${idx}_size = arena.allocate(JAVA_INT)")
                 }
                 else -> appendLine("${indent}val t_$idx = arena.allocate(${type.ffmLayout})")
@@ -2815,8 +2953,18 @@ class FfmProxyGenerator {
                     is KneType.LIST, is KneType.SET -> {
                         add("t_${idx}_buf"); add("$MAX_COLLECTION_SIZE"); add("t_${idx}_size")
                     }
-                    KneType.BYTE_ARRAY, is KneType.MAP -> {
+                    KneType.BYTE_ARRAY -> {
                         add("t_${idx}_ptr"); add("t_${idx}_size")
+                    }
+                    is KneType.MAP -> {
+                        val mapType = type as KneType.MAP
+                        val isKeyString = mapType.keyType == KneType.STRING
+                        val isValString = mapType.valueType == KneType.STRING
+                        add("t_${idx}_keys")
+                        if (isKeyString) add("$STRING_BUF_SIZE")
+                        add("t_${idx}_values")
+                        if (isValString) add("$STRING_BUF_SIZE") else add("$MAX_COLLECTION_SIZE")
+                        add("t_${idx}_size")
                     }
                     else -> add("t_$idx")
                 }
@@ -2847,7 +2995,7 @@ class FfmProxyGenerator {
                 is KneType.ENUM -> "${type.simpleName}.entries[t_$idx.get(JAVA_INT, 0)]"
                 is KneType.OBJECT -> "${type.simpleName}.fromBorrowedHandle(t_$idx.get(JAVA_LONG, 0))"
                 is KneType.LIST, is KneType.SET -> buildListCollectionReadExpr(idx, type as KneType)
-                is KneType.MAP -> "0L /* TODO: MAP in tuple */"
+                is KneType.MAP -> buildMapCollectionReadExpr(idx, type)
                 is KneType.TUPLE -> "KneRuntime.readTupleFromRef(\"${type.typeId}\", t_${idx}.get(JAVA_LONG, 0)) as KneTuple${type.elementTypes.size}_${type.typeId}"
                 is KneType.NULLABLE -> "null /* TODO: nullable element */"
                 else -> "t_$idx.getLong(0)"
@@ -2857,11 +3005,6 @@ class FfmProxyGenerator {
         val tupleSig = tupleType.typeId
         appendLine("${indent}return KneTuple${elements.size}_$tupleSig($ctorArgs)")
     }
-
-    private fun StringBuilder.readListFromTuple(ptr: Long, size: Int): String =
-        "readListFromTuple($ptr, $size)"
-    private fun StringBuilder.readMapFromTuple(ptr: Long, size: Int): String =
-        "readMapFromTuple($ptr, $size)"
 
     private fun buildListCollectionReadExpr(idx: Int, type: KneType): String {
         val elemType = when (type) { is KneType.LIST -> type.elementType; is KneType.SET -> (type as KneType.SET).elementType; else -> KneType.INT }
@@ -2882,8 +3025,104 @@ class FfmProxyGenerator {
             KneType.STRING -> {
                 "run { val _sb = mutableListOf<String>(); var _off = 0L; repeat($countExpr) { _sb.add($buf.getString(_off)); _off += _sb.last().toByteArray(Charsets.UTF_8).size + 1 }; _sb.toList() }"
             }
+            is KneType.LIST, is KneType.SET -> {
+                val innerElem = when (elemType) { is KneType.LIST -> (elemType as KneType.LIST).elementType; is KneType.SET -> (elemType as KneType.SET).elementType; else -> KneType.INT }
+                val innerLayout = KneType.collectionElementLayout(innerElem)
+                val innerRead = buildListElementReadExpr(buf, innerElem, "it.toLong()", innerLayout)
+                "List($countExpr) { $innerRead }"
+            }
+            is KneType.MAP -> "List($countExpr) { readMapFromTuple($buf.getAtIndex(ADDRESS, it.toLong()), 0) }"
+            is KneType.TUPLE -> "List($countExpr) { KneRuntime.readTupleFromRef(\"${(elemType as KneType.TUPLE).typeId}\", $buf.getAtIndex(ADDRESS, it.toLong())) }"
+            is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> "List($countExpr) { $buf.getAtIndex(ADDRESS, it.toLong()) }"
             else -> "emptyList() /* unsupported LIST element type in tuple */"
         }.let { expr -> if (collType == "Set") "$expr.toSet()" else expr }
+    }
+
+    private fun buildMapCollectionReadExpr(idx: Int, mapType: KneType.MAP): String {
+        val keyType = mapType.keyType
+        val valType = mapType.valueType
+        val kLayout = KneType.collectionElementLayout(keyType)
+        val vLayout = KneType.collectionElementLayout(valType)
+        val isKeyString = keyType == KneType.STRING
+        val isValString = valType == KneType.STRING
+        val countExpr = "t_${idx}_size.get(JAVA_INT, 0)"
+        val keysExpr = if (isKeyString) {
+            "run { val _sb = mutableListOf<String>(); var _off = 0L; repeat($countExpr) { _sb.add(t_${idx}_keys.getString(_off)); _off += _sb.last().toByteArray(Charsets.UTF_8).size + 1 }; _sb.toList() }"
+        } else {
+            buildMapElementReadExpr("t_${idx}_keys", keyType, countExpr, kLayout)
+        }
+        val valuesExpr = if (isValString) {
+            "run { val _sb = mutableListOf<String>(); var _off = 0L; repeat($countExpr) { _sb.add(t_${idx}_values.getString(_off)); _off += _sb.last().toByteArray(Charsets.UTF_8).size + 1 }; _sb.toList() }"
+        } else {
+            buildMapElementReadExpr("t_${idx}_values", valType, countExpr, vLayout)
+        }
+        return "run { val _cnt = $countExpr; val _keys = $keysExpr; val _vals = $valuesExpr; mutableMapOf<${keyType.jvmTypeName}, ${valType.jvmTypeName}>().apply { repeat(_cnt) { this[_keys[it]] = _vals[it] } } }"
+    }
+
+    private fun buildMapElementReadExpr(bufExpr: String, elemType: KneType, countExpr: String, layout: String): String {
+        return when (elemType) {
+            KneType.INT -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_INT, it.toLong()) }"
+            KneType.LONG -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_LONG, it.toLong()) }"
+            KneType.BOOLEAN -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_INT, it.toLong()) != 0 }"
+            KneType.BYTE -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_BYTE, it.toLong()) }"
+            KneType.SHORT -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_SHORT, it.toLong()) }"
+            KneType.FLOAT -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_FLOAT, it.toLong()) }"
+            KneType.DOUBLE -> "List($countExpr) { $bufExpr.getAtIndex(JAVA_DOUBLE, it.toLong()) }"
+            is KneType.ENUM -> "List($countExpr) { ${elemType.simpleName}.entries[$bufExpr.getAtIndex(JAVA_INT, it.toLong())] }"
+            is KneType.OBJECT -> "List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }"
+            is KneType.INTERFACE -> {
+                val wrapperName = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName
+                "List($countExpr) { $wrapperName.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }"
+            }
+            is KneType.SEALED_ENUM -> "List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }"
+            is KneType.LIST, is KneType.SET -> {
+                val innerElem = when (elemType) { is KneType.LIST -> (elemType as KneType.LIST).elementType; is KneType.SET -> (elemType as KneType.SET).elementType; else -> KneType.INT }
+                val readMethod = boxedListReadMethod(innerElem)
+                "List($countExpr) { KneRuntime.$readMethod($bufExpr.getAtIndex(JAVA_LONG, it.toLong())) }"
+            }
+            is KneType.MAP -> "List($countExpr) { readMapFromTuple($bufExpr.getAtIndex(ADDRESS, it.toLong()), 0) }"
+            is KneType.TUPLE, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> "List($countExpr) { $bufExpr.getAtIndex(ADDRESS, it.toLong()) }"
+            else -> "List($countExpr) { $bufExpr.getAtIndex($layout, it.toLong()) }"
+        }
+    }
+
+    private fun buildListElementReadExpr(bufExpr: String, elemType: KneType, indexExpr: String, layout: String): String {
+        return when (elemType) {
+            KneType.INT -> "$bufExpr.getAtIndex(JAVA_INT, $indexExpr)"
+            KneType.LONG -> "$bufExpr.getAtIndex(JAVA_LONG, $indexExpr)"
+            KneType.BOOLEAN -> "$bufExpr.getAtIndex(JAVA_INT, $indexExpr) != 0"
+            KneType.BYTE -> "$bufExpr.getAtIndex(JAVA_BYTE, $indexExpr)"
+            KneType.SHORT -> "$bufExpr.getAtIndex(JAVA_SHORT, $indexExpr)"
+            KneType.FLOAT -> "$bufExpr.getAtIndex(JAVA_FLOAT, $indexExpr)"
+            KneType.DOUBLE -> "$bufExpr.getAtIndex(JAVA_DOUBLE, $indexExpr)"
+            is KneType.ENUM -> "${elemType.simpleName}.entries[$bufExpr.getAtIndex(JAVA_INT, $indexExpr)]"
+            is KneType.OBJECT -> "${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, $indexExpr))"
+            is KneType.INTERFACE -> {
+                val wrapperName = dynWrapperLookup[elemType.fqName] ?: elemType.simpleName
+                "$wrapperName.fromBorrowedHandle($bufExpr.getAtIndex($layout, $indexExpr))"
+            }
+            is KneType.SEALED_ENUM -> "${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, $indexExpr))"
+            is KneType.LIST, is KneType.SET -> {
+                val innerElem = when (elemType) { is KneType.LIST -> (elemType as KneType.LIST).elementType; is KneType.SET -> (elemType as KneType.SET).elementType; else -> KneType.INT }
+                val readMethod = boxedListReadMethod(innerElem)
+                "KneRuntime.$readMethod($bufExpr.getAtIndex(JAVA_LONG, $indexExpr))"
+            }
+            is KneType.MAP -> "readMapFromTuple($bufExpr.getAtIndex(ADDRESS, $indexExpr), 0)"
+            is KneType.TUPLE, is KneType.DATA_CLASS, is KneType.NULLABLE, KneType.BYTE_ARRAY -> "$bufExpr.getAtIndex(ADDRESS, $indexExpr)"
+            else -> "$bufExpr.getAtIndex($layout, $indexExpr)"
+        }
+    }
+
+    private fun boxedListReadMethod(elemType: KneType): String = when (elemType) {
+        KneType.INT -> "readBoxedListI32"
+        KneType.LONG -> "readBoxedListI64"
+        KneType.FLOAT -> "readBoxedListF32"
+        KneType.DOUBLE -> "readBoxedListF64"
+        KneType.BOOLEAN -> "readBoxedListBool"
+        KneType.BYTE -> "readBoxedListI8"
+        KneType.SHORT -> "readBoxedListI16"
+        KneType.STRING -> "readBoxedListString"
+        else -> "readBoxedListI32"
     }
 
     /** Generate the return-via-out-params pattern for DATA_CLASS property types. */
@@ -3207,8 +3446,46 @@ class FfmProxyGenerator {
         }
         appendLine("        get() {")
         if (isCollProp) {
-            // LIST/SET collection property getter: read StableRef handle, deserialize, dispose
             val inner = prop.type.unwrapCollection()
+            if (inner is KneType.MAP) {
+                // MAP property: direct approach (out-params), no StableRef handle
+                val mapType = inner as KneType.MAP
+                val keyIsString = mapType.keyType == KneType.STRING
+                val valIsString = mapType.valueType == KneType.STRING
+                appendLine("            Arena.ofConfined().use { _mapArena ->")
+                if (keyIsString) appendLine("                val _keysBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                else appendLine("                val _keysBuf = _mapArena.allocate(${KneType.collectionElementLayout(mapType.keyType)}, $MAX_COLLECTION_SIZE.toLong())")
+                if (valIsString) appendLine("                val _valsBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
+                else appendLine("                val _valsBuf = _mapArena.allocate(${KneType.collectionElementLayout(mapType.valueType)}, $MAX_COLLECTION_SIZE.toLong())")
+                val invokeArgs = buildList {
+                    add("handle"); add("_keysBuf")
+                    if (keyIsString) add("$STRING_BUF_SIZE")
+                    add("_valsBuf")
+                    if (valIsString) add("$STRING_BUF_SIZE")
+                    add("$MAX_COLLECTION_SIZE")
+                }.joinToString(", ")
+                appendLine("                val _count = $getHandleName.invoke($invokeArgs) as Int")
+                appendLine("                KneRuntime.checkError()")
+                appendLine("                val _map = mutableMapOf<${mapType.keyType.jvmTypeName}, ${mapType.valueType.jvmTypeName}>()")
+                if (keyIsString) {
+                    appendLine("                val _keys = mutableListOf<String>()")
+                    appendLine("                var _kOff = 0L")
+                    appendLine("                repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                } else {
+                    appendMapElementRead("                ", "_keys", mapType.keyType, "_count", "_keysBuf")
+                }
+                if (valIsString) {
+                    appendLine("                val _values = mutableListOf<String>()")
+                    appendLine("                var _vOff = 0L")
+                    appendLine("                repeat(_count) { _values.add(_valsBuf.getString(_vOff)); _vOff += _values.last().toByteArray(Charsets.UTF_8).size + 1 }")
+                } else {
+                    appendMapElementRead("                ", "_values", mapType.valueType, "_count", "_valsBuf")
+                }
+                appendLine("                repeat(_count) { _map[_keys[it]] = _values[it] }")
+                appendLine("                return _map")
+                appendLine("            }")
+            } else {
+            // LIST/SET collection property getter: read StableRef handle, deserialize, dispose
             appendLine("            val _handle = $getHandleName.invoke(handle) as Long")
             appendLine("            KneRuntime.checkError()")
             when (inner) {
@@ -3280,42 +3557,9 @@ class FfmProxyGenerator {
                     }
                     appendLine("            }")
                 }
-                is KneType.MAP -> {
-                    val mapType = inner as KneType.MAP
-                    val kk = suspendCollElemKey(mapType.keyType)
-                    val vk = suspendCollElemKey(mapType.valueType)
-                    val keyIsString = mapType.keyType == KneType.STRING
-                    val valIsString = mapType.valueType == KneType.STRING
-                    val kSizeArg = if (keyIsString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
-                    val vSizeArg = if (valIsString) "$STRING_BUF_SIZE" else "$MAX_COLLECTION_SIZE"
-                    appendLine("            Arena.ofConfined().use { _mapArena ->")
-                    if (keyIsString) appendLine("                val _keysBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
-                    else appendLine("                val _keysBuf = _mapArena.allocate(${KneType.collectionElementLayout(mapType.keyType)}, $MAX_COLLECTION_SIZE.toLong())")
-                    if (valIsString) appendLine("                val _valsBuf = _mapArena.allocate($STRING_BUF_SIZE.toLong())")
-                    else appendLine("                val _valsBuf = _mapArena.allocate(${KneType.collectionElementLayout(mapType.valueType)}, $MAX_COLLECTION_SIZE.toLong())")
-                    appendLine("                val _count = SUSPEND_READMAP_${kk.uppercase()}_${vk.uppercase()}_HANDLE.invoke(_handle, _keysBuf, $kSizeArg, _valsBuf, $vSizeArg) as Int")
-                    appendLine("                KneRuntime.checkError()")
-                    appendLine("                val _map = mutableMapOf<${mapType.keyType.jvmTypeName}, ${mapType.valueType.jvmTypeName}>()")
-                    if (keyIsString) {
-                        appendLine("                val _keys = mutableListOf<String>()")
-                        appendLine("                var _kOff = 0L")
-                        appendLine("                repeat(_count) { _keys.add(_keysBuf.getString(_kOff)); _kOff += _keys.last().toByteArray(Charsets.UTF_8).size + 1 }")
-                    } else {
-                        appendMapElementRead("                ", "_keys", mapType.keyType, "_count", "_keysBuf")
-                    }
-                    if (valIsString) {
-                        appendLine("                val _values = mutableListOf<String>()")
-                        appendLine("                var _vOff = 0L")
-                        appendLine("                repeat(_count) { _values.add(_valsBuf.getString(_vOff)); _vOff += _values.last().toByteArray(Charsets.UTF_8).size + 1 }")
-                    } else {
-                        appendMapElementRead("                ", "_values", mapType.valueType, "_count", "_valsBuf")
-                    }
-                    appendLine("                repeat(_count) { _map[_keys[it]] = _values[it] }")
-                    appendLine("                return _map")
-                    appendLine("            }")
-                }
                 else -> appendCallAndReturn("            ", prop.type, getHandleName, "handle")
             }
+            } // end LIST/SET else branch
         } else if (isDcProp) {
             // Data class property getter: use out-params pattern
             val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
@@ -4108,7 +4352,13 @@ class FfmProxyGenerator {
                         builder.add("ADDRESS"); builder.add("JAVA_INT") // ptr, len
                     }
                 }
-                is KneType.MAP -> { builder.add("ADDRESS"); builder.add("JAVA_INT") }
+                is KneType.MAP -> {
+                    if (isOutParam) {
+                        builder.add("ADDRESS"); builder.add("JAVA_INT"); builder.add("ADDRESS"); builder.add("JAVA_INT"); builder.add("ADDRESS")
+                    } else {
+                        builder.add("ADDRESS"); builder.add("JAVA_INT"); builder.add("ADDRESS"); builder.add("JAVA_INT"); builder.add("JAVA_INT")
+                    }
+                }
                 KneType.INT, KneType.LONG, KneType.BOOLEAN, KneType.BYTE, KneType.SHORT, KneType.FLOAT, KneType.DOUBLE -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
                 else -> builder.add(if (isOutParam) "ADDRESS" else elemType.ffmLayout)
             }
@@ -4228,6 +4478,7 @@ class FfmProxyGenerator {
         val isCollProp = prop.type.isCollection()
         val returnDc = extractDataClass(prop.type)
         val returnsNullableDc = prop.type is KneType.NULLABLE && prop.type.inner is KneType.DATA_CLASS
+        val isMapProp = isCollProp && prop.type.unwrapCollection() is KneType.MAP
         val paramLayouts = buildList {
             add("JAVA_LONG")
             if (!isCollProp && prop.type.returnsViaBuffer()) {
@@ -4243,11 +4494,21 @@ class FfmProxyGenerator {
                     }
                 }
             }
+            // MAP property: direct approach — add key/value buffer out-params
+            if (isMapProp) {
+                val mapType = prop.type.unwrapCollection() as KneType.MAP
+                add("ADDRESS") // keys buf
+                if (mapType.keyType == KneType.STRING) add("JAVA_INT")
+                add("ADDRESS") // values buf
+                if (mapType.valueType == KneType.STRING) add("JAVA_INT")
+                add("JAVA_INT") // max len
+            }
         }
         val effectiveReturn = when {
             returnDc != null && returnsNullableDc -> KneType.INT // 0=null, 1=present
             returnDc != null -> KneType.UNIT
-            isCollProp -> KneType.LONG // LIST/SET/MAP: StableRef handle
+            isMapProp -> KneType.INT // MAP property: direct approach, returns count
+            isCollProp -> KneType.LONG // LIST/SET: StableRef handle
             else -> prop.type
         }
         return buildDescriptor(effectiveReturn, paramLayouts)
@@ -5120,6 +5381,11 @@ class FfmProxyGenerator {
                 appendLine("${indent}val $varName = List($countExpr) { $wrapperName.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
             }
             is KneType.SEALED_ENUM -> appendLine("${indent}val $varName = List($countExpr) { ${elemType.simpleName}.fromBorrowedHandle($bufExpr.getAtIndex($layout, it.toLong())) }")
+            is KneType.LIST, is KneType.SET -> {
+                val innerElem = if (elemType is KneType.LIST) elemType.elementType else (elemType as KneType.SET).elementType
+                val readMethod = boxedListReadMethod(innerElem)
+                appendLine("${indent}val $varName = List($countExpr) { KneRuntime.$readMethod($bufExpr.getAtIndex(JAVA_LONG, it.toLong())) }")
+            }
             else -> appendLine("${indent}val $varName = List($countExpr) { $bufExpr.getAtIndex($layout, it.toLong()) as ${elemType.jvmTypeName} }")
         }
     }

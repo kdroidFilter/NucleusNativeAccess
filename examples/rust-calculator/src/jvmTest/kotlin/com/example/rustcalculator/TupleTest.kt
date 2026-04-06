@@ -368,4 +368,183 @@ class TupleTest {
         threads.forEach { it.start() }
         threads.forEach { it.join() }
     }
+
+    // ── MAP in tuple tests ──────────────────────────────────────────────────
+
+    @Test
+    fun `tuple - get_with_metadata returns tuple with map`() {
+        Calculator(10).use { calc ->
+            val result = calc.get_with_metadata()
+            assertEquals(10, result._0)
+            assertEquals(mapOf("current" to 10, "scale" to 1, "double" to 20), result._1)
+        }
+    }
+
+    @Test
+    fun `tuple - get_with_metadata with zero accumulator`() {
+        Calculator(0).use { calc ->
+            val result = calc.get_with_metadata()
+            assertEquals(0, result._0)
+            assertEquals(mapOf("current" to 0, "scale" to 1, "double" to 0), result._1)
+        }
+    }
+
+    @Test
+    fun `tuple - get_with_metadata repeated calls`() {
+        Calculator(5).use { calc ->
+            repeat(100) {
+                val result = calc.get_with_metadata()
+                assertEquals(5, result._0)
+                assertEquals(mapOf("current" to 5, "scale" to 1, "double" to 10), result._1)
+            }
+        }
+    }
+
+    // ── MAP with nested LIST values ─────────────────────────────────────────
+
+    @Test
+    fun `get_metadata returns map with list values`() {
+        Calculator(5).use { calc ->
+            val result = calc.metadata
+            assertEquals(listOf(5, 10, 15), result["values"])
+            assertEquals(listOf(1, 2, 3, 5), result["factors"])
+        }
+    }
+
+    @Test
+    fun `get_metadata with zero accumulator`() {
+        Calculator(0).use { calc ->
+            val result = calc.metadata
+            assertEquals(listOf(0, 0, 0), result["values"])
+            assertEquals(listOf(1, 2, 3, 5), result["factors"])
+        }
+    }
+
+    @Test
+    fun `get_with_metadata_map returns tuple with nested map`() {
+        Calculator(3).use { calc ->
+            calc.label = "hello"
+            val result = calc.get_with_metadata_map()
+            assertEquals("hello", result._0)
+            assertEquals(listOf(3, 6), result._1["values"])
+            assertEquals(listOf(1, 2, 3), result._1["labels"])
+        }
+    }
+
+    @Test
+    fun `get_with_metadata_map repeated calls`() {
+        Calculator(2).use { calc ->
+            calc.label = "test"
+            repeat(100) {
+                val result = calc.get_with_metadata_map()
+                assertEquals("test", result._0)
+                assertEquals(listOf(2, 4), result._1["values"])
+            }
+        }
+    }
+
+    @Test
+    fun `edge nested map - negative accumulator`() {
+        Calculator(-7).use { calc ->
+            val result = calc.metadata
+            assertEquals(listOf(-7, -14, -21), result["values"])
+            assertEquals(2, result.size)
+        }
+    }
+
+    @Test
+    fun `edge nested map - MAX_VALUE accumulator`() {
+        Calculator(Int.MAX_VALUE).use { calc ->
+            val result = calc.metadata
+            assertEquals(Int.MAX_VALUE, result["values"]!![0])
+            assertEquals(listOf(1, 2, 3, 5), result["factors"])
+        }
+    }
+
+    @Test
+    fun `edge nested map - key count and content`() {
+        Calculator(1).use { calc ->
+            val result = calc.metadata
+            assertEquals(setOf("values", "factors"), result.keys)
+            assertEquals(3, result["values"]!!.size)
+            assertEquals(4, result["factors"]!!.size)
+        }
+    }
+
+    @Test
+    fun `edge nested tuple map - empty label`() {
+        Calculator(1).use { calc ->
+            calc.label = ""
+            val result = calc.get_with_metadata_map()
+            assertEquals("", result._0)
+            assertEquals(listOf(1, 2), result._1["values"])
+        }
+    }
+
+    @Test
+    fun `edge nested tuple map - unicode label`() {
+        Calculator(1).use { calc ->
+            calc.label = "日本語テスト🎉"
+            val result = calc.get_with_metadata_map()
+            assertEquals("日本語テスト🎉", result._0)
+            assertEquals(listOf(1, 2, 3), result._1["labels"])
+        }
+    }
+
+    @Test
+    fun `load - 100K metadata calls`() {
+        Calculator(42).use { calc ->
+            repeat(100_000) {
+                val result = calc.metadata
+                assertEquals(listOf(42, 84, 126), result["values"])
+            }
+        }
+    }
+
+    @Test
+    fun `load - 100K get_with_metadata_map calls`() {
+        Calculator(3).use { calc ->
+            calc.label = "load"
+            repeat(100_000) {
+                val result = calc.get_with_metadata_map()
+                assertEquals("load", result._0)
+                assertEquals(listOf(3, 6), result._1["values"])
+            }
+        }
+    }
+
+    @Test
+    fun `concurrent - 10 threads x 10K metadata calls`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(10_000) {
+                        val result = calc.metadata
+                        assertEquals(listOf(tid, tid * 2, tid * 3), result["values"])
+                        assertEquals(listOf(1, 2, 3, 5), result["factors"])
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test
+    fun `concurrent - 10 threads x 10K get_with_metadata_map calls`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    calc.label = "t$tid"
+                    repeat(10_000) {
+                        val result = calc.get_with_metadata_map()
+                        assertEquals("t$tid", result._0)
+                        assertEquals(listOf(tid, tid * 2), result._1["values"])
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
 }
