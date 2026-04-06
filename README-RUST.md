@@ -496,14 +496,15 @@ This example demonstrates the **limits of direct crate import** and the **local 
 
 #### Why a local wrapper?
 
-Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but hits several bridge limitations at runtime:
+Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but hits bridge limitations at runtime:
 
-| Problem | Root cause | Impact |
-|---------|-----------|--------|
-| `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
-| macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
+| Problem | Root cause | Wrapper solution |
+|---------|-----------|-----------------|
+| `MenuItem::new` takes unbridgeable params | `impl ToString` + `Option<Accelerator>` | `create_menu_item(label: &str, enabled: bool)` wrapper |
+| `TrayIconBuilder.with_menu()` unbridgeable | Takes `Box<dyn ContextMenu>` | Menu created internally; modified via `add_menu_item()` / `remove_menu_item()` |
+| macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `dispatch_sync_f` from Rust |
 
-> **Opaque types are now supported.** `Icon` and `MenuItem` are bridged as opaque handles. Create them via Rust wrapper functions (`make_icon`, `create_menu_item`), pass them to methods like `create_tray_with_icon`, `add_menu_item`, `set_menu_item_text`, etc.
+All limitations are resolved by the wrapper crate. `Icon` and `MenuItem` are bridged as opaque handles &mdash; create them via Rust wrapper functions (`make_icon`, `create_menu_item`), pass them to methods like `create_tray_with_icon`, `add_menu_item`, `set_menu_item_text`, etc.
 
 The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
 1. Exposes a flat API of top-level functions + **opaque `Icon` and `MenuItem` handles** for type-safe management
@@ -560,7 +561,7 @@ This example surfaces important architectural insights about the NNA bridge:
 
 3. **`impl Trait` params need wrapping**: `MenuItem::new(text: impl ToString, ...)` can't be bridged directly because the external constructor uses `impl Trait` in argument position. Workaround: **wrap in a Rust function** that accepts a concrete type (e.g., `&str`) and calls the constructor internally.
 
-4. **`Box<dyn Trait>` in struct fields blocks constructors**: `TrayIconAttributes.menu: Option<Box<dyn ContextMenu>>` makes the struct constructor unbridgeable. Workaround: **use the builder or wrap in Rust**.
+4. **`Box<dyn Trait>` params can't cross FFI**: `TrayIconBuilder.with_menu(Box<dyn ContextMenu>)` is unbridgeable. Workaround: **call from Rust** and expose imperative APIs instead (`add_menu_item`, `remove_menu_item`). The trait object stays on the Rust side; Kotlin only sees opaque handles.
 
 5. **Platform thread constraints need Rust-level solutions**: macOS requires AppKit main thread for tray icons. The JVM's AWT EDT is not the macOS main thread. Workaround: **`dispatch_sync_f` from Rust** to the main queue.
 
