@@ -111,13 +111,18 @@ class RustBridgeGenerator {
         if (rt.contains("Box<dyn ") && p.type !is KneType.INTERFACE) return true
         // Bare Box without type params (missing generic info)
         if (rt == "Box" || rt.endsWith("::Box")) return true
-        // Nullable wrapping a collection or function — appendNullableParamConversion
-        // only handles primitives, strings, enums, objects, and data classes.
-        // NULLABLE(LIST/SET/MAP/FUNCTION) falls through to the else branch which
+        // Nullable wrapping a collection — appendNullableParamConversion
+        // only handles primitives, strings, enums, objects, data classes, and functions.
+        // NULLABLE(LIST/SET/MAP) falls through to the else branch which
         // produces `Some(i64)` instead of the correct Rust type.
         if (p.type is KneType.NULLABLE) {
             val inner = (p.type as KneType.NULLABLE).inner
-            if (inner is KneType.LIST || inner is KneType.SET || inner is KneType.MAP || inner is KneType.FUNCTION) return true
+            if (inner is KneType.LIST || inner is KneType.SET || inner is KneType.MAP) return true
+            // For nullable functions, apply the same C ABI friendliness check as non-nullable
+            if (inner is KneType.FUNCTION) {
+                if (inner.paramTypes.any { !isCAbiFriendlyType(it) } || !isCAbiFriendlyType(inner.returnType)) return true
+                if (inner.paramTypes.any { it is KneType.OBJECT && it.simpleName in monomorphisedBaseNames }) return true
+            }
         }
         return false
     }
@@ -2574,6 +2579,15 @@ class RustBridgeGenerator {
                     }
                 }
             }
+            is KneType.FUNCTION -> {
+                // Nullable function: 0 means None, otherwise transmute to fn and wrap in Some
+                appendLine("${indent}let ${p.name}_opt = if ${p.name} == 0 { None } else {")
+                // Reuse non-nullable function conversion by creating a synthetic param
+                val innerParam = KneParam(name = p.name, type = inner, isBorrowed = p.isBorrowed, rustType = p.rustType?.let { optionInnerRustType(it) })
+                appendFunctionParamConversion(innerParam, "$indent    ")
+                appendLine("$indent    Some(${p.name}_fn)")
+                appendLine("$indent};")
+            }
             is KneType.DATA_CLASS -> {
                 val dc = inner
                 val borrowed = isBorrowedRustType(optionInnerRustType)
@@ -2650,7 +2664,7 @@ class RustBridgeGenerator {
             }.joinToString(", ")
             val callExpr = "${p.name}_c($callArgs)"
             val returnExpr = rustFromCRetConvert(callExpr, fnType.returnType)
-            appendLine("${indent}let ${p.name}_fn = |$closureParams|$closureRetType { $returnExpr };")
+            appendLine("${indent}let ${p.name}_fn = move |$closureParams|$closureRetType { $returnExpr };")
         } else {
             // Multi-line closure for handle-backed types (OBJECT, INTERFACE, SEALED_ENUM)
             val cParamTypes = fnType.paramTypes.mapIndexed { i, t ->

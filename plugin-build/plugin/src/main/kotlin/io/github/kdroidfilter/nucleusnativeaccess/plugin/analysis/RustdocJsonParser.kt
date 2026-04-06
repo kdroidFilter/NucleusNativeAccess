@@ -1734,6 +1734,23 @@ class RustdocJsonParser {
                     ) ?: return null
                     return ResolvedType(innerType.type, rustType = innerType.rustType, implTraitConversion = ".into()")
                 }
+
+                "Fn", "FnMut", "FnOnce" -> {
+                    val parenthesized = args?.asJsonObject?.getAsJsonObject("parenthesized") ?: continue
+                    val inputs = parenthesized.getAsJsonArray("inputs") ?: continue
+                    val paramTypes = inputs.mapNotNull {
+                        resolveTypeWithBorrow(it, knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)?.type
+                    }
+                    if (paramTypes.size != inputs.size()) continue
+                    val outputResolved = resolveTypeWithBorrow(
+                        parenthesized.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType,
+                    )
+                    val fnRustType = "impl $traitName(${paramTypes.joinToString(", ") { renderRustType(it) }})"
+                    return ResolvedType(
+                        type = KneType.FUNCTION(paramTypes, outputResolved?.type ?: KneType.UNIT),
+                        rustType = fnRustType,
+                    )
+                }
             }
 
             // Check for known crate-local traits: impl Trait → bridge as Box<dyn Trait>

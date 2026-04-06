@@ -365,9 +365,12 @@ class FfmProxyGenerator {
         else -> null
     }
 
+    private fun paramIsFunction(p: KneParam): Boolean =
+        p.type is KneType.FUNCTION || (p.type is KneType.NULLABLE && (p.type as KneType.NULLABLE).inner is KneType.FUNCTION)
+
     private fun classHasCallbacks(cls: KneClass): Boolean =
-        cls.methods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } || fn.isSuspend || fn.returnType is KneType.FLOW } ||
-        cls.companionMethods.any { fn -> fn.params.any { it.type is KneType.FUNCTION } || fn.isSuspend }
+        cls.methods.any { fn -> fn.params.any { paramIsFunction(it) } || fn.isSuspend || fn.returnType is KneType.FLOW } ||
+        cls.companionMethods.any { fn -> fn.params.any { paramIsFunction(it) } || fn.isSuspend }
 
     /**
      * Generates all proxy files for the module.
@@ -4026,7 +4029,7 @@ class FfmProxyGenerator {
         appendLine("import java.lang.invoke.MethodHandle")
         appendLine()
 
-        val objectHasCallbacks = fns.any { fn -> fn.params.any { it.type is KneType.FUNCTION } }
+        val objectHasCallbacks = fns.any { fn -> fn.params.any { paramIsFunction(it) } }
 
         appendLine("object $objectName {")
         if (objectHasCallbacks) {

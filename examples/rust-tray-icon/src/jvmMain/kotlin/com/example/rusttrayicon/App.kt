@@ -22,7 +22,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rusttrayicon.tabs.*
-import kotlinx.coroutines.delay
 
 enum class NavItem(val label: String, val icon: ImageVector) {
     TrayControl("Tray Control", Icons.Default.DesktopWindows),
@@ -40,21 +39,6 @@ fun App() {
 
     DisposableEffect(Unit) {
         onDispose { manager.destroy() }
-    }
-
-    // Poll native tray/menu events every 100ms and push to event log
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(100)
-            if (manager.isActive) {
-                for (desc in manager.pollTrayEvents()) {
-                    events.add(0, TrayEvent(type = "TrayEvent", details = desc))
-                }
-                for (label in manager.pollMenuEvents()) {
-                    events.add(0, TrayEvent(type = "MenuEvent", details = label))
-                }
-            }
-        }
     }
 
     Row(Modifier.fillMaxSize().background(AppColors.bg)) {

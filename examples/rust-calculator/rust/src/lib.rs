@@ -453,6 +453,35 @@ impl Calculator {
         formatter(result)
     }
 
+    // ── Nullable callback support ────────────────────────────────────
+
+    /// Applies an optional transform to the accumulator. Returns transformed value or accumulator if None.
+    pub fn maybe_transform(&self, transform: Option<impl Fn(i32) -> i32>) -> i32 {
+        match transform {
+            Some(f) => f(self.accumulator),
+            None => self.accumulator,
+        }
+    }
+
+    /// Calls the optional callback with each value from 1..=count. Does nothing if callback is None.
+    pub fn maybe_for_each(&self, count: i32, callback: Option<impl Fn(i32)>) {
+        if let Some(cb) = callback {
+            for i in 1..=count {
+                cb(self.accumulator * i);
+            }
+        }
+    }
+
+    /// Registers an optional observer, applies an operation, then calls the observer with the result.
+    /// Returns the computed value.
+    pub fn compute_with_observer(&self, value: i32, observer: Option<impl Fn(String)>) -> i32 {
+        let result = self.accumulator + value;
+        if let Some(obs) = observer {
+            obs(format!("computed: {}", result));
+        }
+        result
+    }
+
     // ── Data class support ────────────────────────────────────────────
 
     pub fn get_point(&self) -> Point {

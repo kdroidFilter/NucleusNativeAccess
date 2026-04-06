@@ -405,6 +405,167 @@ class CallbackTest {
         threads.forEach { it.join() }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Nullable callbacks (Option<impl Fn(...)>)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `cb nullable - maybe_transform with Some`() {
+        Calculator(10).use { calc ->
+            val result = calc.maybe_transform { it * 3 }
+            assertEquals(30, result)
+        }
+    }
+
+    @Test fun `cb nullable - maybe_transform with null returns accumulator`() {
+        Calculator(42).use { calc ->
+            val result = calc.maybe_transform(null)
+            assertEquals(42, result)
+        }
+    }
+
+    @Test fun `cb nullable - maybe_for_each with Some`() {
+        Calculator(5).use { calc ->
+            val values = Collections.synchronizedList(mutableListOf<Int>())
+            calc.maybe_for_each(3) { values.add(it) }
+            assertEquals(listOf(5, 10, 15), values)
+        }
+    }
+
+    @Test fun `cb nullable - maybe_for_each with null does nothing`() {
+        Calculator(5).use { calc ->
+            calc.maybe_for_each(3, null) // should not crash
+        }
+    }
+
+    @Test fun `cb nullable - compute_with_observer with Some`() {
+        Calculator(10).use { calc ->
+            var observed: String? = null
+            val result = calc.compute_with_observer(5) { observed = it }
+            assertEquals(15, result)
+            assertEquals("computed: 15", observed)
+        }
+    }
+
+    @Test fun `cb nullable - compute_with_observer with null`() {
+        Calculator(10).use { calc ->
+            val result = calc.compute_with_observer(5, null)
+            assertEquals(15, result)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Nullable callback edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `edge cb nullable - maybe_transform with identity`() {
+        Calculator(Int.MAX_VALUE).use { calc ->
+            val result = calc.maybe_transform { it }
+            assertEquals(Int.MAX_VALUE, result)
+        }
+    }
+
+    @Test fun `edge cb nullable - maybe_transform with MIN_VALUE`() {
+        Calculator(Int.MIN_VALUE).use { calc ->
+            val result = calc.maybe_transform { it + 1 }
+            assertEquals(Int.MIN_VALUE + 1, result)
+        }
+    }
+
+    @Test fun `edge cb nullable - maybe_for_each with zero count`() {
+        Calculator(5).use { calc ->
+            val counter = AtomicInteger(0)
+            calc.maybe_for_each(0) { counter.incrementAndGet() }
+            assertEquals(0, counter.get())
+        }
+    }
+
+    @Test fun `edge cb nullable - compute_with_observer with empty string result`() {
+        Calculator(0).use { calc ->
+            var observed: String? = null
+            calc.compute_with_observer(0) { observed = it }
+            assertEquals("computed: 0", observed)
+        }
+    }
+
+    @Test fun `edge cb nullable - alternate null and non-null`() {
+        Calculator(7).use { calc ->
+            assertEquals(7, calc.maybe_transform(null))
+            assertEquals(14, calc.maybe_transform { it * 2 })
+            assertEquals(7, calc.maybe_transform(null))
+            assertEquals(49, calc.maybe_transform { it * it })
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Load tests for nullable callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `load - 100K maybe_transform with Some`() {
+        Calculator(3).use { calc ->
+            repeat(100_000) {
+                assertEquals(9, calc.maybe_transform { it * 3 })
+            }
+        }
+    }
+
+    @Test fun `load - 100K maybe_transform with null`() {
+        Calculator(3).use { calc ->
+            repeat(100_000) {
+                assertEquals(3, calc.maybe_transform(null))
+            }
+        }
+    }
+
+    @Test fun `load - 100K compute_with_observer alternating`() {
+        Calculator(1).use { calc ->
+            repeat(100_000) { i ->
+                if (i % 2 == 0) {
+                    calc.compute_with_observer(i, null)
+                } else {
+                    calc.compute_with_observer(i) { /* discard */ }
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Concurrency tests for nullable callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Test fun `concurrent - 10 threads x 10K maybe_transform`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(10_000) {
+                        assertEquals(tid * 2, calc.maybe_transform { it * 2 })
+                        assertEquals(tid, calc.maybe_transform(null))
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
+    @Test fun `concurrent - 10 threads x 10K compute_with_observer`() {
+        val threads = (1..10).map { tid ->
+            Thread {
+                Calculator(tid).use { calc ->
+                    repeat(10_000) { i ->
+                        val result = if (i % 2 == 0) {
+                            calc.compute_with_observer(1, null)
+                        } else {
+                            calc.compute_with_observer(1) { /* discard */ }
+                        }
+                        assertEquals(tid + 1, result)
+                    }
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+    }
+
     @Test fun `concurrent - 10 threads x 1K apply_to_clone`() {
         val threads = (1..10).map { tid ->
             Thread {

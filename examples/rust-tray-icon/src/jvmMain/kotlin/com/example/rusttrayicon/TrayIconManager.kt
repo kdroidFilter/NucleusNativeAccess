@@ -16,6 +16,13 @@ class TrayIconManager {
                 title = title.ifEmpty { null },
                 menu_items = menuItems.ifEmpty { null },
             )
+            // Register event callbacks — Rust calls these directly, no polling needed
+            Tray_icon_wrapper.on_tray_event { desc ->
+                onEvent(TrayEvent(type = "TrayEvent", details = desc))
+            }
+            Tray_icon_wrapper.on_menu_event { label ->
+                onEvent(TrayEvent(type = "MenuEvent", details = label))
+            }
             onEvent(TrayEvent(type = "Created", details = "Tray icon with menu: $menuItems"))
         } catch (e: Exception) {
             onEvent(TrayEvent(type = "Error", details = e.message ?: e.toString()))
@@ -23,7 +30,12 @@ class TrayIconManager {
     }
 
     fun destroy() {
-        try { Tray_icon_wrapper.destroy_tray() } catch (_: Exception) {}
+        try {
+            // Clear event handlers before destroying
+            Tray_icon_wrapper.on_tray_event(null)
+            Tray_icon_wrapper.on_menu_event(null)
+            Tray_icon_wrapper.destroy_tray()
+        } catch (_: Exception) {}
     }
 
     fun setTooltip(tooltip: String) {
@@ -44,25 +56,5 @@ class TrayIconManager {
 
     fun setIconColor(r: Int, g: Int, b: Int) {
         try { Tray_icon_wrapper.set_icon_color(r, g, b) } catch (_: Exception) {}
-    }
-
-    /** Polls pending tray events (click, enter, leave...). */
-    fun pollTrayEvents(): List<String> {
-        val events = mutableListOf<String>()
-        while (true) {
-            val e = try { Tray_icon_wrapper.poll_tray_event() } catch (_: Exception) { null }
-            if (e != null) events.add(e) else break
-        }
-        return events
-    }
-
-    /** Polls pending menu events (returns menu item labels). */
-    fun pollMenuEvents(): List<String> {
-        val events = mutableListOf<String>()
-        while (true) {
-            val e = try { Tray_icon_wrapper.poll_menu_event() } catch (_: Exception) { null }
-            if (e != null) events.add(e) else break
-        }
-        return events
     }
 }

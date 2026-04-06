@@ -70,49 +70,59 @@ pub fn is_active() -> bool {
     on_main_sync(|| TRAY.with(|cell| cell.borrow().is_some()))
 }
 
-/// Polls for the next tray icon event. Returns a description string or empty if none.
-/// Format: "click|<button>|<state>" or "double_click|<button>" or "enter" or "leave" or "move"
-pub fn poll_tray_event() -> Option<String> {
-    if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-        let desc = match event {
-            TrayIconEvent::Click { button, button_state, .. } =>
-                format!("click|{:?}|{:?}", button, button_state),
-            TrayIconEvent::DoubleClick { button, .. } =>
-                format!("double_click|{:?}", button),
-            TrayIconEvent::Enter { .. } => "enter".to_string(),
-            TrayIconEvent::Leave { .. } => "leave".to_string(),
-            TrayIconEvent::Move { .. } => "move".to_string(),
-            _ => format!("{:?}", event),
-        };
-        Some(desc)
-    } else {
-        None
+/// Registers a callback for tray icon events (click, double_click, enter, leave, move).
+/// The callback receives a description string. Pass None to clear the handler.
+pub fn on_tray_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
+    match handler {
+        Some(h) => {
+            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                let desc = match event {
+                    TrayIconEvent::Click { button, button_state, .. } =>
+                        format!("click|{:?}|{:?}", button, button_state),
+                    TrayIconEvent::DoubleClick { button, .. } =>
+                        format!("double_click|{:?}", button),
+                    TrayIconEvent::Enter { .. } => "enter".to_string(),
+                    TrayIconEvent::Leave { .. } => "leave".to_string(),
+                    TrayIconEvent::Move { .. } => "move".to_string(),
+                    _ => format!("{:?}", event),
+                };
+                h(desc);
+            }));
+        }
+        None => {
+            TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
+        }
     }
 }
 
-/// Polls for the next menu event. Returns the menu item text or empty if none.
-pub fn poll_menu_event() -> Option<String> {
-    if let Ok(event) = MenuEvent::receiver().try_recv() {
-        // Look up the label from the menu
-        let id = event.id;
-        let label = MENU.with(|cell| {
-            if let Some(ref menu) = *cell.borrow() {
-                for item in menu.items() {
-                    if item.id() == &id {
-                        return match &item {
-                            tray_icon::menu::MenuItemKind::MenuItem(m) => m.text(),
-                            tray_icon::menu::MenuItemKind::Check(m) => m.text(),
-                            tray_icon::menu::MenuItemKind::Submenu(m) => m.text(),
-                            _ => id.0.clone(),
-                        };
+/// Registers a callback for menu item clicks.
+/// The callback receives the menu item label. Pass None to clear the handler.
+pub fn on_menu_event(handler: Option<impl Fn(String) + Send + Sync + 'static>) {
+    match handler {
+        Some(h) => {
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let id = event.id;
+                let label = MENU.with(|cell| {
+                    if let Some(ref menu) = *cell.borrow() {
+                        for item in menu.items() {
+                            if item.id() == &id {
+                                return match &item {
+                                    tray_icon::menu::MenuItemKind::MenuItem(m) => m.text(),
+                                    tray_icon::menu::MenuItemKind::Check(m) => m.text(),
+                                    tray_icon::menu::MenuItemKind::Submenu(m) => m.text(),
+                                    _ => id.0.clone(),
+                                };
+                            }
+                        }
                     }
-                }
-            }
-            id.0.clone()
-        });
-        Some(label)
-    } else {
-        None
+                    id.0.clone()
+                });
+                h(label);
+            }));
+        }
+        None => {
+            MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
+        }
     }
 }
 

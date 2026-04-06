@@ -504,14 +504,13 @@ Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codege
 | `MenuItem::new` not bridged | Constructor takes `impl ToString` + `Option<Accelerator>` &rarr; unsupported param types | Cannot create menu items from Kotlin |
 | `TrayIconBuilder.with_icon()` not bridged | Takes `Icon` (opaque type) &rarr; Rust bridge function not generated | Cannot set icon via builder |
 | `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
-| `MenuEvent::set_event_handler` not bridged | Takes `Option<impl Fn(MenuEvent)>` &rarr; nullable closure unsupported | No event callbacks from Rust to Kotlin |
 | macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
 
 The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
 1. Exposes a flat API of top-level functions (no trait objects, no opaque types in params)
 2. Manages the `TrayIcon` lifecycle internally via `thread_local!`
 3. Dispatches all calls to the macOS main thread via `dispatch_sync_f`
-4. Exposes event polling via `poll_tray_event()` / `poll_menu_event()` returning strings
+4. Uses `Option<impl Fn(String)>` callbacks for events (`on_tray_event` / `on_menu_event`)
 
 ```kotlin
 // build.gradle.kts
@@ -555,7 +554,7 @@ val menu = Tray_icon_wrapper.poll_menu_event()     // "Settings"
 
 This example surfaces important architectural insights about the NNA bridge:
 
-1. **No Rust-to-Kotlin callbacks**: The bridge is one-way (Kotlin calls Rust). Rust event handlers (`set_event_handler`) can't invoke Kotlin lambdas. Workaround: **polling** via `try_recv()`.
+1. **Nullable closures enable Rust-to-Kotlin callbacks**: `Option<impl Fn(String)>` params are bridged as nullable function pointers. Rust code can call the Kotlin lambda via FFM upcall stubs. Example: `on_menu_event(handler: ((String) -> Unit)?)` &mdash; pass `null` to clear the handler.
 
 2. **Opaque types block method generation**: Types with private fields (like `Icon`) become opaque handles with only `dispose()`. Their constructors and methods are not bridged. Workaround: **wrap in a Rust function** that creates and uses the type internally.
 
@@ -565,7 +564,7 @@ This example surfaces important architectural insights about the NNA bridge:
 
 5. **Platform thread constraints need Rust-level solutions**: macOS requires AppKit main thread for tray icons. The JVM's AWT EDT is not the macOS main thread. Workaround: **`dispatch_sync_f` from Rust** to the main queue.
 
-6. **Event polling vs callbacks**: Without Rust-to-Kotlin callbacks, the only way to receive native events is polling. The Compose app uses `LaunchedEffect` with `delay(100)` to poll every 100ms.
+6. **Callback-driven events**: With nullable closure support, the wrapper uses `on_tray_event` / `on_menu_event` callbacks instead of polling. Rust calls the Kotlin lambda directly when events fire.
 
 Full Compose Desktop app with tray icon control, color picker, context menu, and native event log: [`examples/rust-tray-icon/`](examples/rust-tray-icon/).
 
@@ -643,7 +642,7 @@ Excluded functions are logged at generation time (stderr), so you know exactly w
 | **Lifetimes** | Explicit lifetime parameters on structs (`struct Ref<'a>`) | Entire struct skipped with log message | Remove lifetime parameters or use owned types |
 | **Mutability** | `&mut T` parameters on standalone `pub fn` | Treated as `&T` (immutable borrow) | Use `impl` methods with `&mut self` instead |
 | **Opaque types** | Structs with private fields (e.g. `Icon`) | Only `dispose()` generated &mdash; no constructors or methods | Wrap in a Rust function that creates and uses the type internally |
-| **Callbacks** | Rust-to-Kotlin callbacks (`set_event_handler(impl Fn)`) | Bridge is one-way: Kotlin &rarr; Rust only. `Option<impl Fn(T)>` params are skipped | Use polling (`try_recv()`) or return events as strings |
+| **Callbacks** | `Option<impl Fn(T)>` nullable closure params | Supported &mdash; bridged as nullable function pointers with FFM upcall stubs | Pass `null` to clear the handler |
 | **Nullable collections** | `Option<Vec<String>>` parameters | `appendNullableParamConversion` has no code path &mdash; method skipped | Use non-nullable params or wrap in Rust |
 | **`Box<dyn Trait>` fields** | Struct fields typed `Box<dyn Trait>` (e.g. `TrayIconAttributes.menu`) | Constructor skipped because param is unbridgeable | Use the builder pattern or wrap in a Rust function |
 | **`impl Trait` params** | `fn new(text: impl ToString, ...)` | Not monomorphisable in argument position for free functions | Call from Rust side |
