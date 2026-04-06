@@ -589,7 +589,7 @@ Full Compose Desktop app with tray icon control, color picker, context menu, and
 | `Option<T>` return | `T?` | Sentinel-based null encoding |
 | `Vec<T>` / `&[T]` return | `List<T>` / `ByteArray` | Buffer pattern; supports `i32`, `i64`, `f64`, `f32`, `bool`, `String` element types |
 | `&[u8]` / `&[i32]` params | `ByteArray` / `List<Int>` | Pointer + length expansion |
-| `HashMap<K,V>` | `Map<K,V>` | Parallel arrays |
+| `HashMap<K,V>` | `Map<K,V>` | Parallel arrays; nested collections supported (e.g. `Vec<i32>` values) |
 | Error propagation | `KotlinNativeException` | `catch_unwind` + thread-local error |
 | `(A, B)` / `(A, B, C)` tuples | `KneTupleN_<TypeId>` data class | Arity 0–16; nested tuples supported (e.g. `(i32, (String, bool))`) |
 | Tuple as param | Expanded to individual parameters | `fn sum(coords: (i32, i32))` → `fun sum(coords: KneTuple2_TII)` |
