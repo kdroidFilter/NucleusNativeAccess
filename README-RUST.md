@@ -91,6 +91,204 @@ fun main() {
 ./gradlew run        # if using Compose Desktop
 ```
 
+## Real-world examples
+
+Three real crates imported directly from crates.io — no Rust modifications, no wrapper crate, just `rustImport { crate(...) }` in `build.gradle.kts`. Source: [`examples/`](examples/).
+
+### System information — `sysinfo 0.38`
+
+```kotlin
+// build.gradle.kts
+rustImport {
+    libraryName = "rustsysinfo"
+    jvmPackage = "com.example.rustsysinfo"
+    crate("sysinfo", "0.38.4")
+}
+```
+
+The plugin maps `System`, `Disks`, `Networks`, `Components`, `Users`, `Groups`, and `Process` directly from the sysinfo API. Usage from Kotlin:
+
+```kotlin
+// One-time static info (OS name, kernel, hostname, architecture…)
+val info = SystemInfo(
+    name = System.name() ?: "Unknown",
+    osVersion = System.os_version() ?: "Unknown",
+    kernelVersion = System.kernel_version() ?: "Unknown",
+    hostname = System.host_name() ?: "Unknown",
+    cpuArch = System.cpu_arch(),
+    uptime = System.uptime(),
+    physicalCores = System.physical_core_count(),
+)
+
+// Live polling loop — refresh every 2 seconds
+val sys = System.new_all()
+sys.refresh_all()
+
+val cpus = sys.cpus().map { cpu ->
+    CpuInfo(name = cpu.name(), usage = cpu.cpu_usage(), frequency = cpu.frequency())
+}
+val memory = MemoryInfo(
+    totalMemory = sys.total_memory(),
+    usedMemory = sys.used_memory(),
+    availableMemory = sys.available_memory(),
+    totalSwap = sys.total_swap(),
+    usedSwap = sys.used_swap(),
+)
+
+// Processes — sorted by CPU usage
+val processes = sys.processes().values
+    .sortedByDescending { it.cpu_usage() }
+    .take(30)
+    .map { proc ->
+        ProcessInfo(
+            pid = proc.pid().as_u32().toLong(),
+            name = proc.name(),
+            cpuUsage = proc.cpu_usage(),
+            memory = proc.memory(),
+            status = proc.status().tag.name,
+        )
+    }
+
+// Disks, networks, sensors, users — same pattern
+val diskList = Disks.new_with_refreshed_list()
+val disks = diskList.list().map { disk ->
+    DiskInfo(
+        name = disk.name(),
+        mountPoint = disk.mount_point(),
+        totalSpace = disk.total_space(),
+        availableSpace = disk.available_space(),
+        fileSystem = disk.file_system(),
+    )
+}
+diskList.close()
+
+sys.close()
+```
+
+The full Compose Desktop app with 9 tabs (System, CPU, Memory, Disks, Network, Processes, Sensors, Users, Groups) is in [`examples/rust-sysinfo/`](examples/rust-sysinfo/).
+
+```bash
+./gradlew :examples:rust-sysinfo:run
+```
+
+---
+
+### Native file dialogs — `rfd 0.17`
+
+[rfd](https://crates.io/crates/rfd) (Rusty File Dialogs) opens native OS file pickers and message dialogs on Linux (GTK), macOS, and Windows — no Java AWT, no Swing.
+
+```kotlin
+// build.gradle.kts
+rustImport {
+    libraryName = "rustrfd"
+    jvmPackage = "com.example.rustrfd"
+    crate("rfd", "0.17.2")
+}
+```
+
+The plugin maps `FileDialog`, `AsyncFileDialog`, `MessageDialog`, `FileHandle`, `MessageLevel`, `MessageButtons`, and `MessageDialogResult`. All dialog methods are `async fn` on the Rust side, so they are automatically mapped to `suspend fun` — no dispatcher wiring needed:
+
+```kotlin
+// Pick a single file — suspend fun, runs off the main thread automatically
+val path: String? = FileDialog()
+    .set_title("Select an image")
+    .add_filter("Images", listOf("png", "jpg", "jpeg", "gif"))
+    .set_directory("/home/user/pictures")
+    .pick_file()
+
+// Pick multiple files
+val paths: List<String>? = FileDialog()
+    .set_title("Select files")
+    .add_filter("Kotlin", listOf("kt", "kts"))
+    .pick_files()
+
+// Pick a folder
+val folder: String? = FileDialog()
+    .set_title("Select a folder")
+    .pick_folder()
+
+// Save dialog
+val savePath: String? = FileDialog()
+    .set_title("Save as")
+    .set_file_name("output.txt")
+    .add_filter("Text", listOf("txt"))
+    .save_file()
+
+// Native message dialog with result
+val result = MessageDialog()
+    .set_title("Confirm")
+    .set_description("Delete this file?")
+    .set_level(MessageLevel.Warning)
+    .set_buttons(MessageButtons.OkCancel)
+    .show()
+
+when (result.tag.name) {
+    "Ok" -> println("Confirmed")
+    "Cancel" -> println("Cancelled")
+}
+```
+
+The full Compose Desktop app with file picker, folder picker, save dialog, and message dialog tabs is in [`examples/rust-rfd/`](examples/rust-rfd/).
+
+```bash
+./gradlew :examples:rust-rfd:run
+```
+
+---
+
+### Webcam capture — `nokhwa 0.10`
+
+[nokhwa](https://crates.io/crates/nokhwa) provides cross-platform webcam access (V4L2 on Linux, AVFoundation on macOS, DirectShow on Windows).
+
+```kotlin
+// build.gradle.kts
+rustImport {
+    libraryName = "rustcamera"
+    jvmPackage = "com.example.rustcamera"
+    crate("nokhwa", "0.10", features = listOf("input-native"))
+}
+```
+
+The plugin maps `Camera`, `CameraInfo`, `CameraIndex`, `CameraFormat`, `Resolution`, `RequestedFormat`, `ApiBackend`, and the format enums (`RgbFormat`, `YuyvFormat`, `LumaFormat`…). Usage:
+
+```kotlin
+// List available cameras
+val cameras: List<CameraInfo> = Rustcamera.query_devices(ApiBackend.Auto)
+
+// Open first camera at default format
+val index = CameraIndex.new_idx(0)
+val format = RequestedFormat.new_with(RequestedFormatType.AbsoluteHighestResolution)
+val camera = Camera.new(index, format)
+camera.open_stream()
+
+// Capture a frame as raw RGB bytes → decode to BufferedImage
+val buffer: ByteArray = camera.frame_raw()
+val width = camera.resolution().width_x()
+val height = camera.resolution().height_y()
+val image = BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR).also {
+    it.raster.setDataElements(0, 0, width, height, buffer)
+}
+
+// Inspect format info
+val currentFormat = camera.camera_format()
+println("${currentFormat.width_x()}x${currentFormat.height_y()} @ ${currentFormat.frame_rate()} fps")
+println("Format: ${currentFormat.format().tag.name}")
+
+// Compatible formats
+val formats: List<CameraFormat> = camera.compatible_camera_formats()
+
+camera.stop_stream()
+camera.close()
+```
+
+The full Compose Desktop app with live preview, format selection, and camera controls is in [`examples/rust-camera/`](examples/rust-camera/).
+
+```bash
+./gradlew :examples:rust-camera:run
+```
+
+---
+
 ## What's supported
 
 | Rust construct | Mapped to | Notes |
