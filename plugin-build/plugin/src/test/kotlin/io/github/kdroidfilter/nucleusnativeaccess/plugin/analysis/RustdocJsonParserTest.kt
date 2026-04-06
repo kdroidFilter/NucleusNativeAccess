@@ -468,6 +468,91 @@ class RustdocJsonParserTest {
     }
 
     @Test
+    fun `impl Trait return resolved as INTERFACE for known crate trait`() {
+        // Fixture: a crate with a trait "Describable" and a function "get_describable() -> impl Describable"
+        val json = """
+            {
+              "root": 0,
+              "index": {
+                "0": {
+                  "id": 0,
+                  "crate_id": 0,
+                  "name": "mylib",
+                  "visibility": "public",
+                  "inner": {
+                    "module": {
+                      "items": [1, 2],
+                      "is_crate": true,
+                      "is_stripped": false
+                    }
+                  }
+                },
+                "1": {
+                  "id": 1,
+                  "crate_id": 0,
+                  "name": "Describable",
+                  "visibility": "public",
+                  "inner": {
+                    "trait": {
+                      "items": [],
+                      "generics": { "params": [], "where_predicates": [] },
+                      "bounds": [],
+                      "is_auto": false,
+                      "is_unsafe": false
+                    }
+                  }
+                },
+                "2": {
+                  "id": 2,
+                  "crate_id": 0,
+                  "name": "get_describable",
+                  "visibility": "public",
+                  "span": { "filename": "src/lib.rs" },
+                  "inner": {
+                    "function": {
+                      "sig": {
+                        "inputs": [],
+                        "output": {
+                          "impl_trait": [
+                            {
+                              "trait_bound": {
+                                "trait": {
+                                  "id": 1,
+                                  "path": "mylib::Describable",
+                                  "args": { "angle_bracketed": { "args": [], "bindings": [] } }
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        "is_c_variadic": false
+                      },
+                      "generics": { "params": [], "where_predicates": [] }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val parsed = RustdocJsonParser().parse(json, "mylib")
+
+        // The function should be bridged (not skipped)
+        assertEquals(1, parsed.functions.size)
+        val fn = parsed.functions[0]
+        assertEquals("get_describable", fn.name)
+        assertTrue("Return type should be INTERFACE", fn.returnType is KneType.INTERFACE)
+        assertEquals("Describable", (fn.returnType as KneType.INTERFACE).simpleName)
+        assertEquals("impl dyn Describable", fn.returnRustType)
+
+        // A DynDescribable wrapper class should be generated
+        assertTrue(
+            "DynDescribable wrapper class should be generated",
+            parsed.classes.any { it.simpleName == "DynDescribable" && it.isDynTrait },
+        )
+    }
+
+    @Test
     fun `reports unsupported signatures through callback`() {
         val json = """
             {

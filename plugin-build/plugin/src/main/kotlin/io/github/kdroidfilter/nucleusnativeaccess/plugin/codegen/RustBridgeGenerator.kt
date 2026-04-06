@@ -871,8 +871,9 @@ class RustBridgeGenerator {
         }
 
         // If return type is dyn Trait (Box<dyn Trait>, Option<...>, Result<...>), handle via registry
+        // Exclude "impl dyn" — these are impl Trait returns handled via standard boxing path
         val retRt = fn.returnRustType ?: ""
-        if (retRt.contains("dyn ")) {
+        if (retRt.contains("dyn ") && !retRt.startsWith("impl dyn ")) {
             return true  // Handle via registry
         }
 
@@ -1045,6 +1046,11 @@ class RustBridgeGenerator {
                 }
             }
             is KneType.INTERFACE -> {
+                // impl Trait returns: box the concrete value into Box<dyn Trait> first
+                if (returnRustType?.startsWith("impl dyn ") == true) {
+                    val traitName = returnRustType.removePrefix("impl dyn ")
+                    appendLine("${indent}let $binding: Box<dyn $traitName> = Box::new($binding);")
+                }
                 if (returnsBorrowed) {
                     appendLine("${indent}$binding as *const _ as i64")
                 } else {

@@ -27,6 +27,7 @@ Status of the `rustImport { crate(...) }` feature that auto-generates Kotlin bin
 | Enums (with data) | `sealed class` | Supported |
 | Traits (as interfaces) | `interface` | Supported |
 | `dyn Trait` returns | `DynXxx` wrapper class | Supported |
+| `impl Trait` returns | `DynXxx` wrapper class | Supported (known crate traits) |
 | `Box<dyn Trait>` params | Supported | Registry-based handle passing |
 | Generics (`Struct<T>`) | Monomorphized variants | Supported |
 | `async fn` | `suspend fun` | Supported |
@@ -96,7 +97,7 @@ Status of the `rustImport { crate(...) }` feature that auto-generates Kotlin bin
 
 ### Not Yet Bridgeable
 
-1. **Top-level functions** — Free functions like `fn default_host()` or `fn get_probe()` are only bridged when they have supported param/return types. Functions returning `impl Trait` are skipped.
+1. **Top-level functions** — Free functions like `fn default_host()` or `fn get_probe()` are bridged when they have supported param/return types. Functions returning `impl Trait` (where Trait is a known crate trait) are bridged as `DynXxx` wrapper objects. Functions returning `impl Trait` for unknown/external traits are skipped.
 
 3. **Generic types without concrete instantiation** — If a generic struct `Foo<T>` has no trait impl that binds `T` to a concrete type, it stays unresolved and is skipped.
 

@@ -1092,6 +1092,71 @@ class RustBridgeGeneratorTest {
         assertTrue("Should write len", c.contains("v.len() as i32"))
     }
 
+    // --- impl Trait return ---
+
+    @Test
+    fun `generates boxing for impl Trait return in top-level function`() {
+        val moduleWithImplTrait = simpleModule.copy(
+            interfaces = listOf(
+                KneInterface(
+                    simpleName = "Describable",
+                    fqName = "calculator.Describable",
+                    methods = emptyList(),
+                    properties = emptyList(),
+                )
+            ),
+            classes = simpleModule.classes + KneClass(
+                simpleName = "DynDescribable",
+                fqName = "calculator.DynDescribable",
+                constructor = KneConstructor(emptyList(), KneConstructorKind.NONE),
+                methods = emptyList(),
+                properties = emptyList(),
+                interfaces = listOf("calculator.Describable"),
+                isDynTrait = true,
+                rustTypeName = "Box<dyn Describable>",
+            ),
+            functions = simpleModule.functions + KneFunction(
+                name = "get_describable",
+                params = emptyList(),
+                returnType = KneType.INTERFACE("calculator.Describable", "Describable"),
+                returnRustType = "impl dyn Describable",
+            ),
+        )
+        val implCode = RustBridgeGenerator().generate(moduleWithImplTrait)
+        // Should generate bridge function
+        assertTrue("Should have bridge fn", implCode.contains("fn calculator_get_describable"))
+        // Should box the result into Box<dyn Trait>
+        assertTrue("Should box into dyn Trait", implCode.contains("Box<dyn Describable>"))
+        assertTrue("Should box result", implCode.contains("Box::new(result)"))
+        // Should double-box for handle
+        assertTrue("Should produce handle", implCode.contains("Box::into_raw"))
+    }
+
+    @Test
+    fun `generates boxing for impl Trait return in struct method`() {
+        val moduleWithImplTrait = simpleModule.copy(
+            interfaces = listOf(
+                KneInterface(
+                    simpleName = "Describable",
+                    fqName = "calculator.Describable",
+                    methods = emptyList(),
+                    properties = emptyList(),
+                )
+            ),
+            classes = listOf(simpleModule.classes.first().copy(
+                methods = simpleModule.classes.first().methods + KneFunction(
+                    name = "describe",
+                    params = emptyList(),
+                    returnType = KneType.INTERFACE("calculator.Describable", "Describable"),
+                    returnRustType = "impl dyn Describable",
+                )
+            )),
+        )
+        val implCode = RustBridgeGenerator().generate(moduleWithImplTrait)
+        assertTrue("Should have method bridge", implCode.contains("fn calculator_Calculator_describe"))
+        assertTrue("Should box into dyn Trait", implCode.contains("Box<dyn Describable>"))
+    }
+
     private fun assertContains(substring: String) {
         assertTrue(
             "Generated code should contain '$substring'.\nGenerated code:\n${code.take(3000)}",

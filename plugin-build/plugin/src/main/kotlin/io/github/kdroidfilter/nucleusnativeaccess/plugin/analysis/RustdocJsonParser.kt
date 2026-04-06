@@ -1696,6 +1696,24 @@ class RustdocJsonParser {
                     return ResolvedType(innerType.type, rustType = innerType.rustType, implTraitConversion = ".into()")
                 }
             }
+
+            // Check for known crate-local traits: impl Trait → bridge as Box<dyn Trait>
+            val traitId = traitObj.get("id")?.takeIf { !it.isJsonNull }?.asInt
+            val knownTraitName = if (traitId != null && currentKnownTraits.containsKey(traitId)) {
+                currentKnownTraits[traitId]!!
+            } else if (currentKnownTraits.values.contains(traitName)) {
+                traitName
+            } else {
+                null
+            }
+            if (knownTraitName != null) {
+                dynTraitNames.add(knownTraitName)
+                val fqName = "$currentCrateName.$knownTraitName"
+                return ResolvedType(
+                    KneType.INTERFACE(fqName, knownTraitName),
+                    rustType = "impl dyn $knownTraitName",
+                )
+            }
         }
         return null
     }
