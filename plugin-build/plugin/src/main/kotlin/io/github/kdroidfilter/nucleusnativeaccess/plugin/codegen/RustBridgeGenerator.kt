@@ -415,6 +415,14 @@ class RustBridgeGenerator {
         if (rustTypeName.contains("'")) {
             return
         }
+        // 1b. Transitive dependency types (e.g. bytes::bytes::Bytes) — external crate path
+        //     with no bridgeable methods or constructor. Only a dispose would be generated,
+        //     but the type path may not resolve in the wrapper scope.
+        if (requiresInferredObjectCast(rustTypeName) &&
+            cls.methods.isEmpty() && cls.properties.isEmpty() &&
+            cls.constructor.kind == KneConstructorKind.NONE) {
+            return
+        }
         // 2. Generic templates that have monomorphised variants — the template itself
         //    can't be bridged (e.g. Processor with template, vs Processor<Doubler>)
         if (cls.genericParams.isNotEmpty() && !rustTypeName.contains("<")) {
@@ -460,7 +468,6 @@ class RustBridgeGenerator {
         appendLine("#[no_mangle]")
         appendLine("pub extern \"C\" fn ${baseSym}_dispose(handle: i64) {")
         appendLine("    if handle != 0 {")
-        // Use the full qualified path — avoids needing `use` imports for external types
         appendLine("        unsafe { drop(Box::from_raw(handle as *mut $rustTypeName)); }")
         appendLine("    }")
         appendLine("}")
