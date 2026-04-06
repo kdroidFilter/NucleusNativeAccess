@@ -1581,13 +1581,17 @@ class RustdocJsonParser {
             val sig = fp.getAsJsonObject("sig")
             val inputs = sig.getAsJsonArray("inputs")
             val paramTypes = mutableListOf<KneType>()
+            val paramRustTypes = mutableListOf<String>()
             for (input in inputs) {
                 val arr = input.asJsonArray
                 val paramType = resolveTypeWithBorrow(arr[1], knownStructs, knownEnums, knownDataClasses, genericTypes, selfType) ?: return null
                 paramTypes.add(paramType.type)
+                paramRustTypes.add(paramType.rustType ?: renderRustType(paramType.type))
             }
             val output = resolveTypeWithBorrow(sig.get("output"), knownStructs, knownEnums, knownDataClasses, genericTypes, selfType)
-            return ResolvedType(KneType.FUNCTION(paramTypes, output?.type ?: KneType.UNIT), rustType = "fn")
+            val outputRustType = output?.rustType ?: renderRustType(output?.type ?: KneType.UNIT)
+            val fullRustType = "fn(${paramRustTypes.joinToString(", ")}) -> $outputRustType"
+            return ResolvedType(KneType.FUNCTION(paramTypes, output?.type ?: KneType.UNIT), rustType = fullRustType)
         }
 
         if (obj.has("dyn_trait")) {

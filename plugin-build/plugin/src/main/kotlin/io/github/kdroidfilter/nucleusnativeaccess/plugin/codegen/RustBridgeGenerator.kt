@@ -47,6 +47,12 @@ class RustBridgeGenerator {
     private var ambiguousTypeNames: Set<String> = emptySet()
     /** Maps fqName -> Rust path for all types, used to resolve ambiguous names. */
     private var fqNameToRustPath: Map<String, String> = emptyMap()
+    /** Maps simpleName -> full Rust type (with generics) for generic classes used in callbacks. */
+    private var objectRustTypeNames: Map<String, String> = emptyMap()
+    /** Maps enum simpleName -> list of entry names, for ZST enum construction. */
+    private var enumEntryNames: Map<String, List<String>> = emptyMap()
+    /** Base Rust type names of monomorphised generic classes (e.g. "AudioPlanesMut" from "AudioPlanesMut<u24>"). */
+    private var monomorphisedBaseNames: Set<String> = emptySet()
 
     private fun isKnownType(type: KneType): Boolean = when (type) {
         is KneType.OBJECT -> type.simpleName in knownTypeNames
@@ -94,6 +100,9 @@ class RustBridgeGenerator {
                 !isCAbiFriendlyType(fnType.returnType)) {
                 return true
             }
+            // Callback with OBJECT params that are generic templates (e.g. AudioPlanesMut without <u24>)
+            // — the bridge can't know which concrete monomorphization to use
+            if (fnType.paramTypes.any { it is KneType.OBJECT && it.simpleName in monomorphisedBaseNames }) return true
         }
         // fn(...) in rustType with complex arg types
         if (rt.startsWith("fn(") && (rt.contains("&[") || rt.contains("&mut ") || rt.contains("dyn "))) return true
@@ -210,7 +219,7 @@ class RustBridgeGenerator {
         // These templates (e.g. Processor with rustTypeName="Processor") are not directly
         // bridgeable — only their monomorphisations (Processor_Doubler) are.
         // Also detect structs that require type params but weren't monomorphised.
-        val monomorphisedBaseNames = module.classes
+        monomorphisedBaseNames = module.classes
             .filter { it.rustTypeName.contains("<") }
             .map { it.rustTypeName.substringBefore('<') }
             .toSet()
@@ -221,6 +230,13 @@ class RustBridgeGenerator {
             }
             .map { it.simpleName }
             .toSet()
+
+        // Map from simpleName to full Rust type name (with generics) for callback type resolution
+        objectRustTypeNames = module.classes
+            .filter { it.rustTypeName.contains("<") }
+            .associate { it.simpleName to it.rustTypeName }
+        // Map from enum simpleName to its entry names for ZST enum handling
+        enumEntryNames = module.enums.associate { it.simpleName to it.entries }
 
         val sb = StringBuilder()
         val prefix = module.libName
@@ -2266,22 +2282,37 @@ class RustBridgeGenerator {
                 // multiple crates export the same enum name (e.g. cpal::SampleFormat
                 // vs symphonia_core::SampleFormat)
                 val enumName = unwrapRustWrapperType(p.rustType) ?: (p.type as KneType.ENUM).simpleName
-                appendLine("${indent}let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
+                val simpleName = (p.type as KneType.ENUM).simpleName
+                val entries = enumEntryNames[simpleName]
+                if (entries != null && entries.size == 1) {
+                    // Single-variant enum (possibly ZST) — construct directly to avoid transmute size mismatch
+                    appendLine("${indent}let ${p.name}_conv = $enumName::${entries[0]};")
+                } else {
+                    appendLine("${indent}let ${p.name}_conv: $enumName = unsafe { std::mem::transmute(${p.name} as u8) };")
+                }
             }
             is KneType.OBJECT -> {
                 appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
             }
             is KneType.INTERFACE -> {
-                // Reconstruct &dyn Trait / &mut dyn Trait from registry via transmute
                 val traitName = (p.type as KneType.INTERFACE).simpleName
                 val rt = p.rustType ?: ""
-                val isMut = rt.contains("&mut ")
-                val mutKw = if (isMut) "mut " else ""
-                val refKw = if (isMut) "&mut " else "&"
-                appendLine("${indent}let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
-                appendLine("${indent}    *reg.borrow().get(&(${p.name} as u64)).expect(\"Invalid trait handle\")")
-                appendLine("${indent}});")
-                appendLine("${indent}let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
+                if (rt.startsWith("Box<dyn ")) {
+                    // Box<dyn Trait>: ownership transfer — remove from registry and transmute to Box
+                    appendLine("${indent}let ${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                    appendLine("${indent}    reg.borrow_mut().remove(&(${p.name} as u64)).expect(\"Invalid trait handle\")")
+                    appendLine("${indent}});")
+                    appendLine("${indent}let ${p.name}_owned: Box<dyn $traitName> = unsafe { std::mem::transmute(${p.name}_words) };")
+                } else {
+                    // &dyn Trait / &mut dyn Trait: borrow from registry
+                    val isMut = rt.contains("&mut ")
+                    val mutKw = if (isMut) "mut " else ""
+                    val refKw = if (isMut) "&mut " else "&"
+                    appendLine("${indent}let ${mutKw}${p.name}_words = KNE_TRAIT_REGISTRY.with(|reg| {")
+                    appendLine("${indent}    *reg.borrow().get(&(${p.name} as u64)).expect(\"Invalid trait handle\")")
+                    appendLine("${indent}});")
+                    appendLine("${indent}let ${p.name}_ref: ${refKw}dyn $traitName = unsafe { std::mem::transmute(${p.name}_words) };")
+                }
             }
             is KneType.SEALED_ENUM -> {
                 appendObjectHandleConversion(p.name, rustHandleTypeName(p.type, p.rustType), p.isBorrowed, indent, p.rustType)
@@ -2662,7 +2693,7 @@ class RustBridgeGenerator {
 
     /** Native Rust type for callback closure parameters. */
     private fun callbackNativeParamType(type: KneType): String = when (type) {
-        is KneType.OBJECT -> type.simpleName
+        is KneType.OBJECT -> objectRustTypeNames[type.simpleName] ?: type.simpleName
         is KneType.SEALED_ENUM -> type.simpleName
         is KneType.INTERFACE -> "Box<dyn ${type.simpleName}>"
         else -> rustNativeType(type)
@@ -2670,7 +2701,7 @@ class RustBridgeGenerator {
 
     /** Native Rust type for callback closure return values. */
     private fun callbackNativeReturnType(type: KneType): String = when (type) {
-        is KneType.OBJECT -> type.simpleName
+        is KneType.OBJECT -> objectRustTypeNames[type.simpleName] ?: type.simpleName
         is KneType.SEALED_ENUM -> type.simpleName
         is KneType.INTERFACE -> "Box<dyn ${type.simpleName}>"
         else -> rustNativeType(type)
@@ -2705,7 +2736,8 @@ class RustBridgeGenerator {
     private fun StringBuilder.appendCallbackParamCleanup(index: Int, type: KneType, indent: String) {
         when (type) {
             is KneType.OBJECT -> {
-                appendLine("${indent}unsafe { let _ = Box::from_raw(_h$index as *mut ${type.simpleName}); }")
+                val rustName = objectRustTypeNames[type.simpleName] ?: type.simpleName
+                appendLine("${indent}unsafe { let _ = Box::from_raw(_h$index as *mut $rustName); }")
             }
             is KneType.SEALED_ENUM -> {
                 appendLine("${indent}unsafe { let _ = Box::from_raw(_h$index as *mut ${type.simpleName}); }")
@@ -2782,7 +2814,7 @@ class RustBridgeGenerator {
         KneType.BOOLEAN -> "${p.name}_conv"
         is KneType.FUNCTION -> "${p.name}_fn"
         is KneType.ENUM -> if (p.isBorrowed) "&${p.name}_conv" else "${p.name}_conv"
-        is KneType.INTERFACE -> "${p.name}_ref"
+        is KneType.INTERFACE -> if (p.rustType?.startsWith("Box<dyn ") == true) "${p.name}_owned" else "${p.name}_ref"
         is KneType.OBJECT, is KneType.SEALED_ENUM ->
             if (p.isBorrowed) "${p.name}_borrowed" else "${p.name}_owned"
         is KneType.DATA_CLASS -> if (p.isBorrowed) "&${p.name}_dc" else "${p.name}_dc"
