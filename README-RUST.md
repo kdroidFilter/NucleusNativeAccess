@@ -500,14 +500,14 @@ Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codege
 
 | Problem | Root cause | Impact |
 |---------|-----------|--------|
-| `Icon::from_rgba` not bridged | `Icon` has private fields &rarr; classified as opaque &rarr; no methods generated | Cannot create icons from Kotlin |
 | `MenuItem::new` not bridged | Constructor takes `impl ToString` + `Option<Accelerator>` &rarr; unsupported param types | Cannot create menu items from Kotlin |
-| `TrayIconBuilder.with_icon()` not bridged | Takes `Icon` (opaque type) &rarr; bridge generated but `Icon` has no constructor | Can pass opaque handles but cannot create `Icon` from Kotlin |
 | `TrayIconBuilder.with_menu()` not bridged | Takes `Box<dyn ContextMenu>` &rarr; `hasUnbridgeableParam` filters it | Cannot set menu via builder |
 | macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | `KotlinNativeException: not on the main thread` |
 
+> **Opaque types are now supported.** `Icon` is bridged as an opaque handle &mdash; create it via a Rust wrapper function (`make_icon`), pass it to methods like `create_tray_with_icon` or `update_icon`. See the example below.
+
 The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
-1. Exposes a flat API of top-level functions (no trait objects, no opaque types in params)
+1. Exposes a flat API of top-level functions + **opaque `Icon` handles** for type-safe icon management
 2. Manages the `TrayIcon` lifecycle internally via `thread_local!`
 3. Dispatches all calls to the macOS main thread via `dispatch_sync_f`
 4. Uses `Option<impl Fn(String)>` callbacks for events (`on_tray_event` / `on_menu_event`)
