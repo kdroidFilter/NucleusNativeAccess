@@ -496,15 +496,13 @@ This example demonstrates the **limits of direct crate import** and the **local 
 
 #### Why a local wrapper?
 
-Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but hits bridge limitations at runtime:
+Importing `tray-icon` directly via `crate("tray-icon", "0.19")` works for codegen but the macOS main thread requirement cannot be solved at the bridge level:
 
 | Problem | Root cause | Status |
 |---------|-----------|--------|
-| `MenuItem::new` takes `impl ToString` | `impl Trait` params | **Now bridged** &mdash; resolved to concrete types (e.g., `String`) |
-| `TrayIconBuilder.with_menu()` takes `Box<dyn ContextMenu>` | External trait object | **Now bridged** &mdash; monomorphized to concrete implementor |
 | macOS main thread requirement | `tray-icon` checks `NSThread.isMainThread` | Requires wrapper (`dispatch_sync_f`) |
 
-All limitations are resolved by the wrapper crate. `Icon` and `MenuItem` are bridged as opaque handles &mdash; create them via Rust wrapper functions (`make_icon`, `create_menu_item`), pass them to methods like `create_tray_with_icon`, `add_menu_item`, `set_menu_item_text`, etc.
+> `impl Trait` params and `Box<dyn Trait>` params are now bridged natively (see [What's supported](#whats-supported)). The wrapper is only needed for the platform thread constraint.
 
 The solution: a **local Rust wrapper crate** (`examples/rust-tray-icon/rust/`) that:
 1. Exposes a flat API of top-level functions + **opaque `Icon` and `MenuItem` handles** for type-safe management
